@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" id="metaThemeColor" content="#FAFAF9">
+  <meta name="desktop-token" content="__DESKTOP_TOKEN__">
+  <title>MacroCockpit Pro · 桌面专业研判台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2316140F'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='20' font-family='serif' fill='%23FAFAF9'%3EM%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="shell mast-row">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <div class="brand-copy">
+          <strong class="brand-title">MacroCockpit Pro</strong>
+          <span class="brand-sub">本地多智能体深研 · OpenBB · AGY 协同台</span>
+        </div>
+      </div>
+
+      <div class="status-badges">
+        <button type="button" class="status-pill" id="obbStatusBadge" data-jump-dtab="openbb" title="查看 OpenBB 数据与组件桥">
+          <span class="dot" aria-hidden="true"></span>
+          <span>OpenBB 检测中</span>
+        </button>
+        <button type="button" class="status-pill" id="agyStatusBadge" data-jump-dtab="agy" title="打开 AGY 协同台">
+          <span class="dot" aria-hidden="true"></span>
+          <span>AGY 检测中</span>
+        </button>
+      </div>
+
+      <div class="mast-actions">
+        <button type="button" class="btn btn-sm" id="themeToggleBtn" aria-label="切换浅色或深色模式">深色</button>
+        <a class="btn btn-sm btn-accent" id="backToWebBtn" href="http://127.0.0.1:8788/" target="_blank" rel="noopener noreferrer">返回网页驾驶舱 ↗</a>
+      </div>
+    </div>
+
+    <nav class="shell view-nav" id="desktopNav" aria-label="桌面专业功能区">
+      <button type="button" class="view-tab is-active" data-dtab="debate" aria-current="page">多智能体深研</button>
+      <button type="button" class="view-tab" data-dtab="openbb">OpenBB 数据与组件桥</button>
+      <button type="button" class="view-tab" data-dtab="agy">AGY 协同台</button>
+      <button type="button" class="view-tab" data-dtab="sync">云端同步</button>
+    </nav>
+  </header>
+
+  <main class="shell pro-main">
+    <!-- 1. 多智能体深研 -->
+    <section class="dview" id="dview-debate" data-dview="debate">
+      <section class="panel control-panel">
+        <div class="panel-head">
+          <div>
+            <div class="sec-eyebrow">MULTI-AGENT RESEARCH DESK</div>
+            <h1 class="sec-title">多智能体个股与资产深研</h1>
+          </div>
+          <span class="panel-meta">仅基于本地事实、行情与脱敏持仓占比</span>
+        </div>
+
+        <div class="debate-controls">
+          <div class="input-group">
+            <label class="field-lbl" for="debateSymbolInput">标的代码</label>
+            <input id="debateSymbolInput" type="text" maxlength="24" value="NVDA" placeholder="如 AAPL、NVDA、BTC、600519、00700" autocomplete="off">
+          </div>
+
+          <div class="input-group">
+            <span class="field-lbl">推演模式</span>
+            <div class="seg" id="debateModeSeg" role="group" aria-label="推演模式">
+              <button type="button" class="seg-btn is-active" data-dmode="fast" aria-pressed="true">极速量化推演 (fast)</button>
+              <button type="button" class="seg-btn" data-dmode="llm" aria-pressed="false">AGY 多智能体辩论 (llm)</button>
+            </div>
+          </div>
+
+          <label class="check-inline">
+            <input type="checkbox" id="debateSyncCheck">
+            <span>同步至云端网页</span>
+          </label>
+
+          <button type="button" class="btn btn-accent" id="runDebateBtn">运行多智能体深研</button>
+        </div>
+
+        <div class="chip-group quick-sym-bar" id="debateQuickSymbols" role="group" aria-label="快捷标的"></div>
+      </section>
+
+      <div class="debate-layout">
+        <section class="debate-stage" id="debateResultArea">
+          <div class="panel empty-panel">输入标的代码或点击快捷标的，运行后将在此展示三路分析师简报、多空对抗辩论与交易员风控裁决。</div>
+        </section>
+
+        <aside class="panel debate-history-panel">
+          <div class="panel-head" style="margin-bottom:10px">
+            <h2 class="sec-title" style="font-size:16px">历史深研记录</h2>
+            <button type="button" class="btn btn-sm btn-ghost" id="refreshDebatesBtn">刷新</button>
+          </div>
+          <div class="history-list" id="debateHistoryList"></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- 2. OpenBB 数据与组件桥 -->
+    <section class="dview" id="dview-openbb" data-dview="openbb" hidden>
+      <div class="two-col-grid">
+        <section class="panel">
+          <div class="sec-eyebrow">OPENBB PLATFORM PROBE</div>
+          <h2 class="sec-title">本机 OpenBB 状态与数据源</h2>
+          <div id="obbProbeSummary" class="probe-summary" style="margin-top:12px">正在探测本机 OpenBB 环境…</div>
+        </section>
+
+        <section class="panel" id="obbMountCard">
+          <div class="sec-eyebrow">OPENBB WORKSPACE BRIDGE</div>
+          <h2 class="sec-title">OpenBB Workspace 挂载地址</h2>
+          <div class="mount-box" style="margin-top:12px">
+            <code class="mono-url" id="obbMountUrl">http://127.0.0.1:18790</code>
+            <button type="button" class="btn btn-sm btn-accent" id="copyObbUrlBtn">一键复制地址</button>
+          </div>
+          <div class="mount-links">
+            <a class="btn-link" href="/widgets.json" target="_blank" rel="noopener noreferrer">查看 /widgets.json ↗</a>
+            <a class="btn-link" href="/apps.json" target="_blank" rel="noopener noreferrer">查看 /apps.json ↗</a>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="sec-eyebrow">DATA EXPLORER</div>
+        <h2 class="sec-title">OpenBB 数据集实时查询</h2>
+        <div class="obb-query-bar" id="obbQueryBar" style="margin-top:12px">
+          <select id="obbDatasetSelect" aria-label="数据集">
+            <option value="equity_quote">个股实时报价 (equity_quote)</option>
+            <option value="equity_fundamental">基本面指标 (equity_fundamental)</option>
+            <option value="macro_series">宏观指标序列 (macro_series)</option>
+            <option value="crypto_quote">加密行情 (crypto_quote)</option>
+          </select>
+          <input id="obbSymbolInput" type="text" maxlength="32" value="NVDA" placeholder="输入标的或序列代码，如 NVDA / BTC / DGS10" autocomplete="off">
+          <label class="check-inline">
+            <input type="checkbox" id="obbAllowSdkCheck">
+            <span>允许 SDK 懒加载</span>
+          </label>
+          <button type="button" class="btn btn-accent" id="obbRunQueryBtn">查询数据</button>
+        </div>
+        <div id="obbQueryResult" class="query-result-box" style="margin-top:14px"></div>
+      </section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-head" style="margin-bottom:12px">
+          <div>
+            <div class="sec-eyebrow">REGISTERED WIDGETS</div>
+            <h2 class="sec-title">已注册 OpenBB Workspace 组件</h2>
+          </div>
+          <button type="button" class="btn btn-sm" id="reloadWidgetsBtn">刷新清单</button>
+        </div>
+        <div class="widgets-grid" id="obbWidgetsGrid"></div>
+        <div id="obbWidgetPreview" class="query-result-box" hidden style="margin-top:14px"></div>
+      </section>
+    </section>
+
+    <!-- 3. AGY 协同台 (ACP / MCP) -->
+    <section class="dview" id="dview-agy" data-dview="agy" hidden>
+      <div class="two-col-grid">
+        <section class="panel">
+          <div class="sec-eyebrow">ACP & MCP STATUS</div>
+          <h2 class="sec-title">AGY 通道与桌面 MCP 状态</h2>
+          <div id="agyOverviewCard" class="probe-summary" style="margin-top:12px">正在读取通道状态…</div>
+        </section>
+
+        <section class="panel">
+          <div class="sec-eyebrow">MCP 12 TOOLS REGISTRATION</div>
+          <h2 class="sec-title">macrocockpit-desktop 接入指南</h2>
+          <p class="panel-meta" style="margin-top:8px">桌面专业模式通过本地 stdio 暴露 12 个正交工具（含 8 个基础风控投研工具 + 4 个桌面扩展工具），不向公网开放。</p>
+          <div class="mount-box" style="margin-top:10px">
+            <code class="mono-url" id="mcpCmdText">python -m backend.mcp_stdio --desktop-pro</code>
+            <button type="button" class="btn btn-sm" id="copyMcpCmdBtn">复制命令</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-head" style="margin-bottom:10px">
+          <div>
+            <div class="sec-eyebrow">DIRECT AGENT CONSOLE</div>
+            <h2 class="sec-title">直连本机 AGY 协同对话框</h2>
+          </div>
+          <div class="seg seg-sm" id="agyTransportSeg" role="group" aria-label="调用通道">
+            <button type="button" class="seg-btn is-active" data-transport="acp" aria-pressed="true">ACP 通道 (acp)</button>
+            <button type="button" class="seg-btn" data-transport="cli" aria-pressed="false">CLI 通道 (cli)</button>
+          </div>
+        </div>
+
+        <div class="chip-group" id="agyQuickPrompts" style="margin-bottom:10px">
+          <button type="button" class="chip" data-agy-prompt="结合当前 MacroCockpit 风险灯号与最新快讯，给出今天最需要关注的 3 个宏观或科技催化及对应纪律边界。">汇总今日重点催化</button>
+          <button type="button" class="chip" data-agy-prompt="对照当前策略仓位比例与 MA20 乖离状态，检查多头方向是否存在追高或敞口集中风险。">巡检仓位与追高纪律</button>
+          <button type="button" class="chip" data-agy-prompt="对比 NVDA 与 AAPL 当前估值、成长增速及站内情绪面，给出更稳健的配置优先级。">对比 NVDA 与 AAPL 优先级</button>
+        </div>
+
+        <textarea id="agyPromptInput" rows="4" placeholder="输入给本机 AGY 的研判指令（Ctrl+Enter 或点击发送）…"></textarea>
+        <div class="agy-ask-foot">
+          <span class="panel-meta" id="agyAskMeta">就绪</span>
+          <button type="button" class="btn btn-accent" id="agyAskBtn">发送到 AGY</button>
+        </div>
+        <div id="agyResponseBox" class="agy-response-box" hidden></div>
+      </section>
+    </section>
+
+    <!-- 4. 云端同步 -->
+    <section class="dview" id="dview-sync" data-dview="sync" hidden>
+      <section class="panel">
+        <div class="sec-eyebrow">SNAPSHOT COVERAGE</div>
+        <h2 class="sec-title">本地快照覆盖度与健康度</h2>
+        <div class="kpi-grid" id="syncKpiGrid" style="margin-top:14px"></div>
+      </section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="sec-eyebrow">CLOUD PUBLISH PIPELINE</div>
+        <h2 class="sec-title">一键重建快照并同步至云端网页</h2>
+        <p class="panel-meta" style="margin-top:8px">重建本地最新宏观、美股、A股·港股、AI、加密快讯与公共多智能体深研纪要，脱敏校验后同步推送至线上消费端（绝不外传私人账本金额）。</p>
+        <div class="sync-action-row" style="margin-top:14px">
+          <button type="button" class="btn btn-accent" id="runCloudSyncBtn">重建快照并同步至云端</button>
+          <span class="panel-meta" id="syncTargetLabel">目标站点：https://news.shuashuabao.xyz</span>
+        </div>
+        <div id="syncResultBox" class="query-result-box" hidden style="margin-top:14px"></div>
+      </section>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

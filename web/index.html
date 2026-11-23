@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#FAFAF9" id="metaThemeColor">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>宏观金融决策驾驶舱</title>
+  <script>
+    (function () {
+      var t = null;
+      try { t = window.localStorage.getItem("macro_cockpit_theme_v1"); } catch (e) { t = null; }
+      if (t !== "dark" && t !== "light") {
+        t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="masthead" id="masthead">
+    <div class="mast-row">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 64 64" width="30" height="30" aria-hidden="true">
+          <rect class="bm-plate" x="3" y="3" width="58" height="58" rx="13"/>
+          <path class="bm-rules" d="M15 20h18M15 27h18M15 34h12" stroke-width="3" stroke-linecap="round"/>
+          <path class="bm-line" d="M15 46 L27 39 L36 42 L49 27" fill="none" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle class="bm-dot" cx="49" cy="27" r="3.6"/>
+        </svg>
+        <div class="brand-text">
+          <h1>宏观决策情报站</h1>
+          <span class="brand-time num-plain" id="generatedAt">正在载入…</span>
+        </div>
+      </div>
+
+      <span class="status-pill" id="riskPill" data-light="" title="风险灯号">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span class="status-text" id="riskPillText">—</span>
+      </span>
+
+      <div class="mast-controls" id="toolbarControls">
+        <div class="capital-group" id="capitalGroup">
+          <label for="capitalInput" class="ctl-label">资金基数</label>
+          <span class="capital-field">
+            <span class="capital-prefix" aria-hidden="true">$</span>
+            <input id="capitalInput" type="number" min="0" step="1000" value="100000" inputmode="numeric" autocomplete="off" aria-label="资金基数（美元）">
+          </span>
+          <button id="applyCapitalBtn" type="button" class="btn btn-sm">应用</button>
+        </div>
+
+        <div class="seg seg-sm currency-seg" id="currencySeg" role="group" aria-label="显示币种">
+          <button type="button" class="seg-btn is-active" data-currency="USD" aria-pressed="true">$ USD</button>
+          <button type="button" class="seg-btn" data-currency="CNY" aria-pressed="false">¥ RMB</button>
+        </div>
+
+        <div class="utility-group">
+          <button id="toggleAmtBtn" type="button" class="btn btn-sm" aria-pressed="true">隐藏金额</button>
+          <button id="themeToggleBtn" type="button" class="btn btn-sm btn-icon-text" aria-pressed="false" title="切换浅色 / 深色">深色</button>
+          <button id="refreshBtn" type="button" class="btn btn-sm">刷新</button>
+          <button id="openPushBtn" type="button" class="btn btn-sm btn-accent">推送 · Muse</button>
+          <button id="logoutBtn" type="button" class="btn btn-sm btn-ghost" hidden>退出登录</button>
+        </div>
+      </div>
+    </div>
+
+    <nav class="view-nav" id="viewNav" aria-label="主视图">
+      <button type="button" class="view-tab is-active" data-view="today" aria-current="page">今日<span class="view-count num-plain" data-count-for="today"></span></button>
+      <button type="button" class="view-tab" data-view="portfolio">持仓<span class="view-count num-plain" data-count-for="portfolio"></span></button>
+      <button type="button" class="view-tab" data-view="research">研究<span class="view-count num-plain" data-count-for="research"></span></button>
+      <button type="button" class="view-tab" data-view="records">记录<span class="view-count num-plain" data-count-for="records"></span></button>
+    </nav>
+  </header>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <div id="undoBar" class="undo-bar" role="status" aria-live="polite" hidden>
+    <span id="undoText">已更新筛选规则</span>
+    <button type="button" class="btn btn-sm" id="undoBtn">撤销</button>
+    <button type="button" class="btn btn-sm btn-ghost" id="undoDismissBtn" aria-label="关闭撤销提示">✕</button>
+  </div>
+
+  <main class="desk" id="main">
+    <div class="focus-strip" id="mobileFocusBar" aria-label="核心指标速览"></div>
+
+    <!-- 1. 今日 -->
+    <section class="view" id="view-today" data-view="today" aria-label="今日">
+      <section class="today-overview-bar" id="todayOverviewBar" aria-label="资产与风险总览"></section>
+      <nav class="sector-ribbon" id="sectorRibbon" aria-label="市场板块导览">
+        <button type="button" class="ribbon-tab is-active" data-sector="all" aria-pressed="true">全部<span class="ribbon-count num-plain" data-scount="all"></span></button>
+        <button type="button" class="ribbon-tab" data-sector="equities" aria-pressed="false">美股<span class="ribbon-count num-plain" data-scount="equities"></span></button>
+        <button type="button" class="ribbon-tab" data-sector="ashare" aria-pressed="false">A股·港股<span class="ribbon-count num-plain" data-scount="ashare"></span></button>
+        <button type="button" class="ribbon-tab" data-sector="ai" aria-pressed="false">AI<span class="ribbon-count num-plain" data-scount="ai"></span></button>
+        <button type="button" class="ribbon-tab" data-sector="crypto" aria-pressed="false">加密<span class="ribbon-count num-plain" data-scount="crypto"></span></button>
+        <button type="button" class="ribbon-tab" data-sector="macro" aria-pressed="false">宏观<span class="ribbon-count num-plain" data-scount="macro"></span></button>
+      </nav>
+      <div class="glance-row" id="dailyGlance" aria-label="宏观速览"></div>
+
+      <section class="exec-strip" id="execStrip" aria-label="风险与辅助仓位">
+        <button type="button" class="exec-gate" id="execGate" data-jump="portfolio:strategy" title="查看策略对照"></button>
+        <div class="exec-positions" id="execPositions"></div>
+      </section>
+
+      <div class="daily-grid">
+        <section class="col-main" aria-labelledby="signalsHeading">
+          <div class="panel-head signals-head-bar" style="margin-bottom:10px">
+            <div class="signals-head-left">
+              <h2 class="sec-title" id="signalsHeading">核心快讯与持仓雷达</h2>
+              <div class="seg seg-sm" id="newsModeSwitch" role="group" aria-label="信息视图切换">
+                <button type="button" class="seg-btn is-active" data-nmode="ranked" aria-pressed="true">算法精选</button>
+                <button type="button" class="seg-btn" data-nmode="timeline" aria-pressed="false">实时时间线</button>
+              </div>
+            </div>
+            <span class="counter num-plain" id="dailyCounter"></span>
+          </div>
+
+          <div class="toolbar" id="dailyToolbar">
+            <div class="chip-group" id="signalScopeChips" role="group" aria-label="信号视角">
+              <button type="button" class="chip is-active" data-scope="all" aria-pressed="true">全部快讯</button>
+              <button type="button" class="chip" data-scope="held" aria-pressed="false">持仓相关</button>
+              <button type="button" class="chip" data-scope="watch" aria-pressed="false">自选</button>
+              <button type="button" class="chip" data-scope="rules" aria-pressed="false">筛选规则</button>
+            </div>
+            <div class="chip-group" id="polarityChips" role="group" aria-label="多空方向">
+              <button type="button" class="chip is-active" data-pol="all" aria-pressed="true">全部</button>
+              <button type="button" class="chip tone-bull" data-pol="bullish" aria-pressed="false">偏多</button>
+              <button type="button" class="chip tone-bear" data-pol="bearish" aria-pressed="false">偏空</button>
+              <button type="button" class="chip" data-pol="neutral" aria-pressed="false">中性</button>
+            </div>
+            <button type="button" class="chip chip-toggle" id="highOnlyBtn" aria-pressed="false">仅看高优</button>
+            <div class="search-box">
+              <input id="keywordInput" type="search" placeholder="标题、标的或来源，回车筛选" autocomplete="off" aria-label="关键词筛选">
+              <button type="button" class="btn btn-sm" id="keywordApplyBtn">筛选</button>
+            </div>
+          </div>
+
+          <div class="sector-drill-bar" id="sectorDrillBar" hidden>
+            <div class="subtopic-chips" id="subtopicChips" role="group" aria-label="板块子领域"></div>
+            <button type="button" class="btn btn-sm btn-ghost" id="backToOverviewBtn">← 全部</button>
+          </div>
+
+          <section class="panel rules-panel" id="curationRulesPanel" hidden aria-label="信号筛选规则管理">
+            <div class="panel-head" style="margin-bottom:10px">
+              <h3 class="subsec-title" style="margin:0">信号筛选规则</h3>
+              <button type="button" class="btn btn-sm btn-ghost" id="closeRulesPanelBtn">收起</button>
+            </div>
+            <form class="rule-quick-form" id="ruleQuickForm" novalidate>
+              <select id="ruleKindSelect" aria-label="规则维度">
+                <option value="instrument">标的</option>
+                <option value="keyword">关键词</option>
+                <option value="source">信源</option>
+              </select>
+              <select id="ruleActionSelect" aria-label="规则动作">
+                <option value="watch">重点关注</option>
+                <option value="block">直接屏蔽</option>
+                <option value="mute">降低权重</option>
+              </select>
+              <input id="ruleTargetInput" type="text" maxlength="60" placeholder="输入代码/关键词/信源名" autocomplete="off" aria-label="规则目标">
+              <button type="submit" class="btn btn-sm btn-accent" id="ruleAddBtn">添加规则</button>
+            </form>
+            <div class="rules-chip-list" id="curationRulesList"></div>
+          </section>
+
+          <ol class="signal-list" id="signalList"></ol>
+        </section>
+
+        <aside class="col-side" aria-labelledby="marketHeading">
+          <div class="side-block side-card-highlight" id="todayCalendarCard"></div>
+          <div class="side-block side-card-highlight" id="todayRiskCard"></div>
+
+          <h2 class="sec-title" id="marketHeading">美股盘面温度与48h雷达</h2>
+          <p class="eq-summary" id="eqSummary"></p>
+          <div class="side-block">
+            <div class="side-head"><h3>主要指数</h3><span class="side-meta num-plain" id="eqAsOf"></span></div>
+            <div class="tile-grid tile-grid-2" id="eqIndices"></div>
+          </div>
+          <div class="side-block">
+            <div class="side-head"><h3>七巨头与AI算力</h3></div>
+            <div class="tile-grid tile-grid-3" id="eqWatch"></div>
+          </div>
+          <div class="side-block">
+            <div class="side-head"><h3>行业板块强弱</h3></div>
+            <div class="sector-list" id="eqSectors"></div>
+          </div>
+          <div class="side-block">
+            <div class="side-head"><h3>48小时热度雷达</h3></div>
+            <ol class="radar-list" id="heatRadar"></ol>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- 2. 持仓 -->
+    <section class="view" id="view-portfolio" data-view="portfolio" aria-label="持仓" hidden>
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="sec-title">持仓账本与风控台</h2>
+            <span class="panel-meta" id="portfolioModeHint"></span>
+          </div>
+          <div class="portfolio-head-actions">
+            <button type="button" class="btn btn-sm btn-accent" id="openAddPosBtn">+ 录入持仓</button>
+            <button type="button" class="btn btn-sm" id="openImportBtn">粘贴持仓</button>
+          </div>
+        </div>
+        <div class="portfolio-kpi-grid" id="portfolioSummaryBar"></div>
+      </section>
+
+      <div class="subtab-bar" id="portfolioSubTabs" role="tablist" aria-label="持仓子模块">
+        <button type="button" class="chip is-active" data-psub="spot" aria-pressed="true">现货与现金</button>
+        <button type="button" class="chip" data-psub="derivatives" aria-pressed="false">合约风控</button>
+        <button type="button" class="chip" data-psub="strategy" aria-pressed="false">策略对照</button>
+      </div>
+
+      <section class="panel" id="pPanel-spot" data-psub-panel="spot" aria-label="现货与现金">
+        <div class="panel-head">
+          <h3 class="sec-title">现货与现金余额</h3>
+          <span class="panel-meta num-plain" id="spotFxHint"></span>
+        </div>
+        <div class="table-scroll" id="spotTableWrap"></div>
+      </section>
+
+      <section class="panel" id="pPanel-derivatives" data-psub-panel="derivatives" aria-label="合约风控" hidden>
+        <div class="panel-head">
+          <h3 class="sec-title">合约仓位与强平风险</h3>
+          <span class="panel-meta" id="derivSummaryHint"></span>
+        </div>
+        <div class="table-scroll deriv-desktop-only" id="derivTableWrap"></div>
+        <div class="deriv-mobile-list" id="derivMobileList"></div>
+      </section>
+
+      <section class="panel" id="pPanel-strategy" data-psub-panel="strategy" aria-label="策略对照" hidden>
+        <div class="panel-head">
+          <h3 class="sec-title">辅助仓位与实际持仓对照</h3>
+          <span class="panel-meta num-plain" id="journalCapitalHint"></span>
+        </div>
+        <div class="journal-gate" id="journalGate"></div>
+        <div class="table-scroll" id="strategyCompareWrap"></div>
+        <div class="journal-positions" id="journalPositions"></div>
+      </section>
+    </section>
+
+    <!-- 3. 研究 -->
+    <section class="view" id="view-research-hub" data-view="research" aria-label="研究" hidden>
+      <div class="subtab-bar" id="researchSubTabs" role="tablist" aria-label="研究子模块">
+        <button type="button" class="chip is-active" data-rsub="stocks" aria-pressed="true">个股投研</button>
+        <button type="button" class="chip" data-rsub="macro" aria-pressed="false">宏观与关联</button>
+        <button type="button" class="chip" data-rsub="kol" aria-pressed="false">KOL 观点树</button>
+        <button type="button" class="chip" data-rsub="articles" aria-pressed="false">长文待读</button>
+      </div>
+
+      <!-- 个股投研（保留 id="view-research"） -->
+      <section class="subview" id="view-research" data-rsub-panel="stocks" aria-label="个股投研">
+        <div class="research-bar">
+          <div class="chip-group chip-scroll" id="stockChips" role="group" aria-label="核心美股标的"></div>
+          <div class="search-box">
+            <input id="stockSearchInput" type="search" placeholder="输入美股代码如 AAPL 回车查询" autocomplete="off" aria-label="股票代码查询">
+            <button type="button" class="btn btn-sm" id="stockSearchBtn">查询</button>
+          </div>
+        </div>
+
+        <header class="stock-banner" id="stockBanner"></header>
+
+        <div class="research-hero">
+          <section class="panel chart-panel" aria-label="股价走势">
+            <div class="panel-head">
+              <div class="chart-title-wrap">
+                <span class="bar-accent" aria-hidden="true"></span>
+                <h2 class="sec-title">股价走势</h2>
+                <span class="chart-ret num-plain" id="stockChartRet"></span>
+              </div>
+              <div class="seg seg-sm" id="stockRangeSeg" role="group" aria-label="走势周期">
+                <button type="button" class="seg-btn" data-srange="1w" aria-pressed="false">1W</button>
+                <button type="button" class="seg-btn" data-srange="1m" aria-pressed="false">1M</button>
+                <button type="button" class="seg-btn" data-srange="3m" aria-pressed="false">3M</button>
+                <button type="button" class="seg-btn" data-srange="6m" aria-pressed="false">6M</button>
+                <button type="button" class="seg-btn is-active" data-srange="1y" aria-pressed="true">1Y</button>
+              </div>
+            </div>
+            <div class="chart-readout num-plain" id="stockChartReadout">悬停或轻点走势图查看历史收盘价</div>
+            <div class="chart-canvas" id="stockChartWrap"></div>
+          </section>
+
+          <section class="panel stock-summary-panel" id="stockSummaryPanel" aria-label="估值定位与健康评分"></section>
+        </div>
+
+        <div class="research-lower">
+          <aside class="research-left" id="stockInsightsCol" aria-label="业务分析、开仓纪律与监管披露"></aside>
+          <div class="research-right" id="stockSectionsCol" aria-label="基本面与估值数据"></div>
+        </div>
+      </section>
+
+      <!-- 宏观与关联 -->
+      <section class="subview" id="view-macro" data-rsub-panel="macro" aria-label="宏观与关联" hidden>
+        <section class="panel">
+          <div class="panel-head"><h2 class="sec-title">宏观数据看板</h2><span class="panel-meta num-plain" id="macroCount"></span></div>
+          <div class="macro-groups" id="macroGroups"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2 class="sec-title">跨资产相关性热力图</h2>
+            <div class="seg" id="corrWindowSeg" role="group" aria-label="相关性周期">
+              <button type="button" class="seg-btn is-active" data-corr="30d" aria-pressed="true">30日</button>
+              <button type="button" class="seg-btn" data-corr="90d" aria-pressed="false">90日</button>
+            </div>
+          </div>
+          <div class="corr-readout" id="corrReadout" aria-live="polite">悬停或轻点单元格查看两项资产的 30日 / 90日 相关系数</div>
+          <div class="matrix-scroll" id="corrMatrixWrap">
+            <table class="corr-matrix sticky-table" id="corrMatrix"></table>
+          </div>
+          <div class="corr-legend" aria-hidden="true">
+            <span>负相关</span><span class="legend-bar"></span><span>正相关</span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2 class="sec-title">极值背离监测</h2><span class="panel-meta num-plain" id="pairsAsOf"></span></div>
+          <div class="pairs-grid" id="pairsList"></div>
+        </section>
+      </section>
+
+      <!-- KOL 观点树 -->
+      <section class="subview" id="view-kol" data-rsub-panel="kol" aria-label="KOL 观点树" hidden>
+        <div class="toolbar" id="kolToolbar">
+          <div class="chip-group chip-scroll" id="kolTopicChips" role="group" aria-label="议题"></div>
+          <div class="chip-group" id="kolStanceChips" role="group" aria-label="立场">
+            <button type="button" class="chip is-active" data-stance="all" aria-pressed="true">全部</button>
+            <button type="button" class="chip tone-bull" data-stance="偏多" aria-pressed="false">偏多</button>
+            <button type="button" class="chip tone-bear" data-stance="偏空" aria-pressed="false">偏空</button>
+            <button type="button" class="chip" data-stance="中性" aria-pressed="false">中性</button>
+          </div>
+          <div class="search-box">
+            <input id="kolSearchInput" type="search" placeholder="作者、议题或观点，回车筛选" autocomplete="off" aria-label="KOL 关键词">
+            <button type="button" class="btn btn-sm" id="kolSearchBtn">筛选</button>
+          </div>
+        </div>
+
+        <section class="panel tug-panel" aria-label="多空对抗">
+          <div class="tug" id="kolTug"></div>
+          <div class="topic-bars" id="kolTopicBars"></div>
+        </section>
+
+        <div class="timeline" id="kolTimeline"></div>
+      </section>
+
+      <!-- 长文待读 -->
+      <section class="subview" id="view-articles" data-rsub-panel="articles" aria-label="长文待读" hidden>
+        <div class="toolbar" id="articleToolbar">
+          <div class="chip-group" id="articleStatusTabs" role="group" aria-label="阅读状态">
+            <button type="button" class="chip is-active" data-astatus="all" aria-pressed="true">全部 <span class="chip-count num-plain" data-acount="all"></span></button>
+            <button type="button" class="chip" data-astatus="unread" aria-pressed="false">未读 <span class="chip-count num-plain" data-acount="unread"></span></button>
+            <button type="button" class="chip" data-astatus="reading" aria-pressed="false">在读 <span class="chip-count num-plain" data-acount="reading"></span></button>
+            <button type="button" class="chip" data-astatus="read" aria-pressed="false">已读 <span class="chip-count num-plain" data-acount="read"></span></button>
+            <button type="button" class="chip" data-astatus="starred" aria-pressed="false">星标 <span class="chip-count num-plain" data-acount="starred"></span></button>
+          </div>
+          <div class="chip-group" id="articleSourceChips" role="group" aria-label="来源">
+            <button type="button" class="chip is-active" data-asource="all" aria-pressed="true">全部来源</button>
+            <button type="button" class="chip" data-asource="AI与金融研报" aria-pressed="false">AI与金融研报</button>
+            <button type="button" class="chip" data-asource="KOL深度长文" aria-pressed="false">KOL深度长文</button>
+            <button type="button" class="chip" data-asource="本地知识库" aria-pressed="false">本地知识库</button>
+            <button type="button" class="chip" data-asource="同步深度长文" aria-pressed="false">同步深度长文</button>
+          </div>
+          <div class="search-box">
+            <input id="articleSearchInput" type="search" placeholder="标题或摘要，回车筛选" autocomplete="off" aria-label="长文关键词">
+            <button type="button" class="btn btn-sm" id="articleSearchBtn">筛选</button>
+          </div>
+          <a class="btn btn-sm btn-ghost" id="exportOpmlBtn" href="/feeds.opml" target="_blank" rel="noopener">导出 OPML</a>
+        </div>
+        <ul class="article-list" id="articleList"></ul>
+      </section>
+    </section>
+
+    <!-- 4. 记录 -->
+    <section class="view" id="view-records" data-view="records" aria-label="记录" hidden>
+      <div class="subtab-bar" id="recordsSubTabs" role="tablist" aria-label="记录子模块">
+        <button type="button" class="chip is-active" data-recsub="reviews" aria-pressed="true">操作复盘</button>
+        <button type="button" class="chip" data-recsub="essays" aria-pressed="false">随笔备忘</button>
+      </div>
+
+      <!-- 操作复盘 -->
+      <section class="subview" id="view-journal" data-recsub-panel="reviews" aria-label="操作复盘">
+        <section class="panel">
+          <div class="panel-head">
+            <h2 class="sec-title">操作复盘台账</h2>
+            <span class="panel-meta" id="journalModeHint"></span>
+          </div>
+          <div class="toolbar toolbar-tight">
+            <button type="button" class="btn btn-accent btn-sm" id="newReviewBtn">+ 新建复盘</button>
+            <div class="chip-group" id="reviewStatusChips" role="group" aria-label="复盘状态">
+              <button type="button" class="chip is-active" data-rstatus="all" aria-pressed="true">全部</button>
+              <button type="button" class="chip" data-rstatus="当前跟踪" aria-pressed="false">当前跟踪</button>
+              <button type="button" class="chip" data-rstatus="持有中" aria-pressed="false">持有中</button>
+              <button type="button" class="chip" data-rstatus="closed" aria-pressed="false">已平仓</button>
+            </div>
+          </div>
+
+          <form class="composer" id="reviewForm" hidden novalidate>
+            <input type="hidden" id="rvId">
+            <input type="hidden" id="rvRev">
+            <div class="form-grid">
+              <label class="field"><span>日期</span><input type="date" id="rvDate" required></label>
+              <label class="field"><span>标的</span><input type="text" id="rvSymbol" maxlength="40" placeholder="例如 BTC" required autocomplete="off"></label>
+              <label class="field"><span>方向</span>
+                <select id="rvDirection">
+                  <option value="做多">做多</option>
+                  <option value="做空">做空</option>
+                  <option value="对冲">对冲</option>
+                  <option value="观望">观望</option>
+                </select>
+              </label>
+              <label class="field"><span>仓位%</span><input type="number" id="rvSize" step="0.1" min="0" inputmode="decimal" value="0"></label>
+              <label class="field"><span>参考均价</span><input type="number" id="rvPrice" step="any" min="0" inputmode="decimal" value="0"></label>
+              <label class="field"><span>盈亏USD</span><input type="number" id="rvPnl" step="any" inputmode="decimal" value="0"></label>
+              <label class="field"><span>状态</span>
+                <select id="rvStatus">
+                  <option value="当前跟踪">当前跟踪</option>
+                  <option value="持有中">持有中</option>
+                  <option value="已止盈">已止盈</option>
+                  <option value="已止损">已止损</option>
+                  <option value="已取消">已取消</option>
+                </select>
+              </label>
+            </div>
+            <label class="field field-wide"><span>核心逻辑</span><textarea id="rvThesis" rows="2" maxlength="2000"></textarea></label>
+            <label class="field field-wide"><span>执行细节</span><textarea id="rvExec" rows="2" maxlength="2000"></textarea></label>
+            <label class="field field-wide"><span>教训反思</span><textarea id="rvLesson" rows="2" maxlength="2000"></textarea></label>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-accent" id="rvSaveBtn">保存复盘</button>
+              <button type="button" class="btn btn-ghost" id="rvCancelBtn">取消</button>
+            </div>
+          </form>
+
+          <div class="review-list" id="reviewList"></div>
+        </section>
+      </section>
+
+      <!-- 随笔 -->
+      <section class="subview" id="view-essays" data-recsub-panel="essays" aria-label="随笔备忘" hidden>
+        <section class="panel">
+          <div class="panel-head">
+            <h2 class="sec-title">市场随笔与观点备忘</h2>
+            <button type="button" class="btn btn-accent btn-sm" id="newEssayBtn">+ 写随笔</button>
+          </div>
+          <form class="composer" id="essayForm" hidden novalidate>
+            <input type="hidden" id="esId">
+            <input type="hidden" id="esRev">
+            <div class="form-grid">
+              <label class="field field-span-2"><span>标题</span><input type="text" id="esTitle" maxlength="120" required autocomplete="off"></label>
+              <label class="field"><span>心境标签</span>
+                <select id="esMood">
+                  <option value="冷静">冷静</option>
+                  <option value="警惕">警惕</option>
+                  <option value="乐观">乐观</option>
+                  <option value="灵感">灵感</option>
+                  <option value="深度复盘">深度复盘</option>
+                </select>
+              </label>
+              <label class="field"><span>主题标签</span><input type="text" id="esTags" maxlength="120" placeholder="用逗号分隔，例如 BTC, 美债" autocomplete="off"></label>
+            </div>
+            <label class="field field-wide"><span>正文（支持 Markdown）</span><textarea id="esBody" rows="8" maxlength="20000" required></textarea></label>
+            <div class="form-actions">
+              <label class="check"><input type="checkbox" id="esPinned"> 置顶</label>
+              <span class="form-spacer"></span>
+              <button type="submit" class="btn btn-accent" id="esSaveBtn">保存随笔</button>
+              <button type="button" class="btn btn-ghost" id="esCancelBtn">取消</button>
+            </div>
+          </form>
+          <div class="essay-list" id="essayList"></div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <!-- 阅读抽屉 -->
+  <div class="drawer" id="articleDrawer" role="dialog" aria-modal="true" aria-labelledby="articleTitle" hidden>
+    <div class="drawer-backdrop" data-close-drawer="article"></div>
+    <article class="drawer-panel drawer-reader">
+      <div class="drawer-handle" aria-hidden="true"><span></span></div>
+      <div class="drawer-bar">
+        <div class="drawer-meta" id="articleMeta"></div>
+        <div class="seg seg-sm" id="articleStatusSeg" role="group" aria-label="阅读状态">
+          <button type="button" class="seg-btn" data-set-status="unread" aria-pressed="false">未读</button>
+          <button type="button" class="seg-btn" data-set-status="reading" aria-pressed="false">在读</button>
+          <button type="button" class="seg-btn" data-set-status="read" aria-pressed="false">已读</button>
+          <button type="button" class="seg-btn" data-set-status="starred" aria-pressed="false">星标</button>
+        </div>
+        <button type="button" class="icon-btn" id="closeArticleBtn" aria-label="关闭阅读抽屉">✕</button>
+      </div>
+      <div class="drawer-scroll reader-canvas" id="articleScroll">
+        <h2 class="reader-title" id="articleTitle"></h2>
+        <div class="prose" id="articleBody"></div>
+      </div>
+      <div class="note-bar">
+        <label for="articleNote" class="note-label">私人笔记</label>
+        <textarea id="articleNote" rows="2" maxlength="5000" placeholder="记下要点、疑问或可执行的结论"></textarea>
+        <div class="note-actions">
+          <span class="note-hint" id="noteSavedHint"></span>
+          <button type="button" class="btn btn-sm btn-accent" id="saveNoteBtn">保存笔记</button>
+        </div>
+      </div>
+    </article>
+  </div>
+
+  <!-- 推送中心抽屉 -->
+  <div class="drawer" id="pushDrawer" role="dialog" aria-modal="true" aria-labelledby="pushTitle" hidden>
+    <div class="drawer-backdrop" data-close-drawer="push"></div>
+    <section class="drawer-panel drawer-push">
+      <div class="drawer-handle" aria-hidden="true"><span></span></div>
+      <div class="drawer-bar">
+        <h2 class="drawer-heading" id="pushTitle">推送中心</h2>
+        <button type="button" class="icon-btn" id="closePushBtn" aria-label="关闭推送中心">✕</button>
+      </div>
+      <div class="drawer-scroll">
+        <div class="push-block">
+          <h3 class="block-title">推送场景</h3>
+          <div class="seg seg-sm" id="pushScenarioSeg" role="group" aria-label="推送场景">
+            <button type="button" class="seg-btn is-active" data-pmode="daily" aria-pressed="true">每日决策简报</button>
+            <button type="button" class="seg-btn" data-pmode="wind_alert" aria-pressed="false">持仓逆风预警</button>
+            <button type="button" class="seg-btn" data-pmode="deviation" aria-pressed="false">持仓偏离巡检</button>
+          </div>
+        </div>
+
+        <div class="push-block">
+          <h3 class="block-title">推送通道</h3>
+          <div class="channel-list" id="pushChannels"></div>
+        </div>
+
+        <div class="push-block">
+          <div class="push-head-row">
+            <h3 class="block-title" style="margin:0">脱敏预览</h3>
+            <div class="seg seg-sm" id="pushPreviewFormatSeg" role="group" aria-label="预览格式">
+              <button type="button" class="seg-btn is-active" data-pfmt="card2" aria-pressed="true">Card 2.0</button>
+              <button type="button" class="seg-btn" data-pfmt="wechat" aria-pressed="false">微信 Markdown</button>
+            </div>
+          </div>
+          <div class="push-actions" style="margin-top:10px">
+            <button type="button" class="btn" id="pushPreviewBtn">试运行预览</button>
+            <button type="button" class="btn btn-accent" id="pushLiveBtn" disabled>确认发送</button>
+          </div>
+          <p class="push-hint" id="pushHint">先试运行预览（默认隐藏真实金额），确认内容后再发送</p>
+          <div class="push-card2-preview" id="pushCard2Preview" hidden></div>
+          <pre class="push-preview" id="pushPreview">点击「试运行预览」生成脱敏内容</pre>
+        </div>
+
+        <div class="push-block muse-block">
+          <h3 class="block-title">Meta Muse（Peach）/ RSS 接入</h3>
+          <div class="copy-row">
+            <span class="copy-label">每日简报 Markdown</span>
+            <code class="copy-url" id="museDigestUrl"></code>
+            <button type="button" class="btn btn-sm" data-copy-from="museDigestUrl">复制</button>
+          </div>
+          <div class="copy-row">
+            <span class="copy-label">RSS 订阅源</span>
+            <code class="copy-url" id="museFeedUrl"></code>
+            <button type="button" class="btn btn-sm" data-copy-from="museFeedUrl">复制</button>
+          </div>
+          <p class="push-hint">主题可选 <code>?topic=finance</code> · <code>?topic=ai</code> · <code>?topic=all</code>；外部订阅时追加 <code>token=访问令牌</code>，例如 <code>?topic=all&amp;token=访问令牌</code>。</p>
+          <button type="button" class="btn btn-accent btn-block" id="copyMuseBtn">复制今日 Muse 简报</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 录入 / 编辑持仓抽屉 -->
+  <div class="drawer" id="positionDrawer" role="dialog" aria-modal="true" aria-labelledby="posDrawerTitle" hidden>
+    <div class="drawer-backdrop" data-close-drawer="position"></div>
+    <section class="drawer-panel">
+      <div class="drawer-handle" aria-hidden="true"><span></span></div>
+      <div class="drawer-bar">
+        <h2 class="drawer-heading" id="posDrawerTitle">录入持仓</h2>
+        <button type="button" class="icon-btn" id="closePosDrawerBtn" aria-label="关闭录入持仓">✕</button>
+      </div>
+      <div class="drawer-scroll">
+        <form class="composer pos-composer" id="positionForm" novalidate>
+          <input type="hidden" id="pfId">
+          <div class="seg seg-sm" id="pfKindSeg" role="group" aria-label="持仓类型" style="margin-bottom:12px">
+            <button type="button" class="seg-btn is-active" data-pfkind="spot" aria-pressed="true">现货与现金</button>
+            <button type="button" class="seg-btn" data-pfkind="derivative" aria-pressed="false">合约仓位</button>
+          </div>
+          <div class="form-grid">
+            <label class="field"><span>账户</span><input type="text" id="pfAccount" maxlength="40" value="主账户" placeholder="主账户 / OKX" autocomplete="off"></label>
+            <label class="field"><span>资产代码</span><input type="text" id="pfSymbol" maxlength="30" required placeholder="例如 BTC / AAPL / USD" autocomplete="off"></label>
+            <label class="field" id="pfAssetClassWrap"><span>资产类别</span>
+              <select id="pfAssetClass">
+                <option value="crypto">加密现货</option>
+                <option value="equity">美股</option>
+                <option value="cash">现金/稳定币</option>
+                <option value="commodity">黄金/商品</option>
+              </select>
+            </label>
+            <label class="field" id="pfDirWrap" hidden><span>持仓方向</span>
+              <select id="pfSide">
+                <option value="long">做多</option>
+                <option value="short">做空</option>
+              </select>
+            </label>
+            <label class="field" id="pfMarginModeWrap" hidden><span>保证金模式</span>
+              <select id="pfMarginMode">
+                <option value="isolated">逐仓</option>
+                <option value="cross">全仓</option>
+              </select>
+            </label>
+            <label class="field"><span>数量 / 股数</span><input type="number" id="pfQty" step="any" min="0" inputmode="decimal" required placeholder="0"></label>
+            <label class="field"><span>成本 / 开仓均价 ($)</span><input type="number" id="pfEntry" step="any" min="0" inputmode="decimal" value="0"></label>
+            <label class="field" id="pfMarginWrap" hidden><span>占用保证金 ($)</span><input type="number" id="pfMargin" step="any" min="0" inputmode="decimal" value="0"></label>
+            <label class="field" id="pfLiqWrap" hidden><span>交易所强平价 ($)</span><input type="number" id="pfLiq" step="any" min="0" inputmode="decimal" placeholder="留空自动/无法估算"></label>
+            <label class="field"><span>关联策略</span>
+              <select id="pfBucket">
+                <option value="">其他</option>
+                <option value="btc_trend">核心趋势仓 (BTC)</option>
+                <option value="gold_hedge">黄金避险仓</option>
+                <option value="bear_basket">熊市配对对冲仓</option>
+                <option value="crash_bounce">超跌反弹短打仓</option>
+              </select>
+            </label>
+          </div>
+          <label class="field field-wide"><span>备注</span><input type="text" id="pfNote" maxlength="200" placeholder="例如 建仓依据或止损说明" autocomplete="off"></label>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-accent" id="pfSaveBtn">保存持仓</button>
+            <button type="button" class="btn btn-ghost" id="pfCancelBtn">取消</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <!-- 粘贴持仓批量导入抽屉 -->
+  <div class="drawer" id="importDrawer" role="dialog" aria-modal="true" aria-labelledby="importDrawerTitle" hidden>
+    <div class="drawer-backdrop" data-close-drawer="import"></div>
+    <section class="drawer-panel">
+      <div class="drawer-handle" aria-hidden="true"><span></span></div>
+      <div class="drawer-bar">
+        <h2 class="drawer-heading" id="importDrawerTitle">粘贴持仓</h2>
+        <button type="button" class="icon-btn" id="closeImportDrawerBtn" aria-label="关闭粘贴持仓">✕</button>
+      </div>
+      <div class="drawer-scroll">
+        <form class="composer" id="importForm" novalidate>
+          <div class="form-grid" style="margin-bottom:10px">
+            <label class="field"><span>导入格式</span>
+              <select id="impFormat">
+                <option value="text">自然文本</option>
+                <option value="csv">CSV 表格</option>
+              </select>
+            </label>
+            <label class="field"><span>合并方式</span>
+              <select id="impMode">
+                <option value="upsert">增量更新（保留未提及持仓）</option>
+                <option value="reconcile">核对覆盖（对齐当前粘贴清单）</option>
+              </select>
+            </label>
+            <label class="field"><span>目标账户</span><input type="text" id="impAccount" maxlength="40" value="主账户" autocomplete="off"></label>
+          </div>
+          <label class="field field-wide"><span>粘贴文本或 CSV（每行一条：标的 方向 数量 均价 保证金）</span>
+            <textarea id="impBody" rows="6" maxlength="20000" placeholder="示例：&#10;USD 现金 1000&#10;AAPL 现货 5 股 @ 220&#10;BTC-USDT-SWAP 做空 0.01 个 @ 50000 逐仓 保证金 100"></textarea>
+          </label>
+          <div class="form-actions">
+            <button type="button" class="btn" id="impPreviewBtn">预览变更</button>
+            <button type="button" class="btn btn-accent" id="impCommitBtn" disabled>确认提交</button>
+          </div>
+        </form>
+        <div class="import-preview-area" id="importPreviewArea" hidden></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 移动端底部 4 栏导航 -->
+  <nav class="tabbar" id="mobileTabbar" aria-label="移动端视图切换">
+    <button type="button" class="tab is-active" data-mtab="today"><span class="tab-ico" aria-hidden="true">◧</span><span>今日</span></button>
+    <button type="button" class="tab" data-mtab="portfolio"><span class="tab-ico" aria-hidden="true">◈</span><span>持仓</span></button>
+    <button type="button" class="tab" data-mtab="research"><span class="tab-ico" aria-hidden="true">▤</span><span>研究</span></button>
+    <button type="button" class="tab" data-mtab="records"><span class="tab-ico" aria-hidden="true">✎</span><span>记录</span></button>
+  </nav>
+
+  <script src="app.js"></script>
+</body>
+</html>

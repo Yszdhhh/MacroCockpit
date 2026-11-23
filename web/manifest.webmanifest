@@ -1,0 +1,20 @@
+{
+  "name": "宏观金融决策驾驶舱",
+  "short_name": "宏观驾驶舱",
+  "description": "宏观流动性、辅助仓位、美股算力与关键快讯统一驾驶舱",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#FAFAF9",
+  "theme_color": "#16140F",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

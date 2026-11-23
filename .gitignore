@@ -1,0 +1,37 @@
+# Secrets & local runtime credentials
+.env
+.env.*
+!.env.example
+config/notion_ids.json
+config/local_secrets.yaml
+
+# SQLite ledgers, locks & ephemeral caches (NEVER push to public repo)
+data/*.db
+data/*.db-*
+data/*.sqlite*
+data/*.lock
+data/.*.lock
+data/*cache*.json
+data/scoring_receipts.json
+data/desktop_debates.json
+data/producer_generation.json
+data/current_generation.json
+data/generations/
+data/intl_relay_bundle.json
+data/cn_bundle.json
+
+# Built artifacts & local backups
+dist/macro_cockpit_offline.html
+dist/notion_viz_embed.html
+backups/
+
+# Tooling & Python caches
+.staff-hub/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.pytest_tmp*/
+.coverage
+htmlcov/
+*.log

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MacroCockpit Overseas Collector every 20 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=20min
+RandomizedDelaySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,42 @@
+{
+  "home_page_id": "00000000-0000-0000-0000-000000000001",
+  "home_page_url": "https://app.notion.com/p/00000000000000000000000000000001",
+  "vault_page_id": "00000000-0000-0000-0000-000000000002",
+  "databases": {
+    "daily_reports": {
+      "title": "金融日报库",
+      "database_id": "00000000-0000-0000-0000-000000000011",
+      "data_source_id": "collection://00000000-0000-0000-0000-000000000111"
+    },
+    "signals": {
+      "title": "精选信号流",
+      "database_id": "00000000-0000-0000-0000-000000000012",
+      "data_source_id": "collection://00000000-0000-0000-0000-000000000112"
+    },
+    "macro_correlations": {
+      "title": "宏观与关联快照",
+      "database_id": "00000000-0000-0000-0000-000000000013",
+      "data_source_id": "collection://00000000-0000-0000-0000-000000000113"
+    },
+    "kol_stances": {
+      "title": "KOL观点时间树",
+      "database_id": "00000000-0000-0000-0000-000000000014",
+      "data_source_id": "collection://00000000-0000-0000-0000-000000000114"
+    },
+    "longform_articles": {
+      "title": "长文精读库",
+      "database_id": "00000000-0000-0000-0000-000000000015",
+      "data_source_id": "collection://00000000-0000-0000-0000-000000000115"
+    },
+    "positions_reviews": {
+      "title": "仓位与操作复盘",
+      "database_id": "00000000-0000-0000-0000-000000000016",
+      "data_source_id": "collection://00000000-0000-0000-0000-000000000116"
+    },
+    "quick_notes": {
+      "title": "金融随笔",
+      "database_id": "00000000-0000-0000-0000-000000000017",
+      "data_source_id": "collection://00000000-0000-0000-0000-000000000117"
+    }
+  }
+}

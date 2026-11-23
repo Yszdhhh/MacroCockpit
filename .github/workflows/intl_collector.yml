@@ -1,0 +1,33 @@
+name: MacroCockpit Overseas Split Collector
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+jobs:
+  collect-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run unit sanity check
+        run: python -m pytest tests/test_portfolio_contract.py tests/test_mcp_contract.py -q
+
+      - name: Collect overseas blocked sources and push fragment to CN consumer/aggregator
+        env:
+          MACROCOCKPIT_SYNC_TOKEN: ${{ secrets.MACROCOCKPIT_SYNC_TOKEN }}
+          MACROCOCKPIT_INGEST_URL: ${{ vars.MACROCOCKPIT_INGEST_URL || 'https://news.shuashuabao.xyz/api/v2/ingest-intl' }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python -m backend.cloud_collector --role intl-push --producer-id github-actions-intl
