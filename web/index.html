@@ -40,7 +40,7 @@
         </div>
       </div>
 
-      <span class="status-pill" id="riskPill" data-light="" title="风险灯号">
+      <span class="status-pill" id="riskPill" data-light="" data-jump="portfolio:strategy" role="button" tabindex="0" title="风险灯号 · 点击查看策略对照">
         <span class="status-dot" aria-hidden="true"></span>
         <span class="status-text" id="riskPillText">—</span>
       </span>
@@ -90,7 +90,7 @@
 
     <!-- 1. 今日 -->
     <section class="view" id="view-today" data-view="today" aria-label="今日">
-      <section class="today-overview-bar" id="todayOverviewBar" aria-label="资产与风险总览"></section>
+      <section class="today-overview-bar" id="todayOverviewBar" aria-label="资产与风险总览" hidden></section>
       <nav class="sector-ribbon" id="sectorRibbon" aria-label="市场板块导览">
         <button type="button" class="ribbon-tab is-active" data-sector="all" aria-pressed="true">全部<span class="ribbon-count num-plain" data-scount="all"></span></button>
         <button type="button" class="ribbon-tab" data-sector="equities" aria-pressed="false">美股<span class="ribbon-count num-plain" data-scount="equities"></span></button>
@@ -101,7 +101,7 @@
       </nav>
       <div class="glance-row" id="dailyGlance" aria-label="宏观速览"></div>
 
-      <section class="exec-strip" id="execStrip" aria-label="风险与辅助仓位">
+      <section class="exec-strip" id="execStrip" aria-label="风险与辅助仓位" hidden>
         <button type="button" class="exec-gate" id="execGate" data-jump="portfolio:strategy" title="查看策略对照"></button>
         <div class="exec-positions" id="execPositions"></div>
       </section>
@@ -110,7 +110,7 @@
         <section class="col-main" aria-labelledby="signalsHeading">
           <div class="panel-head signals-head-bar" style="margin-bottom:10px">
             <div class="signals-head-left">
-              <h2 class="sec-title" id="signalsHeading">核心快讯与持仓雷达</h2>
+              <h2 class="sec-title" id="signalsHeading">核心快讯</h2>
               <div class="seg seg-sm" id="newsModeSwitch" role="group" aria-label="信息视图切换">
                 <button type="button" class="seg-btn is-active" data-nmode="ranked" aria-pressed="true">算法精选</button>
                 <button type="button" class="seg-btn" data-nmode="timeline" aria-pressed="false">实时时间线</button>
@@ -120,19 +120,21 @@
           </div>
 
           <div class="toolbar" id="dailyToolbar">
-            <div class="chip-group" id="signalScopeChips" role="group" aria-label="信号视角">
-              <button type="button" class="chip is-active" data-scope="all" aria-pressed="true">全部快讯</button>
-              <button type="button" class="chip" data-scope="held" aria-pressed="false">持仓相关</button>
-              <button type="button" class="chip" data-scope="watch" aria-pressed="false">自选</button>
-              <button type="button" class="chip" data-scope="rules" aria-pressed="false">筛选规则</button>
+            <div class="toolbar-chips-scroll">
+              <div class="chip-group" id="signalScopeChips" role="group" aria-label="信号视角">
+                <button type="button" class="chip is-active" data-scope="all" aria-pressed="true">全部快讯</button>
+                <button type="button" class="chip" data-scope="held" aria-pressed="false" hidden>持仓相关</button>
+                <button type="button" class="chip" data-scope="watch" aria-pressed="false">自选</button>
+                <button type="button" class="chip" data-scope="rules" aria-pressed="false">筛选规则</button>
+              </div>
+              <div class="chip-group" id="polarityChips" role="group" aria-label="多空方向">
+                <button type="button" class="chip is-active" data-pol="all" aria-pressed="true">全部</button>
+                <button type="button" class="chip tone-bull" data-pol="bullish" aria-pressed="false">偏多</button>
+                <button type="button" class="chip tone-bear" data-pol="bearish" aria-pressed="false">偏空</button>
+                <button type="button" class="chip" data-pol="neutral" aria-pressed="false">中性</button>
+              </div>
+              <button type="button" class="chip chip-toggle" id="highOnlyBtn" aria-pressed="false">仅看高优</button>
             </div>
-            <div class="chip-group" id="polarityChips" role="group" aria-label="多空方向">
-              <button type="button" class="chip is-active" data-pol="all" aria-pressed="true">全部</button>
-              <button type="button" class="chip tone-bull" data-pol="bullish" aria-pressed="false">偏多</button>
-              <button type="button" class="chip tone-bear" data-pol="bearish" aria-pressed="false">偏空</button>
-              <button type="button" class="chip" data-pol="neutral" aria-pressed="false">中性</button>
-            </div>
-            <button type="button" class="chip chip-toggle" id="highOnlyBtn" aria-pressed="false">仅看高优</button>
             <div class="search-box">
               <input id="keywordInput" type="search" placeholder="标题、标的或来源，回车筛选" autocomplete="off" aria-label="关键词筛选">
               <button type="button" class="btn btn-sm" id="keywordApplyBtn">筛选</button>
@@ -171,7 +173,7 @@
 
         <aside class="col-side" aria-labelledby="marketHeading">
           <div class="side-block side-card-highlight" id="todayCalendarCard"></div>
-          <div class="side-block side-card-highlight" id="todayRiskCard"></div>
+          <div class="side-block side-card-highlight" id="todayRiskCard" hidden></div>
 
           <h2 class="sec-title" id="marketHeading">美股盘面温度与48h雷达</h2>
           <p class="eq-summary" id="eqSummary"></p>

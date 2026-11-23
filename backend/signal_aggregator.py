@@ -944,7 +944,17 @@ def _dedup_articles(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     seen_titles: list[str] = []
+    seen_ta_syms: set[str] = set()
     for art in items:
+        fname = str(art.get("filename") or "")
+        m_ta = re.match(r"^ta_([A-Za-z0-9._-]+)_", fname, re.IGNORECASE)
+        if m_ta:
+            sym_key = m_ta.group(1).upper()
+            if sym_key in seen_ta_syms:
+                continue
+            seen_ta_syms.add(sym_key)
+            deduped.append(art)
+            continue
         norm_u = normalize_url(art.get("url"))
         title = str(art.get("title") or "").strip()
         if norm_u and norm_u in seen_urls:

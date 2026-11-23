@@ -7,7 +7,7 @@ MacroCockpit 2.0 是一个面向跨市场（美股、A股·港股、AI 前沿、
 ## 核心架构
 
 1. **双云拆分采集、单一全局去重（零本机依赖）**
-   - **国内主节点（`--role cn-merge-publish`）**：直接采集国内可达的 **26 路高实时源**（财联社电报/深度、华尔街见闻 3 频道、腾讯财经美/A/港股与估值、东方财富 USD/CNH、Frankfurter USD/CNY、Binance Vision BTC、SEC EDGAR、美联储官方、AIHOT、A.I.日报、量子位、OpenAI、Google AI、arXiv、HN AI、CNBC、MarketWatch、Seeking Alpha、Cointelegraph 等）。
+   - **国内主节点（`--role cn-merge-publish`）**：直接采集国内可达的 **25 路高实时源**（财联社电报/深度、华尔街见闻 3 频道、腾讯财经美/A/港股与估值、东方财富 USD/CNH、Frankfurter USD/CNY、Binance Vision BTC、SEC EDGAR、美联储官方、AIHOT、量子位、OpenAI、Google AI、arXiv、HN AI、CNBC、MarketWatch、Seeking Alpha、Cointelegraph 等）。
    - **海外协作节点（`--role intl-push`，可运行于 GitHub Actions 或海外 VPS）**：仅采集国内机房受阻/限流的 **12 路海外源**（FRED 13 条宏观序列 + COMEX 黄金、OKX 现货与永续标记价/资金费率、Yahoo Finance 20 股季报与 1Y 日线、DeepMind、Anthropic、Hugging Face、FT、CoinDesk、Import AI），Gzip 压缩推送至 `POST /api/v2/ingest-intl`。
    - **统一去重与原子发布**：主节点合并海内外分片后统一运行 `backend/kazike_engine.py`（URL 规范化 + 14 天跨源事件聚类 + 中英跨语种数值锚点去重 + 五轴盲评 + 五板块保底截断），通过 `publish_generation()` 原子切换快照世代。
 

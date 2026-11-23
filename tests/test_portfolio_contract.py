@@ -350,7 +350,7 @@ def test_revision_conflict_and_idempotency_in_stores(tmp_path: Path) -> None:
 
 
 def test_curation_astra_scores_radar_and_sort_modes() -> None:
-    """Verify Astra B=42->42.0, B=75->84.6 math, holding radar, safe regex, and sort=importance|time."""
+    """Verify Astra B=42->42.0 noise gate, strong holding boost, bilingual alias matching, and sort=importance|time."""
     ws = {
         "summary": {"net_equity_usd": "10000"},
         "spot_balances": [
@@ -395,6 +395,36 @@ def test_curation_astra_scores_radar_and_sort_modes() -> None:
             "summary": "数据中心业务增长显著",
         },
         {
+            "id": "other-high",
+            "source": "CNBC 美股",
+            "category": "equities",
+            "direction": "bullish",
+            "attention_score": 88,
+            "selected": True,
+            "participant_count": 1,
+            "heat_48h": 10.0,
+            "is_backfill": False,
+            "tickers": ["MSFT"],
+            "time_bjt": "2026-11-22 21:30",
+            "title": "Microsoft Azure expands enterprise capacity",
+            "summary": "Cloud demand steady.",
+        },
+        {
+            "id": "nvda-cn-only",
+            "source": "华尔街见闻",
+            "category": "ai",
+            "direction": "bullish",
+            "attention_score": 70,
+            "selected": False,
+            "participant_count": 1,
+            "heat_48h": 10.0,
+            "is_backfill": False,
+            "tickers": [],
+            "time_bjt": "2026-11-22 20:30",
+            "title": "英伟达新一代算力服务器出货量超预期",
+            "summary": "产业链订单能见度延续。",
+        },
+        {
             "id": "btc-short-tailwind",
             "source": "方程式快讯",
             "category": "crypto",
@@ -428,15 +458,24 @@ def test_curation_astra_scores_radar_and_sort_modes() -> None:
     by_imp = curation.rank_curated_signals(candidates, rules=rules, workspace=ws, sort="importance")
     by_id = {x["id"]: x for x in by_imp}
     assert by_id["b42-noise"]["final_score"] == 42.0
-    assert by_id["b75-held-watch"]["final_score"] == 84.6
+    assert by_id["b75-held-watch"]["final_score"] == 97.7
     assert by_id["b75-held-watch"]["personal_high"] is True
-    assert by_id["b75-held-watch"]["reasons"] == ["客观 75", "持仓与自选 +8.2", "热度 +1.4"]
+    assert by_id["b75-held-watch"]["held_match"] is True
+    assert by_id["b75-held-watch"]["reasons"] == ["客观 75", "持仓与自选 +21.2", "热度 +1.4"]
     assert by_id["b75-held-watch"]["holding_radar"]["relation"] == "顺风"
+    assert by_id["nvda-cn-only"]["held_match"] is True
+    assert by_id["nvda-cn-only"]["personal_high"] is True
+    assert by_id["nvda-cn-only"]["final_score"] == 91.2
+    assert by_id["nvda-cn-only"]["holding_radar"]["relation"] == "顺风"
+    # Held items outrank non-held high-score general news
+    ids_imp = [x["id"] for x in by_imp]
+    assert ids_imp.index("b75-held-watch") < ids_imp.index("other-high")
+    assert ids_imp.index("nvda-cn-only") < ids_imp.index("other-high")
     assert by_id["btc-short-tailwind"]["holding_radar"]["relation"] == "顺风"
     assert by_id["sec-routine"]["holding_radar"]["relation"] == "方向未明"
 
     by_time = curation.rank_curated_signals(candidates, rules=rules, workspace=ws, sort="time")
-    assert [x["id"] for x in by_time] == ["b42-noise", "btc-short-tailwind", "b75-held-watch", "sec-routine"]
+    assert [x["id"] for x in by_time] == ["b42-noise", "other-high", "btc-short-tailwind", "nvda-cn-only", "b75-held-watch", "sec-routine"]
 
     with pytest.raises(ValueError):
         curation.validate_curation_rule("regex", "(a+)+", "block", 0)

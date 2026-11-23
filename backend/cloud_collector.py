@@ -113,6 +113,11 @@ def _strip_private_items(items: list[Any]) -> list[dict[str, Any]]:
     for it in items or []:
         if not isinstance(it, dict):
             continue
+        src = str(it.get("source") or "").strip().lower()
+        url = str(it.get("url") or "").strip().lower()
+        iid = str(it.get("id") or "").strip().lower()
+        if iid.startswith("rss-aidaily-") or src in ("a.i. 日报", "a.i.日报", "aidaily") or "aidaily.fyi" in url:
+            continue
         blob = json.dumps(it, ensure_ascii=False)
         if has_private_article_content({"filename": str(it.get("filename") or it.get("title") or ""), "content": blob}):
             continue
@@ -531,10 +536,12 @@ def run_cn_merge_and_publish(
         strategy_targets = _build_strategy_targets(positions, risk_gate, {}, {})
 
         # Unified Kazike pipeline: deduplicate & score CN + INTL signals together
-        raw_signals = [
-            _ensure_signal_topics(s)
-            for s in (cn_rss_signals + cn_wires + intl_signals + sec_signals + aihot_signals + eq_signals)
-        ]
+        raw_signals = _strip_private_items(
+            [
+                _ensure_signal_topics(s)
+                for s in (cn_rss_signals + cn_wires + intl_signals + sec_signals + aihot_signals + eq_signals)
+            ]
+        )
         all_signals, kazike_stats = process_financial_signals(
             raw_signals,
             receipts_path=data_dir / "scoring_receipts.json",

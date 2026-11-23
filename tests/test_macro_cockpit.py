@@ -1413,10 +1413,11 @@ def test_opml_and_caffeine_brief_endpoints_and_ui_markers(tmp_path: Path) -> Non
             assert resp.status == 200
             opml_xml = resp.read().decode("utf-8")
             assert "<opml" in opml_xml
+            assert "aidaily.fyi" not in opml_xml and "A.I. 日报" not in opml_xml
             root = ET.fromstring(opml_xml)
             assert root.tag == "opml"
             rss_outlines = [el for el in root.iter("outline") if el.attrib.get("type") == "rss"]
-            assert len(rss_outlines) >= 20
+            assert len(rss_outlines) == 29
 
         with urllib.request.urlopen(f"{base}/api/caffeine-brief.md?token=tok-opml-123", timeout=5) as resp:
             assert resp.status == 200
@@ -1426,6 +1427,13 @@ def test_opml_and_caffeine_brief_endpoints_and_ui_markers(tmp_path: Path) -> Non
         srv.shutdown()
         srv.server_close()
         th.join(timeout=5)
+
+    from backend import rss_sources
+
+    assert all(sp["id"] != "aidaily" for sp in rss_sources.CURATED_RSS_FEEDS)
+    st_clean = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    for sig in st_clean.get("signals") or []:
+        assert sig.get("source") != "A.I. 日报" and "aidaily.fyi" not in str(sig.get("url") or "")
 
     assert (COCKPIT_ROOT / "DESIGN.md").is_file()
     assert (COCKPIT_ROOT / "docs" / "CAFFEINE_FABLE_BRIEF.md").is_file()

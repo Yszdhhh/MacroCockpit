@@ -1,17 +1,17 @@
 # MacroCockpit × Meta Muse（Peach）V2 全栈协同、Git 源码对接与双云去本机化交接规范
 
 > **公开仓库**：`https://github.com/Yszdhhh/MacroCockpit`（仅含脱敏源码、公开设计规范、公共信号流水线与无状态云采集器；严禁向任何仓库推送 `.env` 或私人 `user_journal.db`）。
-> 本文档说明宏观金融情报站如何通过 **「腾讯国内 VPS（直采 26 路 + 汇总去重发布）+ GitHub Actions / 海外 VPS（拉取国内受阻 12 路并 Gzip 投递至 `/api/v2/ingest-intl`）」** 彻底摆脱本地 PC 依赖，并通过 V2 REST 与 **MCP `2025-11-25`** 对接 Muse 空间改造。
+> 本文档说明宏观金融情报站如何通过 **「腾讯国内 VPS（直采 25 路 + 汇总去重发布）+ GitHub Actions / 海外 VPS（拉取国内受阻 12 路并 Gzip 投递至 `/api/v2/ingest-intl`）」** 彻底摆脱本地 PC 依赖，并通过 V2 REST 与 **MCP `2025-11-25`** 对接 Muse 空间改造。
 
 ---
 
 ## 一、 角色隔离、双云拆采与数据通路（零本机依赖）
 
-于 **2026-11-23** 在腾讯广州机房 VPS（`tencent-vps`）对 **38 个外部端点** 实测直连可达性（`5s` 超时），结果明确切分为两半：
+于 **2026-11-23** 在腾讯广州机房 VPS（`tencent-vps`）对 **37 个外部端点** 实测直连可达性（`5s` 超时），结果明确切分为两半：
 
 | 归属节点 | `tencent-vps` 实测结论 | 负责抓取的数据源 |
 | :--- | :--- | :--- |
-| **腾讯国内 VPS（`--role cn-merge-publish`）** | **26 路直连 `200 OK` (`245–2907ms`)** | 财联社电报(3频道)+深度、华尔街见闻(3频道)、腾讯财经美/A/港股与估值、东方财富 `USD/CNH`、Frankfurter `USD/CNY`、Binance Vision `BTCUSDT`、SEC EDGAR、美联储官方 RSS、AIHOT (`latest+hot`)、A.I.日报、量子位、OpenAI 官方 (`identity`编码)、Google AI、arXiv (`cs.AI+q-fin`)、HN AI、Ars Technica、CNBC、MarketWatch、Seeking Alpha、Cointelegraph、Last Week in AI、Simon Willison、MIT TR、Lil'Log、BAIR、Ahead of AI |
+| **腾讯国内 VPS（`--role cn-merge-publish`）** | **25 路直连 `200 OK` (`245–2907ms`)** | 财联社电报(3频道)+深度、华尔街见闻(3频道)、腾讯财经美/A/港股与估值、东方财富 `USD/CNH`、Frankfurter `USD/CNY`、Binance Vision `BTCUSDT`、SEC EDGAR、美联储官方 RSS、AIHOT (`latest+hot`)、量子位、OpenAI 官方 (`identity`编码)、Google AI、arXiv (`cs.AI+q-fin`)、HN AI、Ars Technica、CNBC、MarketWatch、Seeking Alpha、Cointelegraph、Last Week in AI、Simon Willison、MIT TR、Lil'Log、BAIR、Ahead of AI |
 | **海外节点（GitHub Actions / 海外 VPS `--role intl-push`）** | **12 路超时 / `Errno 101` / `403` / `429`** | `FRED` 13 条宏观序列 + COMEX `GC=F` 黄金、`OKX` 现货与永续合约 `mark_price`/`funding_rate`、Yahoo Finance 20 股季报与 1Y 日线、`DeepMind 官方`、`Anthropic 官方/研究`、`The Batch`、`Hugging Face`、`FT 全球市场`、`CoinDesk`、`Import AI (Substack)`、`Investing.com`（及可迁入海外节点的 X-KOL / EquationNews） |
 
 ### 生产双云架构与统一去重闭环
@@ -20,7 +20,7 @@
    - 运行 `python -m backend.cloud_collector --role intl-push`（依赖 `MACROCOCKPIT_SYNC_TOKEN`，可配 `FRED_API_KEY`）。
    - Gzip 压缩后带上 `Authorization: Bearer <MACROCOCKPIT_SYNC_TOKEN>` 推送至 **`POST https://news.shuashuabao.xyz/api/v2/ingest-intl`**。
 2. **腾讯国内主站（`tencent-vps:/opt/macro-intel`，启用 `macro-collector-cn.timer` + `macro-intel.service --role consumer`）**：
-   - 收到 `/api/v2/ingest-intl`（或本地 20 分钟定时器触发）后，由 `backend/cloud_collector.py` 在 `cloud_merge.lock` 文件锁保护下加载最近 `intl_relay_bundle.json`，结合本地直采 26 路信号/长文：
+   - 收到 `/api/v2/ingest-intl`（或本地 20 分钟定时器触发）后，由 `backend/cloud_collector.py` 在 `cloud_merge.lock` 文件锁保护下加载最近 `intl_relay_bundle.json`，结合本地直采 25 路信号/长文：
      * **统一跑一遍 `kazike_engine.process_financial_signals()`**：URL 规范化 + 14 天跨源聚类 + **中英跨语种 Ticker/数字锚点同事件合并** + 五轴盲评 + 五板块保底均衡截断；
      * **统一跑一遍长文二次去重**：合并 `feed_*.md` 与 `ta_*.md` 时按规范化 URL + 标题相似度去重；
      * 纯 NumPy 计算 `7×7` 跨资产相关性矩阵（不依赖 `pandas`）；
@@ -42,14 +42,14 @@
 1. **反标题党与硬规则预过滤（`dropped_prefilter`）**：拦截情绪诱导标题党（`震惊|揭秘|速看|紧急通知|太可怕了`）、纯转发水贴与无实质事件喊单，写入 `prefilter_label`。
 2. **信源分层与入选阈值**：
    - `T1`（核心一手，如美联储/SEC/官方与核心研报）：最低入选分 **`60`**
-   - `T1_5`（重点一线媒体/行业聚合，含 `A.I. 日报`、`Investing.com` 等）：最低入选分 **`65`**
+   - `T1_5`（重点一线媒体/行业聚合，含 `Investing.com`、`Seeking Alpha` 等）：最低入选分 **`65`**
    - `T2`（常规财经/科技流媒体，含 `Cointelegraph` 等）：最低入选分 **`76`**
 3. **五大一级板块均衡覆盖（`equities / ashare / ai / crypto / macro`）**：
    - **A股·港股 (`ashare`)** 独立升为一级板块（融合华尔街见闻 A 股频道与财联社看盘电报）。
    - 在 `max_per_source` 限流与 `max_visible=85` 截断阶段执行按板块轮转并设最低保底席位，防止单一快讯源刷屏挤出其他板块。
 4. **同事件聚类去重与 `topics[]` 子主题**：
    - 同事件合并入 `merged_sources[]` 并记录 `merged_count`、`heat_48h`（48 小时半衰期热度）与 `topics[]` 子标签（如 `DeepSeek`、`国产大模型`、`算力芯片`、`具身智能`、`科创·半导体`、`华为·汽车`、`美联储`、`CPI·通胀`、`黄金·大宗`、`ETF·监管` 等）。
-   - 全站 OPML 2.0 订阅源（`GET /feeds.opml`）覆盖 **30 路**精选快讯与深度长文源。
+   - 全站 OPML 2.0 订阅源（`GET /feeds.opml`）覆盖 **29 路**精选快讯与深度长文源。
 
 ---
 

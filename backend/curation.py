@@ -243,8 +243,67 @@ def _compile_rules(rules: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     return compiled
 
 
+_INSTRUMENT_ALIASES: dict[str, tuple[str, ...]] = {
+    "NVDA": ("英伟达", "nvidia"),
+    "AAPL": ("苹果", "apple"),
+    "MSFT": ("微软", "microsoft"),
+    "GOOG": ("谷歌", "google", "alphabet", "deepmind"),
+    "GOOGL": ("谷歌", "google", "alphabet", "deepmind"),
+    "AMZN": ("亚马逊", "amazon", "aws"),
+    "META": ("meta", "扎克伯格", "llama"),
+    "TSLA": ("特斯拉", "tesla", "马斯克"),
+    "AMD": ("超威", "苏姿丰"),
+    "TSM": ("台积电", "tsmc"),
+    "AVGO": ("博通", "broadcom"),
+    "INTC": ("英特尔", "intel"),
+    "MU": ("美光", "micron"),
+    "SMCI": ("超微电脑",),
+    "MSTR": ("microstrategy",),
+    "COIN": ("coinbase",),
+    "PLTR": ("palantir",),
+    "BABA": ("阿里巴巴", "阿里", "阿里云", "通义"),
+    "9988": ("阿里巴巴", "阿里", "阿里云", "通义", "baba"),
+    "09988": ("阿里巴巴", "阿里", "阿里云", "通义", "baba"),
+    "TCEHY": ("腾讯", "微信"),
+    "0700": ("腾讯", "微信", "tcehy"),
+    "00700": ("腾讯", "微信", "tcehy"),
+    "PDD": ("拼多多", "temu"),
+    "JD": ("京东",),
+    "9618": ("京东", "jd"),
+    "09618": ("京东", "jd"),
+    "BIDU": ("百度",),
+    "9888": ("百度", "bidu"),
+    "09888": ("百度", "bidu"),
+    "BYDDY": ("比亚迪", "byd"),
+    "002594": ("比亚迪", "byd"),
+    "1211": ("比亚迪", "byd"),
+    "01211": ("比亚迪", "byd"),
+    "XIACY": ("小米",),
+    "1810": ("小米",),
+    "01810": ("小米",),
+    "SMICY": ("中芯国际", "中芯"),
+    "688981": ("中芯国际", "中芯"),
+    "0981": ("中芯国际", "中芯"),
+    "00981": ("中芯国际", "中芯"),
+    "688256": ("寒武纪",),
+    "600519": ("贵州茅台", "茅台"),
+    "300750": ("宁德时代",),
+    "BTC": ("比特币", "bitcoin"),
+    "ETH": ("以太坊", "ethereum"),
+    "SOL": ("solana",),
+    "XAU": ("黄金", "现货黄金", "金价"),
+    "GLD": ("黄金", "现货黄金", "金价"),
+    "IAU": ("黄金", "现货黄金", "金价"),
+    "GC": ("黄金", "现货黄金", "金价"),
+}
+
+_GENERIC_ALIAS_STOPWORDS: frozenset[str] = frozenset(
+    {"", "主账户", "现货", "永续", "合约", "现金", "稳定币", "股票", "美股", "港股", "a股", "商品", "黄金", "其他"}
+)
+
+
 def _extract_workspace_holdings(workspace: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], set[str], bool]:
-    """Extract per-instrument exposure tier, direction, sectors, and net equity validity."""
+    """Extract per-instrument exposure tier, direction, aliases, sectors, and net equity validity."""
     if not isinstance(workspace, dict) or not workspace:
         return ({}, set(), False)
 
@@ -272,18 +331,28 @@ def _extract_workspace_holdings(workspace: dict[str, Any] | None) -> tuple[dict[
     holdings_agg: dict[str, dict[str, Any]] = {}
     held_sectors: set[str] = set()
 
-    def _add_holding(sym: str, notional_abs: float, pct_of_eq: float | None, direction: str, sector: str = "") -> None:
-        s = sym.strip().upper()
-        if not s or s in ("USD", "USDT", "USDC", "CNY", "CNH", "CASH"):
+    def _add_holding(
+        sym: str,
+        notional_abs: float,
+        pct_of_eq: float | None,
+        direction: str,
+        sector: str = "",
+        extra_name: str = "",
+    ) -> None:
+        s = sym.strip().upper().split(".")[0]
+        if not s or s in ("USD", "USDT", "USDC", "CNY", "CNH", "HKD", "CASH"):
             return
         if sector:
             held_sectors.add(sector.strip().lower())
-        cell = holdings_agg.setdefault(s, {"notional_abs": 0.0, "pct_of_eq": 0.0, "dirs": set()})
+        cell = holdings_agg.setdefault(s, {"notional_abs": 0.0, "pct_of_eq": 0.0, "dirs": set(), "aliases": set()})
         cell["notional_abs"] += max(0.0, notional_abs)
         if pct_of_eq is not None and math.isfinite(pct_of_eq):
             cell["pct_of_eq"] += abs(pct_of_eq)
         if direction in ("long", "short"):
             cell["dirs"].add(direction)
+        alias_clean = str(extra_name or "").strip()
+        if alias_clean and alias_clean.upper() != s and alias_clean.lower() not in _GENERIC_ALIAS_STOPWORDS and len(alias_clean) >= 2:
+            cell["aliases"].add(alias_clean.lower())
 
     # Generic positions list
     for pos in workspace.get("positions") or []:
@@ -314,7 +383,7 @@ def _extract_workspace_holdings(workspace: dict[str, Any] | None) -> tuple[dict[
             side = "short"
         else:
             side = "long"
-        _add_holding(sym, notional, pct_val, side, str(pos.get("sector") or ""))
+        _add_holding(sym, notional, pct_val, side, str(pos.get("sector") or ""), str(pos.get("name") or ""))
 
     # Spot balances
     for sp in workspace.get("spot_balances") or []:
@@ -334,7 +403,7 @@ def _extract_workspace_holdings(workspace: dict[str, Any] | None) -> tuple[dict[
             pct_val = abs(float(sp["pct_of_equity"])) if sp.get("pct_of_equity") is not None else None
         except (TypeError, ValueError):
             pct_val = None
-        _add_holding(sym, abs(mv), pct_val, "long", str(sp.get("sector") or ""))
+        _add_holding(sym, abs(mv), pct_val, "long", str(sp.get("sector") or ""), str(sp.get("name") or ""))
 
     # Derivative positions
     for dv in workspace.get("derivative_positions") or []:
@@ -354,23 +423,21 @@ def _extract_workspace_holdings(workspace: dict[str, Any] | None) -> tuple[dict[
             pct_val = abs(float(dv["pct_of_equity"])) if dv.get("pct_of_equity") is not None else None
         except (TypeError, ValueError):
             pct_val = None
-        _add_holding(sym, notional, pct_val, side, str(dv.get("sector") or ""))
+        _add_holding(sym, notional, pct_val, side, str(dv.get("sector") or ""), str(dv.get("name") or ""))
 
     resolved: dict[str, dict[str, Any]] = {}
     for sym, info in holdings_agg.items():
         if not equity_valid:
-            tier_pts = 3.0
+            tier_pts = 12.0
             exp_pct = 0.0
         else:
             exp_pct = info["pct_of_eq"] if info["pct_of_eq"] > 0 else (info["notional_abs"] / equity_val * 100.0)
             if exp_pct >= 15.0:
-                tier_pts = 9.0
+                tier_pts = 20.0
             elif exp_pct >= 5.0:
-                tier_pts = 6.0
-            elif exp_pct > 0.0:
-                tier_pts = 3.0
+                tier_pts = 16.0
             else:
-                tier_pts = 3.0
+                tier_pts = 12.0
         dirs = info["dirs"]
         if len(dirs) > 1:
             direction = "mixed"
@@ -378,22 +445,57 @@ def _extract_workspace_holdings(workspace: dict[str, Any] | None) -> tuple[dict[
             direction = next(iter(dirs))
         else:
             direction = "long"
-        resolved[sym] = {"w": tier_pts, "pct": round(exp_pct, 2), "direction": direction}
+        resolved[sym] = {
+            "w": tier_pts,
+            "pct": round(exp_pct, 2),
+            "direction": direction,
+            "aliases": tuple(sorted(info["aliases"])),
+        }
 
     return (resolved, held_sectors, equity_valid)
 
 
-def _match_instrument_c(sym: str, item: dict[str, Any]) -> float:
-    """Return relevance c_i in {0.0, 0.5, 1.0} for an instrument ticker against a signal."""
-    s_up = sym.upper()
+def _match_instrument_c(
+    sym: str,
+    item: dict[str, Any],
+    extra_aliases: tuple[str, ...] | list[str] | None = None,
+) -> float:
+    """Return relevance c_i in {0.0, 0.5, 1.0} for an instrument ticker or bilingual alias against a signal."""
+    s_up = sym.strip().upper().split(".")[0]
+    if not s_up:
+        return 0.0
     tickers = {str(t).upper() for t in (item.get("tickers") or []) if t}
     if s_up in tickers:
         return 1.0
     title = str(item.get("title") or "")
-    if re.search(rf"(?<![A-Z0-9]){re.escape(s_up)}(?![A-Z0-9])", title.upper()):
+    title_up = title.upper()
+    title_low = title.lower()
+    if re.search(rf"(?<![A-Z0-9]){re.escape(s_up)}(?![A-Z0-9])", title_up):
         return 1.0
-    body = f"{item.get('summary') or ''} {item.get('why_it_matters') or ''}".upper()
-    if re.search(rf"(?<![A-Z0-9]){re.escape(s_up)}(?![A-Z0-9])", body):
+
+    aliases: list[str] = []
+    for raw_al in (*_INSTRUMENT_ALIASES.get(s_up, ()), *(extra_aliases or ())):
+        al = str(raw_al or "").strip().lower()
+        if al and al not in aliases:
+            aliases.append(al)
+
+    def _alias_hit(txt_low: str, txt_up: str) -> bool:
+        for al in aliases:
+            if al.isascii():
+                if re.search(rf"(?<![A-Z0-9]){re.escape(al.upper())}(?![A-Z0-9])", txt_up):
+                    return True
+            elif al in txt_low:
+                return True
+        return False
+
+    if aliases and _alias_hit(title_low, title_up):
+        return 1.0
+
+    body_raw = f"{item.get('summary') or ''} {item.get('why_it_matters') or ''}"
+    body_up = body_raw.upper()
+    if re.search(rf"(?<![A-Z0-9]){re.escape(s_up)}(?![A-Z0-9])", body_up):
+        return 0.5
+    if aliases and _alias_hit(body_raw.lower(), body_up):
         return 0.5
     return 0.0
 
@@ -571,12 +673,13 @@ def rank_curated_signals(
         item = dict(raw)
         b_score = float(item.get("attention_score") or 0.0)
         q = _clamp((b_score - 55.0) / 25.0, 0.0, 1.0)
+        q_hold = 0.0 if b_score < 55.0 else _clamp((b_score - 50.0) / 20.0, 0.0, 1.0)
 
         # H: holding score across held positions
         h_scores: list[float] = []
         matched_holdings: list[tuple[str, str, float]] = []
         for sym, h_info in holdings.items():
-            c_i = _match_instrument_c(sym, item)
+            c_i = _match_instrument_c(sym, item, extra_aliases=h_info.get("aliases"))
             if c_i > 0.0:
                 h_scores.append(h_info["w"] * c_i)
                 matched_holdings.append((sym, h_info["direction"], c_i))
@@ -598,7 +701,7 @@ def rank_curated_signals(
                     w_scores.append(3.0 * (1.0 if hs in str(item.get("title") or "").lower() else 0.5))
         w_val = max(w_scores) if w_scores else 0.0
 
-        a_val = min(11.0, max(h_val, w_val) + 0.25 * min(h_val, w_val))
+        a_val = min(24.0, max(h_val, w_val) + 0.25 * min(h_val, w_val))
 
         # T: independent multi-source 48h heat boost (strictly requires participant_count >= 2 and non-backfill)
         is_backfill = bool(item.get("is_backfill"))
@@ -628,22 +731,30 @@ def rank_curated_signals(
                 d_raw += float(mr["points"]) * c_i
         d_val = _clamp(d_raw, 0.0, 15.0)
 
+        qa_raw = (q_hold if h_val > 0.0 else q) * a_val
+        qt_raw = q * t_val
+        s_eff_raw = q * max(s_val, 0.0) + min(s_val, 0.0)
+
         final_score = round(
-            _clamp(b_score + q * (a_val + t_val + max(s_val, 0.0)) + min(s_val, 0.0) - d_val, 0.0, 100.0),
+            _clamp(b_score + qa_raw + qt_raw + s_eff_raw - d_val, 0.0, 100.0),
             1,
         )
 
         selected = bool(item.get("selected"))
-        personal_high = selected and (b_score >= 70.0) and (final_score >= 78.0) and (not is_backfill)
+        held_match = bool(matched_holdings)
+        personal_high = (not is_backfill) and (
+            (selected and b_score >= 70.0 and final_score >= 78.0)
+            or (held_match and b_score >= 60.0 and final_score >= 74.0)
+        )
 
         reasons: list[str] = [f"客观 {int(round(b_score))}"]
-        qa_eff = round(q * a_val, 1)
+        qa_eff = round(qa_raw, 1)
         if qa_eff > 0.0:
             reasons.append(f"持仓与自选 +{qa_eff:.1f}")
-        qt_eff = round(q * t_val, 1)
+        qt_eff = round(qt_raw, 1)
         if qt_eff > 0.0:
             reasons.append(f"热度 +{qt_eff:.1f}")
-        s_eff = round(q * max(s_val, 0.0) + min(s_val, 0.0), 1)
+        s_eff = round(s_eff_raw, 1)
         if s_eff != 0.0:
             reasons.append(f"规则调分 {s_eff:+.1f}")
         if d_val > 0.0:
@@ -654,6 +765,7 @@ def rank_curated_signals(
         item["base_score"] = int(round(b_score))
         item["final_score"] = final_score
         item["personal_high"] = personal_high
+        item["held_match"] = held_match
         item["is_watched"] = matched_watch
         item["reasons"] = reasons
         item["holding_radar"] = radar

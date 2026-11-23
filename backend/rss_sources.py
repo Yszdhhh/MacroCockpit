@@ -223,16 +223,6 @@ CURATED_RSS_FEEDS: tuple[dict[str, str], ...] = (
         "why": "主流加密机构与监管核心媒体动态，跟踪 ETF 资金流、稳定币立法与机构配置。",
     },
     {
-        "id": "aidaily",
-        "source": "A.I. 日报",
-        "url": "https://aidaily.fyi/zh/feed.xml",
-        "html_url": "https://aidaily.fyi/zh",
-        "category": "ai",
-        "tier": "T1_5",
-        "max_age_days": "14",
-        "why": "中文精选 AI 产业每日编年速报，覆盖大模型更新、算力生态与一线应用动态。",
-    },
-    {
         "id": "investing_macro",
         "source": "Investing.com",
         "url": "https://www.investing.com/rss/news.rss",
@@ -882,6 +872,23 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
     return signals
 
 
+_DEPRECATED_FEED_IDS: frozenset[str] = frozenset({"aidaily"})
+_DEPRECATED_SOURCES: frozenset[str] = frozenset({"a.i. 日报", "a.i.日报", "aidaily", "aidaily.fyi"})
+
+
+def _is_deprecated_feed_item(item: dict[str, Any]) -> bool:
+    iid = str(item.get("id") or "").strip().lower()
+    src = str(item.get("source") or "").strip().lower()
+    url = str(item.get("url") or "").strip().lower()
+    if any(iid.startswith(f"rss-{fid}-") for fid in _DEPRECATED_FEED_IDS):
+        return True
+    if src in _DEPRECATED_SOURCES:
+        return True
+    if "aidaily.fyi" in url:
+        return True
+    return False
+
+
 def collect_curated_rss_signals(*, force_refresh: bool = False, timeout: int = 7) -> list[dict[str, Any]]:
     """Collect curated AI & finance RSS signals plus CN finance wires with a 15-minute disk cache."""
     if not force_refresh and RSS_CACHE_PATH.exists():
@@ -892,13 +899,14 @@ def collect_curated_rss_signals(*, force_refresh: bool = False, timeout: int = 7
             if cached.get("schema_tag") == "wave1_5" and age <= RSS_CACHE_TTL and isinstance(items, list) and items:
                 out_cached: list[dict[str, Any]] = []
                 for x in items:
-                    if not isinstance(x, dict):
+                    if not isinstance(x, dict) or _is_deprecated_feed_item(x):
                         continue
                     row = dict(x)
                     if not isinstance(row.get("topics"), list):
                         row["topics"] = extract_subtopics(f"{row.get('title','')} {row.get('summary','')}", str(row.get("category") or ""))
                     out_cached.append(row)
-                return out_cached
+                if out_cached:
+                    return out_cached
         except Exception:
             pass
 
@@ -931,6 +939,7 @@ def collect_curated_rss_signals(*, force_refresh: bool = False, timeout: int = 7
         except Exception:
             pass
 
+    collected = [x for x in collected if isinstance(x, dict) and not _is_deprecated_feed_item(x)]
     if collected:
         try:
             atomic_write_json(RSS_CACHE_PATH, {"schema_tag": "wave1_5", "ts": time.time(), "items": collected})
@@ -941,7 +950,7 @@ def collect_curated_rss_signals(*, force_refresh: bool = False, timeout: int = 7
     if RSS_CACHE_PATH.exists():
         try:
             cached = json.loads(RSS_CACHE_PATH.read_text(encoding="utf-8"))
-            return [dict(x) for x in (cached.get("items") or []) if isinstance(x, dict)]
+            return [dict(x) for x in (cached.get("items") or []) if isinstance(x, dict) and not _is_deprecated_feed_item(x)]
         except Exception:
             pass
     return []

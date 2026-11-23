@@ -98,6 +98,52 @@
     telegram: "Telegram 推送",
     webhook: "外部 Webhook"
   };
+  const CASH_SYMBOLS = new Set(["USD", "USDT", "USDC", "CNY", "CNH", "HKD", "CASH"]);
+  const INSTRUMENT_ALIASES = {
+    NVDA: ["英伟达", "nvidia"],
+    AAPL: ["苹果", "apple"],
+    MSFT: ["微软", "microsoft"],
+    GOOG: ["谷歌", "google", "alphabet", "deepmind"],
+    GOOGL: ["谷歌", "google", "alphabet", "deepmind"],
+    AMZN: ["亚马逊", "amazon", "aws"],
+    META: ["meta", "扎克伯格", "llama"],
+    TSLA: ["特斯拉", "tesla", "马斯克"],
+    AMD: ["超威", "苏姿丰"],
+    TSM: ["台积电", "tsmc"],
+    AVGO: ["博通", "broadcom"],
+    INTC: ["英特尔", "intel"],
+    MU: ["美光", "micron"],
+    SMCI: ["超微电脑"],
+    MSTR: ["microstrategy"],
+    COIN: ["coinbase"],
+    PLTR: ["palantir"],
+    BABA: ["阿里巴巴", "阿里", "阿里云", "通义"],
+    9988: ["阿里巴巴", "阿里", "阿里云", "通义", "baba"],
+    TCEHY: ["腾讯", "微信"],
+    "0700": ["腾讯", "微信", "tcehy"],
+    PDD: ["拼多多", "temu"],
+    JD: ["京东"],
+    9618: ["京东", "jd"],
+    BIDU: ["百度"],
+    9888: ["百度", "bidu"],
+    BYDDY: ["比亚迪", "byd"],
+    1211: ["比亚迪", "byd"],
+    "002594": ["比亚迪", "byd"],
+    XIACY: ["小米"],
+    1810: ["小米"],
+    SMICY: ["中芯国际", "中芯"],
+    688981: ["中芯国际", "中芯"],
+    688256: ["寒武纪"],
+    600519: ["贵州茅台", "茅台"],
+    300750: ["宁德时代"],
+    BTC: ["比特币", "bitcoin"],
+    ETH: ["以太坊", "ethereum"],
+    SOL: ["solana"],
+    XAU: ["黄金", "现货黄金", "金价"],
+    GLD: ["黄金", "现货黄金", "金价"],
+    IAU: ["黄金", "现货黄金", "金价"],
+    GC: ["黄金", "现货黄金", "金价"]
+  };
 
   const appState = {
     raw: null,
@@ -177,8 +223,8 @@
       "capitalGroup", "capitalInput", "applyCapitalBtn", "currencySeg", "toggleAmtBtn",
       "themeToggleBtn", "refreshBtn", "openPushBtn", "logoutBtn", "viewNav",
       "toast", "undoBar", "undoText", "undoBtn", "undoDismissBtn", "mobileFocusBar",
-      "todayOverviewBar", "sectorRibbon", "newsModeSwitch", "dailyGlance", "execGate", "execPositions",
-      "signalScopeChips", "polarityChips", "highOnlyBtn", "keywordInput",
+      "todayOverviewBar", "sectorRibbon", "newsModeSwitch", "dailyGlance", "execStrip", "execGate", "execPositions",
+      "signalsHeading", "signalScopeChips", "polarityChips", "highOnlyBtn", "keywordInput",
       "keywordApplyBtn", "dailyCounter", "curationRulesPanel", "closeRulesPanelBtn",
       "ruleQuickForm", "ruleKindSelect", "ruleActionSelect", "ruleTargetInput",
       "curationRulesList", "sectorDrillBar", "backToOverviewBtn", "subtopicChips",
@@ -983,8 +1029,91 @@
     return null;
   }
 
+  function normalizeHeldBase(raw) {
+    return String(raw || "").trim().toUpperCase().split(/[-/.]/)[0];
+  }
+
+  function heldSymbolsList() {
+    if (appState.offline) return [];
+    const ws = appState.workspace || {};
+    const list = [];
+    const seen = new Set();
+    arr(ws.spot_balances).forEach((r) => {
+      const isCash = Boolean(r.is_cash) || String(r.asset_class || "").toLowerCase() === "cash";
+      if (isCash || !(toNum(r.qty) > 0)) return;
+      const base = normalizeHeldBase(r.symbol || r.instrument_id);
+      if (base && !CASH_SYMBOLS.has(base) && !seen.has(base)) {
+        seen.add(base);
+        list.push(base);
+      }
+    });
+    arr(ws.derivative_positions).forEach((r) => {
+      if (toNum(r.qty) === 0 || !Number.isFinite(toNum(r.qty))) return;
+      const base = normalizeHeldBase(r.symbol || r.instrument_id);
+      if (base && !CASH_SYMBOLS.has(base) && !seen.has(base)) {
+        seen.add(base);
+        list.push(base);
+      }
+    });
+    return list;
+  }
+
+  function hasHeldPositions() {
+    return heldSymbolsList().length > 0;
+  }
+
+  function signalMatchesSymbol(s, sym) {
+    const up = normalizeHeldBase(sym);
+    if (!up) return false;
+    const sigTickers = arr(s && s.tickers).map((t) => String(t).toUpperCase());
+    if (sigTickers.includes(up)) return true;
+    const rawTxt = [s && s.title, s && s.summary, s && s.why_it_matters].join(" ");
+    const txtUp = rawTxt.toUpperCase();
+    const esc = up.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp("(^|[^A-Z0-9])" + esc + "($|[^A-Z0-9])").test(txtUp)) return true;
+    const txtLow = rawTxt.toLowerCase();
+    const aliases = INSTRUMENT_ALIASES[up] || [];
+    return aliases.some((al) => {
+      const low = String(al || "").trim().toLowerCase();
+      if (!low) return false;
+      if (/^[a-z0-9._-]+$/i.test(low)) {
+        const aEsc = low.toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp("(^|[^A-Z0-9])" + aEsc + "($|[^A-Z0-9])").test(txtUp);
+      }
+      return txtLow.indexOf(low) !== -1;
+    });
+  }
+
   function renderTodayOverviewBar() {
+    const heldList = heldSymbolsList();
+    const hasHeld = heldList.length > 0;
+    document.body.setAttribute("data-has-holdings", hasHeld ? "1" : "0");
+
+    if (dom.execStrip) dom.execStrip.hidden = true;
+
+    const heldScopeBtn = dom.signalScopeChips ? dom.signalScopeChips.querySelector('[data-scope="held"]') : null;
+    if (heldScopeBtn) {
+      heldScopeBtn.hidden = !hasHeld;
+      if (!hasHeld && appState.daily.scope === "held") {
+        appState.daily.scope = "all";
+        setActive(dom.signalScopeChips, "data-scope", "all");
+      }
+    }
+
+    if (dom.signalsHeading) {
+      dom.signalsHeading.innerHTML = hasHeld
+        ? '核心快讯 <button type="button" class="badge badge-accent held-jump-btn" data-scope-jump="held" title="仅看持仓相关快讯">持仓加权 · ' + heldList.length + " 标的</button>"
+        : "核心快讯";
+    }
+
     if (!dom.todayOverviewBar) return;
+    if (!hasHeld) {
+      dom.todayOverviewBar.hidden = true;
+      dom.todayOverviewBar.innerHTML = "";
+      return;
+    }
+
+    dom.todayOverviewBar.hidden = false;
     const rg = state().risk_gate || {};
     const sum = workspaceSummary();
     const fx = getFxContext();
@@ -995,7 +1124,8 @@
     const effLev = sum && sum.effective_leverage != null ? toNum(sum.effective_leverage) : NaN;
     const cap = toNum(rg.long_risk_cap);
     const light = String(rg.light || "").toUpperCase();
-    const stamp = shortStamp(String(state().generated_at_bjt || "").replace(/\+08:00$/, ""));
+    const heldChipsHtml = heldList.slice(0, 4).map((sym) => '<span class="ticker">' + escapeHtml(sym) + "</span>").join("") +
+      (heldList.length > 4 ? '<span class="ov-sub">+' + (heldList.length - 4) + "</span>" : "");
 
     dom.todayOverviewBar.innerHTML =
       '<div class="ov-cell"><span class="ov-label">账户净值</span><b class="ov-val">' + amtHtml(netEq) + '</b><span class="ov-sub">' + escapeHtml(equitySourceNote) + "</span></div>" +
@@ -1004,12 +1134,11 @@
       '</b><span class="ov-sub">多空净比</span></div>' +
       '<div class="ov-cell"><span class="ov-label">有效杠杆</span><b class="ov-val num-plain">' +
       escapeHtml(Number.isFinite(effLev) ? effLev.toFixed(2) + "x" : sum ? "不可计算" : (Number.isFinite(cap) ? cap.toFixed(1) + "x 上限" : "1.0x")) +
-      '</b><span class="ov-sub">总风险敞口 / 净值</span></div>' +
+      '</b><span class="ov-sub">' + escapeHtml(fx.currency === "CNY" && fx.available ? "CNY " + fx.rate.toFixed(2) : "USD 计价") + "</span></div>" +
       '<div class="ov-cell"><span class="ov-label">策略门控</span><b class="ov-val">' +
       escapeHtml(RISK_LIGHT_TEXT[light] || "提示") + '</b><span class="ov-sub">' + escapeHtml(rg.label || "") + "</span></div>" +
-      '<div class="ov-cell"><span class="ov-label">估值汇率与时点</span><b class="ov-val num-plain">' +
-      escapeHtml(fx.currency === "CNY" ? (fx.available ? "1 USD = " + fx.rate.toFixed(4) : "不可用") : "USD 计价") +
-      '</b><span class="ov-sub num-plain">' + escapeHtml((fx.currency === "CNY" ? fx.label + " · " : "") + (stamp || "")) + "</span></div>";
+      '<button type="button" class="ov-cell ov-cell-held" data-scope-jump="held" title="点击筛选持仓关联快讯"><span class="ov-label">持仓加权标的</span><span class="ov-held-tags">' +
+      heldChipsHtml + '</span><span class="ov-sub">新闻权重已提升 · 点击筛选 →</span></button>';
   }
 
   function gateReasons(rg) {
@@ -1076,22 +1205,7 @@
   }
 
   function heldSymbolsSet() {
-    const ws = appState.workspace || {};
-    const syms = new Set();
-    const normBase = (raw) => String(raw || "").trim().toUpperCase().split(/[-/]/)[0];
-    arr(ws.spot_balances).forEach((r) => {
-      if (toNum(r.qty) > 0 && !isBlank(r.symbol) && String(r.asset_class || "") !== "cash") {
-        const base = normBase(r.symbol);
-        if (base) syms.add(base);
-      }
-    });
-    arr(ws.derivative_positions).forEach((r) => {
-      if (toNum(r.qty) !== 0 && !isBlank(r.symbol)) {
-        const base = normBase(r.symbol);
-        if (base) syms.add(base);
-      }
-    });
-    return syms;
+    return new Set(heldSymbolsList());
   }
 
   function watchedSymbolsAndKeywords() {
@@ -1122,8 +1236,7 @@
       };
     }
     if (Object.hasOwn(s, "holding_radar")) return null;
-    const sigTickers = arr(s.tickers).map((t) => String(t).toUpperCase());
-    const matched = sigTickers.filter((t) => heldSet.has(t));
+    const matched = Array.from(heldSet || []).filter((sym) => signalMatchesSymbol(s, sym));
     if (!matched.length) return null;
     const isSec = String(s.source || "").toUpperCase().includes("SEC");
     if (isSec || s.direction === "neutral") {
@@ -1316,7 +1429,9 @@
       });
     }
     return copy.sort((a, b) => {
-      const selDiff = (b && b.selected === true ? 1 : 0) - (a && a.selected === true ? 1 : 0);
+      const aPri = Boolean(a && (a.selected === true || a.holding_radar || a.held_match));
+      const bPri = Boolean(b && (b.selected === true || b.holding_radar || b.held_match));
+      const selDiff = (bPri ? 1 : 0) - (aPri ? 1 : 0);
       if (selDiff !== 0) return selDiff;
       const scoreDiff = signalRankScore(b) - signalRankScore(a);
       if (scoreDiff !== 0) return scoreDiff;
@@ -1619,29 +1734,31 @@
     }
 
     if (dom.todayRiskCard) {
-      const ws = appState.workspace || {};
-      const derivs = arr(ws.derivative_positions).slice().sort((a, b) => {
-        const ba = toNum(a.liq_buffer_pct);
-        const bb = toNum(b.liq_buffer_pct);
-        if (Number.isFinite(ba) && Number.isFinite(bb)) return ba - bb;
-        return Number.isFinite(ba) ? -1 : 1;
-      });
-      if (derivs.length) {
-        const top = derivs[0];
-        const buf = toNum(top.liq_buffer_pct);
-        const bufStr = top.liq_status === "无法估算" || !Number.isFinite(buf) ? "无法估算" : buf.toFixed(1) + "%";
-        dom.todayRiskCard.hidden = false;
-        dom.todayRiskCard.innerHTML =
-          '<div class="side-head"><h3>最高风险持仓关注</h3><button type="button" class="btn-link" data-jump="portfolio:derivatives">合约风控 →</button></div>' +
-          '<div class="risk-hi-row"><b>' + escapeHtml(top.symbol) + " · " + (top.side === "short" ? "空" : "多") + '</b>' +
-          '<span class="badge ' + (Number.isFinite(buf) && buf < 15 ? "badge-bear" : "badge-warn") + ' num-plain">强平距离 ' + escapeHtml(bufStr) + "</span></div>" +
-          '<div class="risk-hi-row" style="color:var(--sub)"><span>未实现盈亏</span>' + amtHtml(top.unrealized_pnl_usd, { signed: true, cls: toneClass(top.unrealized_pnl_usd) }) + "</div>";
+      if (!hasHeldPositions()) {
+        dom.todayRiskCard.hidden = true;
+        dom.todayRiskCard.innerHTML = "";
       } else {
-        const rg = state().risk_gate || {};
-        dom.todayRiskCard.hidden = false;
-        dom.todayRiskCard.innerHTML =
-          '<div class="side-head"><h3>风控优先级提示</h3><button type="button" class="btn-link" data-jump="portfolio:derivatives">录入合约 →</button></div>' +
-          '<p class="panel-meta" style="margin-top:6px">' + escapeHtml(rg.summary_exposure || "当前未录入衍生品仓位，风控按模型基准执行") + "</p>";
+        const ws = appState.workspace || {};
+        const derivs = arr(ws.derivative_positions).slice().sort((a, b) => {
+          const ba = toNum(a.liq_buffer_pct);
+          const bb = toNum(b.liq_buffer_pct);
+          if (Number.isFinite(ba) && Number.isFinite(bb)) return ba - bb;
+          return Number.isFinite(ba) ? -1 : 1;
+        });
+        if (derivs.length) {
+          const top = derivs[0];
+          const buf = toNum(top.liq_buffer_pct);
+          const bufStr = top.liq_status === "无法估算" || !Number.isFinite(buf) ? "无法估算" : buf.toFixed(1) + "%";
+          dom.todayRiskCard.hidden = false;
+          dom.todayRiskCard.innerHTML =
+            '<div class="side-head"><h3>最高风险持仓关注</h3><button type="button" class="btn-link" data-jump="portfolio:derivatives">合约风控 →</button></div>' +
+            '<div class="risk-hi-row"><b>' + escapeHtml(top.symbol) + " · " + (top.side === "short" ? "空" : "多") + '</b>' +
+            '<span class="badge ' + (Number.isFinite(buf) && buf < 15 ? "badge-bear" : "badge-warn") + ' num-plain">强平距离 ' + escapeHtml(bufStr) + "</span></div>" +
+            '<div class="risk-hi-row" style="color:var(--sub)"><span>未实现盈亏</span>' + amtHtml(top.unrealized_pnl_usd, { signed: true, cls: toneClass(top.unrealized_pnl_usd) }) + "</div>";
+        } else {
+          dom.todayRiskCard.hidden = true;
+          dom.todayRiskCard.innerHTML = "";
+        }
       }
     }
   }
@@ -2500,9 +2617,12 @@
     const bears = arr(raw.bear_points).filter((x) => !isBlank(x)).slice(0, 3);
     const actionHint = String(raw.action_hint || "").trim();
     const deepFile = findDeepReportFile(p);
+    const deepArt = deepFile ? (arr(state().articles).find((a) => a.filename === deepFile) || null) : null;
+    const deepStamp = deepArt && !isBlank(deepArt.mtime) ? "更新于 " + escapeHtml(deepArt.mtime) : "";
 
     const deepBar = deepFile
-      ? '<div class="qt-deep-bar"><button type="button" class="btn btn-sm btn-accent" data-open-article="' + escapeHtml(deepFile) + '">查阅多智能体深研纪要</button><span class="panel-meta num-plain">' + escapeHtml(deepFile) + "</span></div>"
+      ? '<div class="qt-deep-bar"><button type="button" class="btn btn-sm btn-accent" data-open-article="' + escapeHtml(deepFile) + '">查阅多智能体深研纪要</button>' +
+        (deepStamp ? '<span class="panel-meta num-plain">' + deepStamp + "</span>" : "") + "</div>"
       : '<div class="qt-deep-bar"><span class="panel-meta">暂无专项深研纪要，可在桌面端运行「多智能体深研」并同步至网页。</span></div>';
 
     return '<section class="panel quick-thesis-card">' +
@@ -3868,6 +3988,18 @@
       return enterSector(sec, { subtopic: sub, scrollToTop: false });
     }
 
+    if ((el = hit("[data-scope-jump]"))) {
+      const targetScope = el.getAttribute("data-scope-jump") || "all";
+      const hasHeld = hasHeldPositions();
+      const nextScope = targetScope === "held" && !hasHeld ? "all" : targetScope;
+      appState.daily.scope = appState.daily.scope === nextScope && nextScope === "held" ? "all" : nextScope;
+      setActive(dom.signalScopeChips, "data-scope", appState.daily.scope);
+      renderSectorRibbon();
+      renderSignals();
+      if (dom.signalsHeading) dom.signalsHeading.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      return undefined;
+    }
+
     // Signal scope, rules, card quick actions, score breakdown
     if ((el = hit("#signalScopeChips [data-scope]"))) {
       const sc = el.getAttribute("data-scope");
@@ -4172,6 +4304,9 @@
         if (e.target.matches("#signalList .tl-row[data-sig-id]")) {
           e.preventDefault();
           toggleSignalRead(e.target.getAttribute("data-sig-id"));
+        } else if (e.target.matches("[data-jump][role='button']")) {
+          e.preventDefault();
+          setView(e.target.getAttribute("data-jump"));
         }
       }
     });
