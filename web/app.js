@@ -150,6 +150,10 @@
     workspace: null,
     journal: { trade_reviews: [], essays: [], article_status: {} },
     offline: false,
+    serverRole: "",
+    lastGeneration: 0,
+    lastPollAt: 0,
+    pollTimerId: 0,
     capitalBase: DEFAULT_CAPITAL,
     currency: "USD",
     showAmounts: true,
@@ -3973,6 +3977,25 @@
 
   /* ---------- 刷新 / 登录状态 / 共享离线只读守卫 ---------- */
 
+  async function reloadLatestSnapshot() {
+    const prevGen = Number(appState.lastGeneration) || 0;
+    const st = await apiJson("/api/state");
+    let journal = st && st.journal;
+    if (!journal) {
+      try { journal = await apiJson("/api/journal"); } catch (_) { journal = {}; }
+    }
+    appState.raw = st || {};
+    appState.lastGeneration = Number((st && st.generation) || 0) || prevGen;
+    appState.journal = normalizeJournal(journal);
+    await refreshWorkspaceOnly();
+    renderAll();
+    return {
+      prevGen,
+      nextGen: appState.lastGeneration,
+      changed: appState.lastGeneration > prevGen
+    };
+  }
+
   async function refreshState() {
     if (appState.offline) return showToast("共享离线快照只读，请在本地服务刷新数据");
     if (appState.busy.refresh) return;
@@ -3980,13 +4003,31 @@
     dom.refreshBtn.classList.add("is-busy");
     dom.refreshBtn.textContent = "刷新中…";
     try {
-      const st = await apiJson("/api/refresh", { method: "POST", body: { refresh_fred: false } });
-      const journal = await apiJson("/api/journal");
-      appState.raw = st || {};
-      appState.journal = normalizeJournal(journal);
-      await refreshWorkspaceOnly();
-      renderAll();
-      showToast("数据已刷新", "ok");
+      if (appState.serverRole === "consumer") {
+        const res = await reloadLatestSnapshot();
+        showToast(res.changed ? "已同步最新快照 (#" + res.nextGen + ")" : "当前已是最新快照", "ok");
+      } else {
+        try {
+          const prevGen = Number(appState.lastGeneration) || 0;
+          const st = await apiJson("/api/refresh", { method: "POST", body: { refresh_fred: false } });
+          let journal = st && st.journal;
+          if (!journal) journal = await apiJson("/api/journal");
+          appState.raw = st || {};
+          appState.lastGeneration = Number((st && st.generation) || 0) || prevGen;
+          appState.journal = normalizeJournal(journal);
+          await refreshWorkspaceOnly();
+          renderAll();
+          showToast("数据已刷新", "ok");
+        } catch (err) {
+          if (err && err.status === 403) {
+            appState.serverRole = "consumer";
+            const res = await reloadLatestSnapshot();
+            showToast(res.changed ? "已同步最新快照 (#" + res.nextGen + ")" : "当前已是最新快照", "ok");
+          } else {
+            throw err;
+          }
+        }
+      }
     } catch (err) {
       showToast(err.message || "刷新失败", "error");
     } finally {
@@ -3999,10 +4040,49 @@
   async function checkHealth() {
     try {
       const h = await apiJson("/api/health");
+      if (h && typeof h === "object") {
+        if (h.role) appState.serverRole = String(h.role);
+        if (Number.isFinite(Number(h.generation)) && !appState.lastGeneration) {
+          appState.lastGeneration = Number(h.generation);
+        }
+      }
       if (dom.logoutBtn) dom.logoutBtn.hidden = !(h && h.auth_enabled === true) || appState.offline;
+      return h || null;
     } catch (_) {
       if (dom.logoutBtn) dom.logoutBtn.hidden = true;
+      return null;
     }
+  }
+
+  function isUserEditingOrDrawerOpen() {
+    if (document.querySelector(".drawer:not([hidden]), .composer:not([hidden])")) return true;
+    const ae = document.activeElement;
+    return Boolean(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName));
+  }
+
+  async function pollLatestIfDue() {
+    if (appState.offline || document.hidden || appState.busy.refresh || isUserEditingOrDrawerOpen()) return;
+    appState.lastPollAt = Date.now();
+    try {
+      const h = await apiJson("/api/health");
+      if (!h || typeof h !== "object") return;
+      if (h.role) appState.serverRole = String(h.role);
+      const nextGen = Number(h.generation) || 0;
+      if (nextGen > (Number(appState.lastGeneration) || 0) && !isUserEditingOrDrawerOpen()) {
+        await reloadLatestSnapshot();
+      }
+    } catch (_) { /* silent background poll */ }
+  }
+
+  function startAutoRefreshPoll() {
+    if (appState.pollTimerId || appState.offline) return;
+    appState.lastPollAt = Date.now();
+    appState.pollTimerId = window.setInterval(pollLatestIfDue, 120000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && Date.now() - (appState.lastPollAt || 0) >= 60000) {
+        pollLatestIfDue();
+      }
+    });
   }
 
   async function logout() {
@@ -4625,6 +4705,7 @@
     if (!stateFetchFailed) {
       appState.offline = false;
       appState.raw = st || {};
+      appState.lastGeneration = Number((st && st.generation) || 0) || 0;
       appState.journal = normalizeJournal(st && st.journal);
       applyModeUi();
       try {
@@ -4634,7 +4715,8 @@
         return;
       }
       await refreshWorkspaceOnly();
-      checkHealth();
+      await checkHealth();
+      startAutoRefreshPoll();
       return;
     }
     try {

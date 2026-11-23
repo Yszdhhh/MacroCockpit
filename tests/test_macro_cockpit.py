@@ -726,7 +726,7 @@ def test_server_auth_gate_muse_digest_rss_and_sync_isolation(tmp_path: Path) -> 
         # Health is public
         with urllib.request.urlopen(f"{base}/api/health", timeout=5) as resp:
             h = json.loads(resp.read().decode("utf-8"))
-            assert h["ok"] is True and h["auth_enabled"] is True
+            assert h["ok"] is True and h["auth_enabled"] is True and h["role"] == "standalone"
 
         # Unauthenticated root redirects to /login; API returns 401
         no_redir = urllib.request.build_opener(_NoRedirect())
@@ -962,6 +962,7 @@ def test_offline_bundle_strips_private_journal_and_candidates(tmp_path: Path) ->
     bundle_txt = out_html.read_text(encoding="utf-8")
 
     assert secret_marker not in bundle_txt
+    assert "styles.css?" not in bundle_txt and "app.js?" not in bundle_txt
     m = re.search(r"window\.__INITIAL_COCKPIT_STATE__\s*=\s*(\{.*?\});\s*</script>", bundle_txt, re.DOTALL)
     assert m is not None
     embedded = json.loads(m.group(1).replace("<\\/", "</"))

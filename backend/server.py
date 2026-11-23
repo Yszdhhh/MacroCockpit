@@ -277,9 +277,9 @@ def build_static_bundle(
     css_block = f"<style>\n{css_src}\n</style>"
     if "<!-- INLINE_CSS -->" in html_src:
         html_src = html_src.replace("<!-- INLINE_CSS -->", css_block, 1)
-    elif re.search(r'<link[^>]+href=["\'](?:\./)?styles\.css["\'][^>]*>', html_src, flags=re.IGNORECASE):
+    elif re.search(r'<link[^>]+href=["\'](?:\./)?styles\.css(?:\?[^"\']*)?["\'][^>]*>', html_src, flags=re.IGNORECASE):
         html_src = re.sub(
-            r'<link[^>]+href=["\'](?:\./)?styles\.css["\'][^>]*>',
+            r'<link[^>]+href=["\'](?:\./)?styles\.css(?:\?[^"\']*)?["\'][^>]*>',
             lambda _m: css_block,
             html_src,
             count=1,
@@ -311,12 +311,12 @@ def build_static_bundle(
     if "<!-- INLINE_JS -->" in html_src:
         html_src = html_src.replace("<!-- INLINE_JS -->", js_bundle, 1)
     elif re.search(
-        r'<script[^>]+src=["\'](?:\./)?app\.js["\'][^>]*>\s*</script>',
+        r'<script[^>]+src=["\'](?:\./)?app\.js(?:\?[^"\']*)?["\'][^>]*>\s*</script>',
         html_src,
         flags=re.IGNORECASE,
     ):
         html_src = re.sub(
-            r'<script[^>]+src=["\'](?:\./)?app\.js["\'][^>]*>\s*</script>',
+            r'<script[^>]+src=["\'](?:\./)?app\.js(?:\?[^"\']*)?["\'][^>]*>\s*</script>',
             lambda _m: js_bundle,
             html_src,
             count=1,
