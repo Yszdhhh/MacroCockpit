@@ -101,7 +101,10 @@ def _assert_state_contract(state: dict[str, Any]) -> None:
         val_disp = str(item["value_display"]).strip()
         assert val_disp != "" and val_disp.upper() != "N/A" and "待补" not in val_disp
         assert math.isfinite(float(item["raw_value"]))
-        assert math.isfinite(float(item["change_num"]))
+        if item["id"] == "cpi_yoy" and item["change_num"] is None:
+            assert item["change_display"] == ""
+        else:
+            assert math.isfinite(float(item["change_num"]))
 
     # us_equities: zero <=0 prices
     eq = state["us_equities"]
@@ -167,8 +170,33 @@ def test_persisted_cockpit_state_contract() -> None:
     _assert_state_contract(state)
 
 
-def test_live_state_refresh_generation_and_zero_baseline_invariant(tmp_path: Path) -> None:
-    """Run live signal_aggregator generation into tmp_path and verify baseline_pct==0 invariant."""
+def test_state_refresh_generation_and_zero_baseline_invariant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the state generator with recorded inputs, not live providers or personal files."""
+    recorded = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    for name, result in {
+        "build_macro_fred": recorded["macro_fred"],
+        "fetch_us_equities": recorded["us_equities"],
+        "_collect_eqn_signals": [],
+        "_collect_aihot_signals": [],
+        "collect_curated_rss_signals": [],
+        "fetch_sec_filings_map": {},
+        "collect_recent_sec_signals": [],
+        "compute_cross_asset_correlations": recorded["correlations"],
+        "build_stock_profiles": recorded["stock_profiles"],
+        "fetch_fx_snapshot": recorded["fx_snapshot"],
+        "fetch_crypto_quotes": recorded["crypto_quotes"],
+        "collect_curated_articles": None,
+        "build_opml_export": None,
+        "_collect_kol_digest": recorded["kol_digest"],
+        "_collect_articles": recorded["articles"],
+    }.items():
+        monkeypatch.setattr(signal_aggregator, name, lambda *args, _result=result, **kwargs: _result)
+    monkeypatch.setattr(signal_aggregator, "QUANT_LATEST_PATH", tmp_path / "quant.json")
+    monkeypatch.setattr(signal_aggregator, "DECISION_BRIEF_PATH", tmp_path / "brief.json")
+    monkeypatch.setattr(signal_aggregator, "generate_notion_viz_html", None)
+
     out_file = tmp_path / "cockpit_state_test.json"
     state = signal_aggregator.generate_cockpit_state(refresh_fred=False, output_path=out_file)
     assert out_file.is_file()

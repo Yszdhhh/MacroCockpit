@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from backend.calendar_events import filter_calendar_events
+from backend.calendar_events import MACRO_EVENT_TYPES, filter_calendar_events
 from backend.curation import rank_curated_signals
 from backend.import_positions import PreviewExpiredError, PreviewValidationError, commit_import, preview_import
 from backend.journal_store import RevisionConflictError
@@ -324,12 +324,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "calendar_list",
-        "description": "读取美联储议息、CPI、非农就业及核心标的财报日历，严格区分精确倒计时与仅日期事件。",
+        "description": "读取美联储议息、CPI、非农就业、PCE、GDP/企业利润及核心标的财报日历，严格区分精确倒计时与仅日期事件。",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "type": {"type": "string", "enum": ["all", "macro", "earnings", "fomc", "cpi", "nfp"]},
+                "type": {"type": "string", "enum": ["all", "macro", "earnings", *MACRO_EVENT_TYPES]},
                 "symbol": {"type": "string", "maxLength": 16},
                 "from": {"type": "string", "maxLength": 40},
                 "to": {"type": "string", "maxLength": 40},
@@ -992,7 +992,7 @@ class McpDispatcher:
             held_symbols=[sym] if sym else None,
         )
         if ev_type == "macro":
-            filtered = [e for e in filtered if str(e.get("event_type") or "").lower() in ("fomc", "cpi", "nfp")]
+            filtered = [e for e in filtered if str(e.get("event_type") or "").lower() in MACRO_EVENT_TYPES]
         filtered = filtered[:limit]
         return _tool_ok(
             f"日历事件 {len(filtered)} 条（类型={ev_type}）",

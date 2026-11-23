@@ -7,7 +7,7 @@ import json
 import math
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ except ImportError:
 COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
 DATA_DIR = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (COCKPIT_ROOT / "data"))
 FRED_CACHE_PATH = DATA_DIR / "fred_cache.json"
+CPI_NSA_KEY = "CPI_NSA"
 
 def _safe_home(fallback: Path) -> Path:
     try:
@@ -54,7 +55,8 @@ FRED_SERIES_MAP: dict[str, str] = {
     "US5Y": "DGS5",
     "US10Y": "DGS10",
     "US30Y": "DGS30",
-    "CPI": "CPIAUCSL",
+    # Keep the NSA series separate from the legacy CPI (CPIAUCSL, seasonally adjusted).
+    CPI_NSA_KEY: "CPIAUCNS",
     "VIX": "VIXCLS",
     "DOLLAR": "DTWEXBGS",
     "WTI": "DCOILWTICO",
@@ -329,7 +331,7 @@ def refresh_fred_cache(include_gold: bool = True) -> dict[str, list[tuple[str, f
     updated: dict[str, list[tuple[str, float]]] = {}
 
     for key, sid in FRED_SERIES_MAP.items():
-        limit = 48 if key == "CPI" else 120
+        limit = 48 if key == CPI_NSA_KEY else 120
         obs = fetch_fred_observations(sid, api_key=api_key, limit=limit)
         existing = cache_raw.get(key, [])
         merged = _merge_series([(str(x[0]), float(x[1])) for x in existing], obs)
@@ -372,9 +374,10 @@ def _load_macro_series_bundle(refresh_fred: bool = False) -> dict[str, list[tupl
             _save_fred_cache(cache_data)
 
     bundle: dict[str, list[tuple[str, float]]] = {}
-    for key in ("FEDFUNDS", "CPI", "VIX", "DOLLAR", "WTI", "SP500", "GOLD"):
+    for key in ("FEDFUNDS", "VIX", "DOLLAR", "WTI", "SP500", "GOLD"):
         base = _read_parquet_series(f"{key}.parquet", "close")
         bundle[key] = _merge_series(base, cache_data.get(key, []))
+    bundle[CPI_NSA_KEY] = cache_data.get(CPI_NSA_KEY, [])
 
     # Treasury columns
     tr_path = PARQUET_MACRO_DIR / "TREASURY.parquet"
@@ -446,8 +449,11 @@ def _make_macro_item(
     market_at: str | None = None,
     received_at: str | None = None,
     session: str | None = None,
+    allow_missing_change: bool = False,
 ) -> dict[str, Any] | None:
-    if not _is_finite(raw_value) or not _is_finite(change_num):
+    if not _is_finite(raw_value) or not (
+        _is_finite(change_num) or (allow_missing_change and change_num is None)
+    ):
         return None
     if not value_display or not as_of:
         return None
@@ -459,7 +465,7 @@ def _make_macro_item(
         "value_display": value_display,
         "raw_value": round(float(raw_value), 4),
         "change_display": change_display,
-        "change_num": round(float(change_num), 4),
+        "change_num": round(float(change_num), 4) if change_num is not None else None,
         "as_of": as_of,
         "source": source,
         "note": note,
@@ -469,30 +475,60 @@ def _make_macro_item(
     }
 
 
-def _compute_cpi_yoy(cpi_series: list[tuple[str, float]]) -> tuple[float, float, str, float] | None:
-    """Return (latest_yoy_pct, yoy_change_pp, as_of_date, latest_raw_index) using exact 12m matches."""
-    if len(cpi_series) < 13:
-        return None
-    by_ym: dict[tuple[int, int], tuple[str, float]] = {}
+def _build_cpi_yoy_item(
+    cpi_series: list[tuple[str, float]], *, received_at: str | None = None,
+) -> dict[str, Any] | None:
+    """Display the latest matched NSA CPI YoY, explicitly dating it if a newer index has no base."""
+    by_month: dict[date, float] = {}
     for dt_str, val in cpi_series:
         try:
-            dt = datetime.strptime(dt_str[:10], "%Y-%m-%d")
-            by_ym[(dt.year, dt.month)] = (dt_str[:10], val)
-        except ValueError:
+            month = date.fromisoformat(dt_str[:10]).replace(day=1)
+        except (TypeError, ValueError):
             continue
+        if _is_finite(val) and float(val) > 0:
+            by_month[month] = float(val)
 
-    yoy_points: list[tuple[str, float, float]] = []
-    for (yr, mo), (dt_str, val) in sorted(by_ym.items()):
-        prev_pair = by_ym.get((yr - 1, mo))
-        if prev_pair and prev_pair[1] > 0:
-            yoy = (val / prev_pair[1] - 1.0) * 100.0
-            yoy_points.append((dt_str, yoy, val))
-
-    if not yoy_points:
+    yoy_by_month: dict[date, float] = {}
+    for month, val in by_month.items():
+        base = by_month.get(month.replace(year=month.year - 1)) if month.year > 1 else None
+        if base is not None:
+            yoy = (val / base - 1.0) * 100.0
+            if math.isfinite(yoy):
+                yoy_by_month[month] = yoy
+    if not yoy_by_month:
         return None
-    latest_dt, latest_yoy, latest_idx = yoy_points[-1]
-    prev_yoy = yoy_points[-2][1] if len(yoy_points) >= 2 else latest_yoy
-    return (latest_yoy, latest_yoy - prev_yoy, latest_dt, latest_idx)
+
+    latest_observation = max(by_month)
+    as_of = max(yoy_by_month)
+    latest_yoy_available = as_of == latest_observation
+    yoy = yoy_by_month[as_of]
+    previous_month = (as_of - timedelta(days=1)).replace(day=1)
+    previous_yoy = yoy_by_month.get(previous_month)
+    change = yoy - previous_yoy if previous_yoy is not None else None
+    period = as_of.isoformat()[:7]
+    note = "同比使用未季调数据"
+    if not latest_yoy_available:
+        note = f"{latest_observation.isoformat()[:7]} 同比不可用（缺少上年同月数据）；{period} 为未季调数据"
+    item = _make_macro_item(
+        item_id="cpi_yoy",
+        group="美联储与利率",
+        label="美国 CPI 同比",
+        value_display=f"{yoy:.1f}%" if latest_yoy_available else f"{yoy:.1f}%（{period}）",
+        raw_value=yoy,
+        change_display=f"{change:+.2f} 个百分点" if change is not None else "",
+        change_num=change,
+        as_of=as_of.isoformat(),
+        source="FRED",
+        note=note,
+        received_at=received_at,
+        allow_missing_change=True,
+    )
+    if item:
+        item.update(
+            latest_observation_as_of=latest_observation.isoformat(),
+            latest_yoy_available=latest_yoy_available,
+        )
+    return item
 
 
 def _fetch_btc_live(quant_snap: dict[str, Any] | None) -> tuple[float, float, str, str, str] | None:
@@ -565,7 +601,7 @@ def build_macro_fred(
     *,
     refresh_fred: bool = False,
 ) -> list[dict[str, Any]]:
-    """Build normalized macro_fred items omitting any missing/null/NaN metrics."""
+    """Build normalized macro_fred items omitting metrics without a finite value."""
     if quant_snap is None and QUANT_LATEST_PATH.exists():
         try:
             quant_snap = json.loads(QUANT_LATEST_PATH.read_text(encoding="utf-8"))
@@ -629,25 +665,9 @@ def build_macro_fred(
         if item:
             items.append(item)
 
-    cpi_info = _compute_cpi_yoy(bundle.get("CPI") or [])
-    if cpi_info:
-        yoy, yoy_chg, cpi_dt, _ = cpi_info
-        latest_cpi_dt, latest_cpi_idx = (bundle.get("CPI") or [])[-1]
-        cpi_note = f"最新物价指数 {latest_cpi_idx:.2f} ({latest_cpi_dt[:7]}) · 口径为 CPIAUCSL 同比"
-        item = _make_macro_item(
-            item_id="cpi_yoy",
-            group="美联储与利率",
-            label="美国 CPI 同比",
-            value_display=f"{yoy:.2f}%",
-            raw_value=yoy,
-            change_display=f"{yoy_chg:+.2f} pct",
-            change_num=yoy_chg,
-            as_of=cpi_dt,
-            source="FRED",
-            note=cpi_note,
-        )
-        if item:
-            items.append(item)
+    cpi_item = _build_cpi_yoy_item(bundle.get(CPI_NSA_KEY) or [])
+    if cpi_item:
+        items.append(cpi_item)
 
     # Fed Net Liquidity = WALCL (M$) / 1000 - WTREGEN (M$) / 1000 - RRPONTSYD (B$)
     walcl_ser = bundle.get("WALCL") or []
