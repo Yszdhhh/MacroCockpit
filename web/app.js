@@ -4077,7 +4077,7 @@
   function startAutoRefreshPoll() {
     if (appState.pollTimerId || appState.offline) return;
     appState.lastPollAt = Date.now();
-    appState.pollTimerId = window.setInterval(pollLatestIfDue, 120000);
+    appState.pollTimerId = window.setInterval(pollLatestIfDue, 60000);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && Date.now() - (appState.lastPollAt || 0) >= 60000) {
         pollLatestIfDue();

@@ -26,6 +26,7 @@ if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
 from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
+from backend.public_snapshot import file_lock
 
 BJT = timezone(timedelta(hours=8))
 UTC = timezone.utc
@@ -869,6 +870,367 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
                 }
             )
 
+    return signals
+
+
+EQUATION_NEWS_API_BASE = "https://api.eqn.news/public/v1"
+EQUATION_DEFAULT_CHANNELS: tuple[str, ...] = ("main", "tradfi")
+_EQN_CACHE_MAX_AGE_SECONDS = 86400
+_EQN_US_EQUITIES_TICKERS: frozenset[str] = frozenset(
+    {"NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AMD", "AVGO", "TSM", "ORCL", "SPY", "QQQ", "SKHY"}
+)
+_EQN_CRYPTO_RE = re.compile(
+    r"(?i)(?:\b(?:btc|eth|sol|usdt|usdc|binance|okx|coinbase|crypto|defi|nft)\b|"
+    r"比特币|以太坊|币安|欧易|链上|跨链桥|代币|永续合约|加密|稳定币|空投|交易所)"
+)
+_EQN_EQUITIES_RE = re.compile(
+    r"(?i)(?:\b(?:nasdaq|s&p|dow|stock|shares|earnings|ipo|ceo|board|premarket|wall\s+street)\b|"
+    r"股价|盘前|盘后|财报|营收|董事会|美股|纳指|标普|芯片|半导体|英伟达|海力士|软银|微软|苹果|谷歌|亚马逊|特斯拉)"
+)
+
+
+def _extract_eqn_overview(item: dict[str, Any]) -> str:
+    ai = item.get("ai")
+    if not isinstance(ai, dict):
+        return ""
+    ov = ai.get("overview")
+    if isinstance(ov, dict):
+        zh = ov.get("zh")
+        if isinstance(zh, dict):
+            paragraphs = zh.get("paragraphs")
+            if isinstance(paragraphs, list):
+                parts: list[str] = []
+                for p in paragraphs:
+                    if isinstance(p, dict):
+                        txt = str(p.get("text") or "").strip()
+                    elif isinstance(p, str):
+                        txt = p.strip()
+                    else:
+                        txt = ""
+                    if txt:
+                        parts.append(txt)
+                joined = _clean_text(" ".join(parts), max_len=260)
+                if joined:
+                    return joined
+    summ = ai.get("summary")
+    if isinstance(summ, str) and summ.strip():
+        return _clean_text(summ, max_len=260)
+    if isinstance(summ, dict):
+        raw_s = str(summ.get("zh") or summ.get("en") or "").strip()
+        if raw_s:
+            return _clean_text(raw_s, max_len=260)
+    return ""
+
+
+def _parse_eqn_time_bjt(raw_ts: Any) -> str:
+    dt = _parse_rss_datetime(str(raw_ts or "").strip())
+    if dt is None:
+        dt = datetime.now(UTC)
+    return dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
+
+
+def _eqn_why_it_matters(combined: str, category: str) -> str:
+    low = combined.lower()
+    if any(k in low for k in ("fed", "fomc", "cpi", "pce", "treasury", "tariff", "美联储", "鲍威尔", "降息", "加息", "利率", "通胀", "美债", "国债", "关税", "非农")):
+        return "直接牵动美联储利率路径与跨资产风险定价，影响美股估值与加密流动性。"
+    if category == "ai" or any(k in low for k in ("nvda", "nvidia", "openai", "anthropic", "deepseek", "llm", "gpu", "hbm", "英伟达", "芯片", "算力", "大模型", "半导体")):
+        return "涉及 AI 算力供应链或头部科技催化，直接影响科技权重股与算力链情绪。"
+    if category == "crypto":
+        return "方程式加密一线突发快讯，易引发短线波动与流动性溢价变化。"
+    if category == "equities":
+        return "方程式海外传统金融突发快讯，直接映射美股权重与板块盘面预期。"
+    return "方程式全球宏观突发快讯，建议结合盘面波动与风险灯号跟踪后续发酵。"
+
+
+def _normalize_equation_item(item: dict[str, Any], channel: str) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    no = item.get("no")
+    if no is None or not str(no).strip():
+        return None
+
+    raw_zh = str(item.get("zh") or "").strip()
+    raw_en = str(item.get("en") or "").strip()
+    is_breaking = raw_zh.startswith("*") or raw_en.startswith("*")
+    title = _clean_text((raw_zh or raw_en).lstrip("* ").strip(), max_len=140)
+    if not title:
+        return None
+
+    overview = _extract_eqn_overview(item)
+    en_clean = raw_en.lstrip("* ").strip()
+    summary = _clean_text(overview or (en_clean if raw_zh else "") or title, max_len=260)
+
+    coins = [str(c).strip().upper() for c in (item.get("coins") or []) if str(c).strip()]
+    combined = f"{title} {raw_en} {summary}"
+    extracted = extract_tickers(combined)
+    tickers: list[str] = []
+    for sym in extracted + coins:
+        if sym and sym not in tickers:
+            tickers.append(sym)
+    tickers = tickers[:8]
+
+    item_channels = [str(c).strip().lower() for c in (item.get("channels") or []) if str(c).strip()]
+    if coins or _EQN_CRYPTO_RE.search(combined):
+        category = "crypto"
+    elif (channel == "tradfi" or "tradfi" in item_channels) and (
+        any(t in _EQN_US_EQUITIES_TICKERS for t in tickers) or _EQN_EQUITIES_RE.search(combined)
+    ):
+        category = "equities"
+    else:
+        category = _infer_cn_category(combined, "macro")
+
+    direction = _infer_direction(combined)
+    importance = "高" if (is_breaking or bool(overview) or len(tickers) >= 1) else "中"
+
+    raw_url = str(item.get("url") or "").strip()
+    src_url = str(item.get("source_url") or "").strip()
+    url = raw_url if raw_url.startswith(("http://", "https://")) else (
+        src_url if src_url.startswith(("http://", "https://")) else ""
+    )
+
+    return {
+        "id": f"eqn-{str(no).strip()}",
+        "source": "方程式快讯",
+        "source_tier": "T1_5",
+        "category": category,
+        "direction": direction,
+        "importance": importance,
+        "time_bjt": _parse_eqn_time_bjt(item.get("time")),
+        "title": title,
+        "summary": summary,
+        "why_it_matters": _eqn_why_it_matters(combined, category),
+        "tickers": tickers,
+        "topics": extract_subtopics(combined, category),
+        "url": url,
+    }
+
+
+def _load_eqn_cache(cache_p: Path | None) -> dict[str, Any]:
+    if cache_p is None or not cache_p.is_file():
+        return {"schema_version": 1, "channels": {}}
+    try:
+        with file_lock(cache_p):
+            raw = json.loads(cache_p.read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and isinstance(raw.get("channels"), dict):
+            return raw
+    except Exception:
+        pass
+    return {"schema_version": 1, "channels": {}}
+
+
+def collect_equation_news_with_meta(
+    *,
+    channels: tuple[str, ...] = EQUATION_DEFAULT_CHANNELS,
+    limit: int = 20,
+    timeout: int = 7,
+    cache_path: Path | str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch EquationNews public REST channels with ETag / If-None-Match incremental sync."""
+    if requests is None:
+        return ([], {"changed": False, "new_count": 0, "total_count": 0, "channels": {}})
+
+    cache_p = Path(cache_path) if cache_path is not None else None
+    cache_doc = _load_eqn_cache(cache_p)
+    old_channels = cache_doc.get("channels") if isinstance(cache_doc.get("channels"), dict) else {}
+
+    prior_all_ids: set[str] = set()
+    for entry in old_channels.values():
+        if isinstance(entry, dict):
+            for sig in entry.get("signals") or []:
+                if isinstance(sig, dict) and sig.get("id"):
+                    prior_all_ids.add(str(sig["id"]))
+
+    channel_results: dict[str, list[dict[str, Any]]] = {}
+    channel_updates: dict[str, dict[str, Any]] = {}
+    ch_meta: dict[str, dict[str, Any]] = {}
+    any_changed = False
+    need_write = False
+    now_epoch = time.time()
+
+    for ch in channels:
+        ch_key = str(ch or "").strip().lower()
+        if not ch_key:
+            continue
+        old_entry = old_channels.get(ch_key) if isinstance(old_channels.get(ch_key), dict) else {}
+        old_etag = str(old_entry.get("etag") or "").strip()
+        old_signals = [dict(s) for s in (old_entry.get("signals") or []) if isinstance(s, dict)]
+        old_fetched = float(old_entry.get("fetched_epoch") or 0.0)
+        old_fp = [(str(s.get("id") or ""), str(s.get("title") or ""), str(s.get("summary") or "")) for s in old_signals]
+        old_ids = {str(s.get("id") or "") for s in old_signals if s.get("id")}
+
+        headers = {**_HEADERS, "Accept": "application/json"}
+        if old_etag and old_signals:
+            headers["If-None-Match"] = old_etag
+
+        url = f"{EQUATION_NEWS_API_BASE}/news"
+        params = {"channel": ch_key, "limit": max(1, min(50, int(limit)))}
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            status_code = int(getattr(resp, "status_code", 0) or 0)
+            if status_code == 304 and old_signals:
+                channel_results[ch_key] = old_signals
+                ch_meta[ch_key] = {
+                    "status": 304,
+                    "etag": old_etag,
+                    "changed": False,
+                    "new_count": 0,
+                    "count": len(old_signals),
+                    "from_cache": True,
+                }
+                continue
+
+            if status_code == 200 and resp.content:
+                payload = json.loads(resp.content.decode("utf-8", errors="replace"))
+                items = payload.get("items") if isinstance(payload, dict) else None
+                if not isinstance(items, list):
+                    items = []
+                norm_signals: list[dict[str, Any]] = []
+                item_nos: list[Any] = []
+                seen_ch_ids: set[str] = set()
+                for raw_item in items:
+                    if isinstance(raw_item, dict) and raw_item.get("no") is not None:
+                        item_nos.append(raw_item.get("no"))
+                    sig = _normalize_equation_item(raw_item, ch_key)
+                    if sig is not None and sig["id"] not in seen_ch_ids:
+                        seen_ch_ids.add(sig["id"])
+                        norm_signals.append(sig)
+
+                resp_headers = getattr(resp, "headers", None) or {}
+                new_etag = str(resp_headers.get("ETag") or resp_headers.get("etag") or "").strip()
+                new_fp = [(str(s.get("id") or ""), str(s.get("title") or ""), str(s.get("summary") or "")) for s in norm_signals]
+                new_ids = {str(s.get("id") or "") for s in norm_signals if s.get("id")}
+                ch_new_count = len(new_ids - old_ids)
+                ch_changed = (new_fp != old_fp) or (bool(new_etag) and new_etag != old_etag and bool(norm_signals))
+
+                channel_results[ch_key] = norm_signals
+                channel_updates[ch_key] = {
+                    "etag": new_etag or old_etag,
+                    "fetched_epoch": now_epoch,
+                    "item_nos": item_nos,
+                    "signals": norm_signals,
+                }
+                if ch_changed or ch_key not in old_channels:
+                    need_write = True
+                if ch_changed:
+                    any_changed = True
+                ch_meta[ch_key] = {
+                    "status": 200,
+                    "etag": new_etag or old_etag,
+                    "changed": ch_changed,
+                    "new_count": ch_new_count,
+                    "count": len(norm_signals),
+                    "from_cache": False,
+                }
+                continue
+
+            # Unexpected HTTP status: fall back to cache if fresh enough (< 24h)
+            if old_signals and (now_epoch - old_fetched) < _EQN_CACHE_MAX_AGE_SECONDS:
+                channel_results[ch_key] = old_signals
+                ch_meta[ch_key] = {
+                    "status": status_code,
+                    "etag": old_etag,
+                    "changed": False,
+                    "new_count": 0,
+                    "count": len(old_signals),
+                    "from_cache": True,
+                }
+            else:
+                channel_results[ch_key] = []
+                ch_meta[ch_key] = {
+                    "status": status_code,
+                    "etag": old_etag,
+                    "changed": False,
+                    "new_count": 0,
+                    "count": 0,
+                    "from_cache": False,
+                }
+        except Exception:
+            if old_signals and (now_epoch - old_fetched) < _EQN_CACHE_MAX_AGE_SECONDS:
+                channel_results[ch_key] = old_signals
+                ch_meta[ch_key] = {
+                    "status": 0,
+                    "etag": old_etag,
+                    "changed": False,
+                    "new_count": 0,
+                    "count": len(old_signals),
+                    "from_cache": True,
+                }
+            else:
+                channel_results[ch_key] = []
+                ch_meta[ch_key] = {
+                    "status": 0,
+                    "etag": old_etag,
+                    "changed": False,
+                    "new_count": 0,
+                    "count": 0,
+                    "from_cache": False,
+                }
+
+    # Merge across channels preserving richer summary on cross-channel duplicates
+    merged_by_id: dict[str, dict[str, Any]] = {}
+    ordered_ids: list[str] = []
+    for ch in channels:
+        ch_key = str(ch or "").strip().lower()
+        for sig in channel_results.get(ch_key, []):
+            sid = str(sig.get("id") or "")
+            if not sid:
+                continue
+            if sid not in merged_by_id:
+                merged_by_id[sid] = sig
+                ordered_ids.append(sid)
+            else:
+                existing = merged_by_id[sid]
+                if len(str(sig.get("summary") or "")) > len(str(existing.get("summary") or "")):
+                    merged_by_id[sid] = sig
+
+    merged_signals = [merged_by_id[sid] for sid in ordered_ids]
+    total_new_count = len([sid for sid in ordered_ids if sid not in prior_all_ids])
+
+    if cache_p is not None and need_write and channel_updates:
+        try:
+            cache_p.parent.mkdir(parents=True, exist_ok=True)
+            with file_lock(cache_p):
+                latest_doc: dict[str, Any] = {"schema_version": 1, "channels": {}}
+                if cache_p.is_file():
+                    try:
+                        loaded = json.loads(cache_p.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict) and isinstance(loaded.get("channels"), dict):
+                            latest_doc = loaded
+                    except Exception:
+                        pass
+                latest_channels = dict(latest_doc.get("channels") or {})
+                latest_channels.update(channel_updates)
+                latest_doc["schema_version"] = 1
+                latest_doc["channels"] = latest_channels
+                atomic_write_json(cache_p, latest_doc)
+        except Exception:
+            pass
+
+    return (
+        merged_signals,
+        {
+            "changed": any_changed,
+            "new_count": total_new_count,
+            "total_count": len(merged_signals),
+            "channels": ch_meta,
+        },
+    )
+
+
+def collect_equation_news_signals(
+    *,
+    channels: tuple[str, ...] = EQUATION_DEFAULT_CHANNELS,
+    limit: int = 20,
+    timeout: int = 7,
+    cache_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Collect EquationNews public REST signals using optional ETag cache."""
+    signals, _meta = collect_equation_news_with_meta(
+        channels=channels,
+        limit=limit,
+        timeout=timeout,
+        cache_path=cache_path,
+    )
     return signals
 
 
