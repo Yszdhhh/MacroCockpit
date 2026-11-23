@@ -76,6 +76,8 @@ from backend.stock_research import (
     _assemble_profile,
     _create_yahoo_session,
     _fetch_yahoo_one,
+    _merge_us_fallbacks,
+    build_non_us_preset_profiles,
     build_quick_thesis,
     fetch_gtimg_batch,
 )
@@ -408,15 +410,24 @@ def _load_cn_stock_profiles(
         sp_cache = {}
     profiles: dict[str, dict[str, Any]] = {}
     for sym in symbols:
+        y_item = sp_cache.get(sym) or {}
+        g_item = gtimg_map.get(sym) or {}
+        if not (y_item.get("chart") or {}).get("closes"):
+            y_item = _merge_us_fallbacks(sym, y_item, g_item, timeout=4)
         prof = _assemble_profile(
             sym,
-            sp_cache.get(sym) or {},
-            gtimg_map.get(sym) or {},
+            y_item,
+            g_item,
             sec_filings=filings_map.get(sym, []),
             risk_gate=risk_gate,
+            market="us",
+            currency="USD",
+            currency_symbol="$",
         )
         if prof is not None:
             profiles[sym] = prof
+    for sym, prof in build_non_us_preset_profiles(risk_gate=risk_gate, timeout=5).items():
+        profiles[sym] = prof
     return profiles
 
 

@@ -40,6 +40,13 @@
         </div>
       </div>
 
+      <nav class="view-nav" id="viewNav" aria-label="主视图">
+        <button type="button" class="view-tab is-active" data-view="today" aria-current="page">今日<span class="view-count num-plain" data-count-for="today"></span></button>
+        <button type="button" class="view-tab" data-view="portfolio">持仓<span class="view-count num-plain" data-count-for="portfolio"></span></button>
+        <button type="button" class="view-tab" data-view="research">研究<span class="view-count num-plain" data-count-for="research"></span></button>
+        <button type="button" class="view-tab" data-view="records">记录<span class="view-count num-plain" data-count-for="records"></span></button>
+      </nav>
+
       <span class="status-pill" id="riskPill" data-light="" data-jump="portfolio:strategy" role="button" tabindex="0" title="风险灯号 · 点击查看策略对照">
         <span class="status-dot" aria-hidden="true"></span>
         <span class="status-text" id="riskPillText">—</span>
@@ -64,18 +71,11 @@
           <button id="toggleAmtBtn" type="button" class="btn btn-sm" aria-pressed="true">隐藏金额</button>
           <button id="themeToggleBtn" type="button" class="btn btn-sm btn-icon-text" aria-pressed="false" title="切换浅色 / 深色">深色</button>
           <button id="refreshBtn" type="button" class="btn btn-sm">刷新</button>
-          <button id="openPushBtn" type="button" class="btn btn-sm btn-accent">推送 · Muse</button>
+          <button id="openPushBtn" type="button" class="btn btn-sm">推送</button>
           <button id="logoutBtn" type="button" class="btn btn-sm btn-ghost" hidden>退出登录</button>
         </div>
       </div>
     </div>
-
-    <nav class="view-nav" id="viewNav" aria-label="主视图">
-      <button type="button" class="view-tab is-active" data-view="today" aria-current="page">今日<span class="view-count num-plain" data-count-for="today"></span></button>
-      <button type="button" class="view-tab" data-view="portfolio">持仓<span class="view-count num-plain" data-count-for="portfolio"></span></button>
-      <button type="button" class="view-tab" data-view="research">研究<span class="view-count num-plain" data-count-for="research"></span></button>
-      <button type="button" class="view-tab" data-view="records">记录<span class="view-count num-plain" data-count-for="records"></span></button>
-    </nav>
   </header>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
@@ -259,10 +259,18 @@
       <!-- 个股投研（保留 id="view-research"） -->
       <section class="subview" id="view-research" data-rsub-panel="stocks" aria-label="个股投研">
         <div class="research-bar">
-          <div class="chip-group chip-scroll" id="stockChips" role="group" aria-label="核心美股标的"></div>
-          <div class="search-box">
-            <input id="stockSearchInput" type="search" placeholder="输入美股代码如 AAPL 回车查询" autocomplete="off" aria-label="股票代码查询">
+          <div class="seg seg-sm research-market-seg" id="stockMarketTabs" role="group" aria-label="市场切换">
+            <button type="button" class="seg-btn is-active" data-smarket="all" aria-pressed="true">全部</button>
+            <button type="button" class="seg-btn" data-smarket="us" aria-pressed="false">美股</button>
+            <button type="button" class="seg-btn" data-smarket="cn" aria-pressed="false">A股</button>
+            <button type="button" class="seg-btn" data-smarket="hk" aria-pressed="false">港股</button>
+            <button type="button" class="seg-btn" data-smarket="crypto" aria-pressed="false">加密</button>
+          </div>
+          <div class="chip-group chip-scroll" id="stockChips" role="group" aria-label="投研标的列表"></div>
+          <div class="search-box search-suggest-wrap">
+            <input id="stockSearchInput" type="search" placeholder="代码或名称：AAPL / 600519 / 00700.HK / BTC / 茅台" autocomplete="off" aria-label="全市场标的代码或名称查询">
             <button type="button" class="btn btn-sm" id="stockSearchBtn">查询</button>
+            <div class="stock-suggest" id="stockSuggest" role="listbox" hidden></div>
           </div>
         </div>
 
@@ -550,21 +558,23 @@
           <pre class="push-preview" id="pushPreview">点击「试运行预览」生成脱敏内容</pre>
         </div>
 
-        <div class="push-block muse-block">
-          <h3 class="block-title">Meta Muse（Peach）/ RSS 接入</h3>
-          <div class="copy-row">
-            <span class="copy-label">每日简报 Markdown</span>
-            <code class="copy-url" id="museDigestUrl"></code>
-            <button type="button" class="btn btn-sm" data-copy-from="museDigestUrl">复制</button>
+        <details class="push-block muse-block muse-details">
+          <summary class="muse-summary">外部订阅与手动复制（RSS / 简报链接）</summary>
+          <div class="muse-details-body">
+            <div class="copy-row">
+              <span class="copy-label">每日简报 Markdown</span>
+              <code class="copy-url" id="museDigestUrl"></code>
+              <button type="button" class="btn btn-sm" data-copy-from="museDigestUrl">复制</button>
+            </div>
+            <div class="copy-row">
+              <span class="copy-label">RSS 订阅源</span>
+              <code class="copy-url" id="museFeedUrl"></code>
+              <button type="button" class="btn btn-sm" data-copy-from="museFeedUrl">复制</button>
+            </div>
+            <p class="push-hint">主题可选 <code>?topic=finance</code> · <code>?topic=ai</code> · <code>?topic=all</code>；外部订阅时追加 <code>token=访问令牌</code>，例如 <code>?topic=all&amp;token=访问令牌</code>。</p>
+            <button type="button" class="btn btn-sm btn-block" id="copyMuseBtn">复制今日简报 Markdown</button>
           </div>
-          <div class="copy-row">
-            <span class="copy-label">RSS 订阅源</span>
-            <code class="copy-url" id="museFeedUrl"></code>
-            <button type="button" class="btn btn-sm" data-copy-from="museFeedUrl">复制</button>
-          </div>
-          <p class="push-hint">主题可选 <code>?topic=finance</code> · <code>?topic=ai</code> · <code>?topic=all</code>；外部订阅时追加 <code>token=访问令牌</code>，例如 <code>?topic=all&amp;token=访问令牌</code>。</p>
-          <button type="button" class="btn btn-accent btn-block" id="copyMuseBtn">复制今日 Muse 简报</button>
-        </div>
+        </details>
       </div>
     </section>
   </div>

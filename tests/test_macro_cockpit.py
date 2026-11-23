@@ -923,11 +923,13 @@ def test_six_module_web_ui_and_offline_bundle_invariants() -> None:
     assert "<title>宏观金融决策驾驶舱</title>" in html_src
     for required_id in (
         "view-today", "view-portfolio", "view-research-hub", "view-research", "view-records",
-        "newsModeSwitch", "sectorRibbon", "subtopicChips", "positionDrawer", "importDrawer",
-        "articleDrawer", "pushDrawer", "mobileTabbar", "museDigestUrl", "museFeedUrl",
+        "newsModeSwitch", "sectorRibbon", "subtopicChips", "stockMarketTabs", "stockSuggest",
+        "positionDrawer", "importDrawer", "articleDrawer", "pushDrawer", "mobileTabbar",
+        "museDigestUrl", "museFeedUrl",
     ):
         assert f'id="{required_id}"' in html_src
     assert 'data-sector="ashare"' in html_src
+    assert ">推送<" in html_src
 
     combined = "\n".join((html_src, css_src, js_src))
     for pat in FORBIDDEN_JARGON:
@@ -1177,6 +1179,79 @@ def test_stock_research_profiles_and_api_endpoint(tmp_path: Path) -> None:
         with pytest.raises(urllib.error.HTTPError) as exc_400:
             urllib.request.urlopen(f"{base}/api/stock?symbol={bad_q}&token=ro-tok", timeout=5)
         assert exc_400.value.code == 400
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_multimarket_symbol_resolution_search_and_consumer_on_demand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify A-share/HK/US/Crypto resolution, /api/stock/search, and consumer on-demand lookup."""
+    from backend import stock_research
+    from backend.public_snapshot import publish_generation
+
+    assert stock_research.resolve_research_symbol("AAPL") == ("AAPL", "us")
+    assert stock_research.resolve_research_symbol("600519") == ("600519.SH", "cn")
+    assert stock_research.resolve_research_symbol("sz300750") == ("300750.SZ", "cn")
+    assert stock_research.resolve_research_symbol("700.HK") == ("00700.HK", "hk")
+    assert stock_research.resolve_research_symbol("00700") == ("00700.HK", "hk")
+    assert stock_research.resolve_research_symbol("BTC-USDT") == ("BTC", "crypto")
+    assert stock_research.resolve_research_symbol("茅台") == ("600519.SH", "cn")
+    assert stock_research.resolve_research_symbol("腾讯") == ("00700.HK", "hk")
+    assert stock_research.resolve_research_symbol("../etc") is None
+
+    # Consumer mode with published state allows authenticated /api/stock/search & on-demand /api/stock
+    publish_generation(
+        tmp_path,
+        {"generated_at_bjt": "2026-11-23 20:00:00+08:00", "stock_profiles": {}, "signals": []},
+    )
+    stub_profiles = {
+        "600519.SH": {"symbol": "600519.SH", "market": "cn", "currency_symbol": "¥", "price": 1439.0, "name_cn": "贵州茅台"},
+        "00700.HK": {"symbol": "00700.HK", "market": "hk", "currency_symbol": "HK$", "price": 344.0, "name_cn": "腾讯控股"},
+        "DOGE": {"symbol": "DOGE", "market": "crypto", "currency_symbol": "$", "price": 0.21, "name_cn": "DOGE 现货"},
+    }
+    monkeypatch.setattr(
+        stock_research,
+        "fetch_single_stock_profile",
+        lambda sym, risk_gate=None: dict(stub_profiles[sym]) if sym in stub_profiles else None,
+    )
+
+    srv = server.create_server(
+        "127.0.0.1",
+        0,
+        web_dir=WEB_DIR,
+        state_path=tmp_path / "data" / "cockpit_state.json",
+        db_path=tmp_path / "data" / "j.db",
+        access_password="pw-c",
+        read_token="ro-mm",
+        sync_token="sync-mm",
+        role="consumer",
+    )
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        for sym_q, exp_sym in [("茅台", "600519.SH"), ("700.HK", "00700.HK"), ("DOGE-USDT", "DOGE")]:
+            url = f"{base}/api/stock?symbol={urllib.parse.quote(sym_q)}&token=ro-mm"
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                assert resp.status == 200
+                data = json.loads(resp.read().decode("utf-8"))
+                assert data["symbol"] == exp_sym
+
+        with pytest.raises(urllib.error.HTTPError) as exc_s401:
+            urllib.request.urlopen(f"{base}/api/stock/search?q=BTC", timeout=5)
+        assert exc_s401.value.code == 401
+
+        with urllib.request.urlopen(f"{base}/api/stock/search?q={urllib.parse.quote('茅台')}&token=ro-mm", timeout=5) as resp:
+            assert resp.status == 200
+            items = json.loads(resp.read().decode("utf-8")).get("items") or []
+            assert any(it.get("symbol") == "600519.SH" for it in items)
+
+        with pytest.raises(urllib.error.HTTPError) as exc_b400:
+            urllib.request.urlopen(f"{base}/api/stock?symbol={urllib.parse.quote('../etc')}&token=ro-mm", timeout=5)
+        assert exc_b400.value.code == 400
     finally:
         srv.shutdown()
         srv.server_close()
