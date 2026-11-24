@@ -5,7 +5,9 @@ import json
 import math
 import os
 import re
+import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +24,9 @@ from backend.sec_edgar import SEC_CIK_MAP, fetch_sec_filings_map
 BJT = timezone(timedelta(hours=8))
 CACHE_PATH = DATA_DIR / "stock_profiles_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600
+ON_DEMAND_TTL_SECONDS = 600
+_ON_DEMAND_LOCK = threading.Lock()
+_ON_DEMAND_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 _HEADERS = {
     "User-Agent": (
@@ -198,6 +203,240 @@ STOCK_META_MAP: dict[str, tuple[str, str, str, str, str, str]] = {
     row[0]: row for row in CORE_RESEARCH_STOCKS
 }
 
+# (symbol, cn_name, exchange, sector_cn, peer_group, overview_cn, market, currency, currency_symbol)
+CORE_MULTI_MARKET_ASSETS: tuple[tuple[str, str, str, str, str, str, str, str, str], ...] = (
+    # A股核心代表
+    (
+        "600519.SH",
+        "贵州茅台",
+        "上交所",
+        "消费 · 白酒龙头",
+        "A股核心蓝筹",
+        "中国高端酱香型白酒绝对龙头，凭借稀缺产能、强品牌定价权与直销渠道改革维持超高毛利率与充沛经营现金流。",
+        "cn",
+        "CNY",
+        "¥",
+    ),
+    (
+        "300750.SZ",
+        "宁德时代",
+        "深交所",
+        "新能源 · 动力与储能电池",
+        "A股制造与科技龙头",
+        "全球动力电池与储能系统装机量第一，依托神行/麒麟电池技术迭代与海外产能布局保持领先盈利能力。",
+        "cn",
+        "CNY",
+        "¥",
+    ),
+    (
+        "002594.SZ",
+        "比亚迪",
+        "深交所",
+        "新能源车 · 整车与智驾",
+        "A股制造与科技龙头",
+        "具备三电全产业链垂直整合能力的新能源乘用车龙头，高端车型出海与高阶智驾平权推动单车盈利持续优化。",
+        "cn",
+        "CNY",
+        "¥",
+    ),
+    (
+        "601318.SH",
+        "中国平安",
+        "上交所",
+        "金融 · 综合保险与资管",
+        "A股核心蓝筹",
+        "国内综合金融与寿险龙头，估值对十年期国债收益率与权益投资收益高度敏感，兼具高股息防御属性。",
+        "cn",
+        "CNY",
+        "¥",
+    ),
+    (
+        "688981.SH",
+        "中芯国际",
+        "上交所",
+        "半导体 · 晶圆代工",
+        "A股制造与科技龙头",
+        "中国大陆技术最先进、规模最大的集成电路晶圆代工企业，核心受益于本土算力芯片与成熟制程国产替代需求。",
+        "cn",
+        "CNY",
+        "¥",
+    ),
+    # 港股核心代表
+    (
+        "00700.HK",
+        "腾讯控股",
+        "港交所",
+        "互联网 · 社交与游戏及AI",
+        "港股核心科技",
+        "坐拥微信超级流量入口与全球头部游戏研发发行能力，混元大模型与视频号商业化持续增厚高毛利广告与现金流。",
+        "hk",
+        "HKD",
+        "HK$",
+    ),
+    (
+        "09988.HK",
+        "阿里巴巴-W",
+        "港交所",
+        "互联网 · 电商与阿里云",
+        "港股核心科技",
+        "国内电商基础设施与阿里云底座龙头，通义千问开源生态与云智能 AI 收入加速构成估值重估主线。",
+        "hk",
+        "HKD",
+        "HK$",
+    ),
+    (
+        "03690.HK",
+        "美团-W",
+        "港交所",
+        "互联网 · 本地生活与即时零售",
+        "港股核心科技",
+        "中国本地生活服务与即时配送绝对领先平台，到店酒旅竞争格局趋稳叠加无人机及中东出海打开增量空间。",
+        "hk",
+        "HKD",
+        "HK$",
+    ),
+    (
+        "01810.HK",
+        "小米集团-W",
+        "港交所",
+        "硬科技 · 人车家全生态",
+        "港股核心科技",
+        "集智能手机全球前三、IoT 消费级生态与小米汽车高速放量于一体，汽车毛利率超预期驱动估值框架切换。",
+        "hk",
+        "HKD",
+        "HK$",
+    ),
+    # 加密核心现货
+    (
+        "BTC",
+        "比特币",
+        "现货 · Binance/Gate",
+        "数字资产 · 核心价值存储",
+        "加密核心资产",
+        "全球市值最大去中心化数字资产，兼具宏观流动性风向标与机构现货 ETF 配置底仓属性。",
+        "crypto",
+        "USD",
+        "$",
+    ),
+    (
+        "ETH",
+        "以太坊",
+        "现货 · Binance/Gate",
+        "数字资产 · 智能合约与结算层",
+        "加密核心资产",
+        "全球最大的智能合约、稳定币与链上金融结算公链生态，价格走势对链上活跃度与风险偏好高度敏感。",
+        "crypto",
+        "USD",
+        "$",
+    ),
+    (
+        "SOL",
+        "Solana",
+        "现货 · Binance/Gate",
+        "数字资产 · 高性能公链",
+        "加密核心资产",
+        "高吞吐量、低手续费单体架构公链，活跃度集中在链上交易、消费级应用与高频金融基础设施。",
+        "crypto",
+        "USD",
+        "$",
+    ),
+    (
+        "BNB",
+        "币安币",
+        "现货 · Binance/Gate",
+        "数字资产 · 交易所与链上生态",
+        "加密核心资产",
+        "全球头部加密交易平台及 BNB Chain 核心生态资产，表现与全市场现货成交活跃度及销毁通缩机制挂钩。",
+        "crypto",
+        "USD",
+        "$",
+    ),
+)
+
+MULTI_MARKET_META_MAP: dict[str, dict[str, str]] = {
+    row[0]: {
+        "symbol": row[0],
+        "name_cn": row[1],
+        "exchange": row[2],
+        "sector_cn": row[3],
+        "peer_group": row[4],
+        "overview_cn": row[5],
+        "market": "us",
+        "currency": "USD",
+        "currency_symbol": "$",
+    }
+    for row in CORE_RESEARCH_STOCKS
+}
+for _row in CORE_MULTI_MARKET_ASSETS:
+    MULTI_MARKET_META_MAP[_row[0]] = {
+        "symbol": _row[0],
+        "name_cn": _row[1],
+        "exchange": _row[2],
+        "sector_cn": _row[3],
+        "peer_group": _row[4],
+        "overview_cn": _row[5],
+        "market": _row[6],
+        "currency": _row[7],
+        "currency_symbol": _row[8],
+    }
+
+KNOWN_CRYPTO_BASES: frozenset[str] = frozenset(
+    {
+        "BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "ADA", "AVAX", "LINK", "SUI",
+        "AAVE", "UNI", "ARB", "OP", "TON", "LTC", "TRX", "PEPE", "HYPE", "TAO",
+        "RENDER", "WIF", "APT", "NEAR", "FIL", "ATOM", "DOT", "POL", "BCH", "ENA",
+        "ONDO", "SHIB", "ICP", "INJ", "SEI", "TIA", "FET", "STX", "ORDI", "XLM", "ETC",
+    }
+)
+
+_RESEARCH_ALIASES: dict[str, tuple[str, str]] = {
+    "茅台": ("600519.SH", "cn"),
+    "贵州茅台": ("600519.SH", "cn"),
+    "宁德": ("300750.SZ", "cn"),
+    "宁德时代": ("300750.SZ", "cn"),
+    "比亚迪": ("002594.SZ", "cn"),
+    "平安": ("601318.SH", "cn"),
+    "中国平安": ("601318.SH", "cn"),
+    "中芯": ("688981.SH", "cn"),
+    "中芯国际": ("688981.SH", "cn"),
+    "五粮液": ("000858.SZ", "cn"),
+    "招行": ("600036.SH", "cn"),
+    "招商银行": ("600036.SH", "cn"),
+    "腾讯": ("00700.HK", "hk"),
+    "腾讯控股": ("00700.HK", "hk"),
+    "阿里": ("09988.HK", "hk"),
+    "阿里巴巴": ("09988.HK", "hk"),
+    "美团": ("03690.HK", "hk"),
+    "小米": ("01810.HK", "hk"),
+    "小米集团": ("01810.HK", "hk"),
+    "比特币": ("BTC", "crypto"),
+    "大饼": ("BTC", "crypto"),
+    "以太坊": ("ETH", "crypto"),
+    "以太": ("ETH", "crypto"),
+    "二饼": ("ETH", "crypto"),
+    "狗狗币": ("DOGE", "crypto"),
+    "瑞波": ("XRP", "crypto"),
+    "苹果": ("AAPL", "us"),
+    "英伟达": ("NVDA", "us"),
+    "微软": ("MSFT", "us"),
+    "谷歌": ("GOOG", "us"),
+    "亚马逊": ("AMZN", "us"),
+    "特斯拉": ("TSLA", "us"),
+    "台积电": ("TSM", "us"),
+    "美光": ("MU", "us"),
+    "英特尔": ("INTC", "us"),
+    "高通": ("QCOM", "us"),
+    "博通": ("AVGO", "us"),
+    "甲骨文": ("ORCL", "us"),
+    "奈飞": ("NFLX", "us"),
+    "超微": ("SMCI", "us"),
+    "拼多多": ("PDD", "us"),
+    "百度": ("BIDU", "us"),
+    "京东": ("JD", "us"),
+}
+for _sym, _meta in MULTI_MARKET_META_MAP.items():
+    _RESEARCH_ALIASES.setdefault(_meta["name_cn"].upper(), (_sym, _meta["market"]))
+
 _FORBIDDEN_SCRUB = (
     (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
     (r"\bTier-1\b", "核心"),
@@ -216,6 +455,7 @@ def _scrub(text: Any) -> str:
         return ""
     for pat, rep in _FORBIDDEN_SCRUB:
         s = re.sub(pat, rep, s, flags=re.IGNORECASE)
+    s = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", s)
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
@@ -246,6 +486,20 @@ def _fmt_money_compact(val: Any, *, currency: str = "$") -> str:
     return f"{sign}{currency}{a:,.2f}"
 
 
+def _fmt_px(val: Any, currency: str = "$") -> str:
+    num = _finite(val)
+    if num is None:
+        return "—"
+    a = abs(num)
+    if a == 0:
+        return f"{currency}0.00"
+    if a >= 1.0:
+        return f"{currency}{num:,.2f}"
+    if a >= 0.01:
+        return f"{currency}{num:.4f}"
+    return f"{currency}{num:.6f}"
+
+
 def _fmt_num(val: Any, decimals: int = 2, suffix: str = "") -> str:
     num = _finite(val)
     if num is None:
@@ -267,8 +521,233 @@ def _gtimg_code(symbol: str) -> str:
     return f"us{clean}"
 
 
+def _smartbox_lookup(query: str, *, limit: int = 8, timeout: int = 3) -> list[dict[str, str]]:
+    """Query Tencent smartbox for A-share, HK, and US symbols by code, pinyin, or Chinese name."""
+    if requests is None or not query.strip():
+        return []
+    try:
+        resp = requests.get(
+            f"https://smartbox.gtimg.cn/s3/?v=2&q={urllib.parse.quote(query.strip())}&t=all",
+            headers=_HEADERS,
+            timeout=timeout,
+        )
+        if resp.status_code != 200 or not resp.text:
+            return []
+    except Exception:
+        return []
+
+    m = re.search(r'v_hint="([^"]*)"', resp.text)
+    if not m or not m.group(1):
+        return []
+
+    raw_items = m.group(1).split("^")
+    scored: list[tuple[int, dict[str, str]]] = []
+    seen: set[str] = set()
+    for entry in raw_items:
+        parts = entry.split("~")
+        if len(parts) < 5:
+            continue
+        mkt_raw = parts[0].strip().lower()
+        code_raw = parts[1].strip()
+        try:
+            name_raw = code_raw if not parts[2] else parts[2].encode("utf-8").decode("unicode_escape")
+        except Exception:
+            name_raw = parts[2]
+        name_clean = _scrub(name_raw)
+        kind = parts[4].strip().upper()
+        if "ZS" in kind or "JJ" in kind:
+            continue
+
+        canon = ""
+        market = ""
+        exch_cn = ""
+        priority = 10
+        if mkt_raw in ("sh", "sz", "bj") and re.fullmatch(r"\d{6}", code_raw):
+            if mkt_raw == "sh" and code_raw.startswith(("50", "51", "56", "58")):
+                priority = 40
+            elif mkt_raw == "sz" and code_raw.startswith(("15", "16", "18")):
+                priority = 40
+            elif "GP" in kind:
+                priority = 10
+            else:
+                priority = 30
+            canon = f"{code_raw}.{mkt_raw.upper()}"
+            market = "cn"
+            exch_cn = {"sh": "上交所", "sz": "深交所", "bj": "北交所"}[mkt_raw]
+        elif mkt_raw == "hk" and re.fullmatch(r"\d{1,5}", code_raw):
+            code5 = code_raw.zfill(5)
+            # Deprioritize HK RMB dual-counter tickers (80xxx/89xxx)
+            priority = 60 if code5.startswith(("80", "89")) else 15
+            canon = f"{code5}.HK"
+            market = "hk"
+            exch_cn = "港交所"
+        elif mkt_raw == "us":
+            base_us = code_raw.split(".")[0].strip().upper()
+            if not re.fullmatch(r"[A-Z]{1,6}(?:-[A-Z])?", base_us):
+                continue
+            canon = base_us
+            market = "us"
+            exch_cn = "美股"
+            # Prefer primary NYSE/NASDAQ over OTC pink sheets (.ps)
+            priority = 50 if code_raw.lower().endswith(".ps") else 12
+        else:
+            continue
+
+        if canon in seen:
+            continue
+        seen.add(canon)
+        scored.append(
+            (
+                priority,
+                {
+                    "symbol": canon,
+                    "name": name_clean or canon,
+                    "market": market,
+                    "exchange": exch_cn,
+                },
+            )
+        )
+
+    scored.sort(key=lambda pair: pair[0])
+    return [item for _, item in scored[:limit]]
+
+
+def resolve_research_symbol(raw: str, *, timeout: int = 3) -> tuple[str, str] | None:
+    """Resolve code or Chinese company/coin name into (canonical_symbol, market)."""
+    q = str(raw or "").strip()
+    if not q or len(q) > 32:
+        return None
+    if any(ch in q for ch in ("/", "\\", "..", "<", ">", "\x00", "\n", "\r")):
+        return None
+
+    up = q.upper()
+    if q in _RESEARCH_ALIASES:
+        return _RESEARCH_ALIASES[q]
+    if up in _RESEARCH_ALIASES:
+        return _RESEARCH_ALIASES[up]
+    if up in MULTI_MARKET_META_MAP:
+        return (up, MULTI_MARKET_META_MAP[up]["market"])
+
+    if up.startswith("CRYPTO:"):
+        base = up.split(":", 1)[1].strip()
+        base = re.sub(r"(?:-|_)?USDT?$", "", base)
+        if re.fullmatch(r"[A-Z0-9]{2,12}", base):
+            return (base, "crypto")
+        return None
+
+    # Crypto pair formats like BTC-USDT, ETH_USDT, SOL-USD, BTCUSDT
+    m_pair = re.fullmatch(r"([A-Z0-9]{2,10})(?:[-_](?:USDT?|USDC)|USDT)", up)
+    if m_pair:
+        base = m_pair.group(1)
+        if base in KNOWN_CRYPTO_BASES or "-" in up or "_" in up or up.endswith("USDT"):
+            return (base, "crypto")
+    if up in KNOWN_CRYPTO_BASES:
+        return (up, "crypto")
+
+    # A-share explicit suffixes/prefixes or standard 6-digit code
+    m_cn_suf = re.fullmatch(r"(\d{6})\.(SH|SZ|BJ)", up)
+    if m_cn_suf:
+        return (f"{m_cn_suf.group(1)}.{m_cn_suf.group(2)}", "cn")
+    m_cn_pre = re.fullmatch(r"(SH|SZ|BJ)(\d{6})", up)
+    if m_cn_pre:
+        return (f"{m_cn_pre.group(2)}.{m_cn_pre.group(1)}", "cn")
+    if re.fullmatch(r"\d{6}", up):
+        if up.startswith(("6", "5")):
+            return (f"{up}.SH", "cn")
+        if up.startswith(("0", "3", "1")):
+            return (f"{up}.SZ", "cn")
+        if up.startswith(("4", "8", "92")):
+            return (f"{up}.BJ", "cn")
+
+    # HK explicit suffixes/prefixes or 5-digit 0xxxx
+    m_hk_suf = re.fullmatch(r"0*(\d{1,5})\.HK", up)
+    if m_hk_suf:
+        return (f"{int(m_hk_suf.group(1)):05d}.HK", "hk")
+    m_hk_pre = re.fullmatch(r"HK0*(\d{1,5})", up)
+    if m_hk_pre:
+        return (f"{int(m_hk_pre.group(1)):05d}.HK", "hk")
+    if re.fullmatch(r"0\d{4}", up):
+        return (f"{up}.HK", "hk")
+
+    # US ticker (ASCII letters/dots, optionally with .US)
+    m_us_suf = re.fullmatch(r"([A-Z]{1,6}(?:\.[A-Z]{1,2})?)\.US", up)
+    if m_us_suf:
+        return (m_us_suf.group(1), "us")
+    if re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z]{1,2})?", up):
+        return (up, "us")
+
+    # Fallback: smartbox for Chinese names / Pinyin / partial queries
+    sb = _smartbox_lookup(q, limit=1, timeout=timeout)
+    if sb:
+        return (sb[0]["symbol"], sb[0]["market"])
+    return None
+
+
+def search_research_symbols(query: str, limit: int = 8, *, timeout: int = 3) -> list[dict[str, str]]:
+    """Return autocomplete candidates across US, A-share, HK, and Crypto markets."""
+    q = str(query or "").strip()
+    if not q or len(q) > 40:
+        return []
+    if any(ch in q for ch in ("/", "\\", "..", "<", ">", "\x00", "\n", "\r")):
+        return []
+
+    up = q.upper()
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(item: dict[str, str]) -> None:
+        sym = item["symbol"]
+        if sym in seen or len(out) >= limit:
+            return
+        seen.add(sym)
+        out.append(item)
+
+    # Local presets & aliases first
+    for sym, meta in MULTI_MARKET_META_MAP.items():
+        if up in sym.upper() or q in meta["name_cn"] or up in meta["name_cn"].upper():
+            _add(
+                {
+                    "symbol": sym,
+                    "name": meta["name_cn"],
+                    "market": meta["market"],
+                    "exchange": meta["exchange"],
+                }
+            )
+
+    for alias_key, (canon, mkt) in _RESEARCH_ALIASES.items():
+        if q in alias_key or up in alias_key.upper():
+            meta = MULTI_MARKET_META_MAP.get(canon)
+            _add(
+                {
+                    "symbol": canon,
+                    "name": meta["name_cn"] if meta else alias_key,
+                    "market": mkt,
+                    "exchange": meta["exchange"] if meta else {"cn": "A股", "hk": "港股", "us": "美股", "crypto": "加密现货"}[mkt],
+                }
+            )
+
+    if re.fullmatch(r"[A-Z0-9]{1,8}", up) and any(c.startswith(up) for c in KNOWN_CRYPTO_BASES):
+        for coin in sorted(KNOWN_CRYPTO_BASES):
+            if coin.startswith(up):
+                meta = MULTI_MARKET_META_MAP.get(coin)
+                _add(
+                    {
+                        "symbol": coin,
+                        "name": meta["name_cn"] if meta else f"{coin} 现货",
+                        "market": "crypto",
+                        "exchange": "现货 · Binance/Gate",
+                    }
+                )
+
+    if len(out) < limit:
+        for sb_item in _smartbox_lookup(q, limit=limit, timeout=timeout):
+            _add(sb_item)
+
+    return out[:limit]
+
+
 def fetch_gtimg_batch(symbols: list[str], timeout: int = 6) -> dict[str, dict[str, Any]]:
-    """Fast batch quote + valuation snapshot from Tencent qt.gtimg.cn."""
+    """Fast batch quote + valuation snapshot for US tickers from Tencent qt.gtimg.cn."""
     if requests is None or not symbols:
         return {}
     codes = [_gtimg_code(s) for s in symbols]
@@ -289,7 +768,8 @@ def fetch_gtimg_batch(symbols: list[str], timeout: int = 6) -> dict[str, dict[st
             parts = line.split("~")
             if len(parts) < 50:
                 continue
-            raw_sym = parts[2].split(".")[0].strip().upper()
+            kline_sym = parts[2].strip()
+            raw_sym = kline_sym.split(".")[0].strip().upper()
             price = _finite(parts[3])
             if not raw_sym or price is None or price <= 0:
                 continue
@@ -300,7 +780,7 @@ def fetch_gtimg_batch(symbols: list[str], timeout: int = 6) -> dict[str, dict[st
                 div_pct = None
             ts_raw = parts[30].strip()
             out[raw_sym] = {
-                "price": round(price, 2),
+                "price": round(price, 4 if price < 1 else 2),
                 "prev_close": _finite(parts[4]),
                 "change_amt": _finite(parts[31]),
                 "change_pct": _finite(parts[32]),
@@ -314,13 +794,412 @@ def fetch_gtimg_batch(symbols: list[str], timeout: int = 6) -> dict[str, dict[st
                 "pe_ttm": _finite(parts[39]),
                 "pb": _finite(parts[51]) if len(parts) > 51 else None,
                 "mcap_raw": mcap_usd,
+                "name_cn": parts[1].strip(),
                 "name_en": parts[46].strip(),
                 "eps_ttm": _finite(parts[47]),
                 "high_52w": _finite(parts[48]),
                 "low_52w": _finite(parts[49]),
                 "dividend_yield_pct": div_pct,
+                "gtimg_kline_sym": kline_sym,
             }
     return out
+
+
+def fetch_ifzq_kline(
+    kline_code: str,
+    *,
+    is_us: bool = False,
+    limit: int = 252,
+    timeout: int = 5,
+) -> dict[str, Any]:
+    """Fetch 1Y daily qfq OHLC history from Tencent web.ifzq.gtimg.cn (CN-direct)."""
+    if requests is None or not kline_code:
+        return {}
+    endpoint = (
+        f"https://web.ifzq.gtimg.cn/appstock/app/usfqkline/get?param={urllib.parse.quote(kline_code)},day,,,{limit},qfq"
+        if is_us
+        else f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={urllib.parse.quote(kline_code)},day,,,{limit},qfq"
+    )
+    try:
+        resp = requests.get(endpoint, headers=_HEADERS, timeout=timeout)
+        if resp.status_code != 200:
+            return {}
+        data = (resp.json() or {}).get("data") or {}
+    except Exception:
+        return {}
+
+    entry = data.get(kline_code)
+    if not isinstance(entry, dict) and data:
+        first_val = next(iter(data.values()), None)
+        entry = first_val if isinstance(first_val, dict) else {}
+    if not isinstance(entry, dict):
+        return {}
+
+    rows = entry.get("qfqday") or entry.get("day") or []
+    dates: list[str] = []
+    closes: list[float] = []
+    highs: list[float] = []
+    lows: list[float] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        dt = str(row[0] or "").strip()[:10]
+        cl = _finite(row[2])
+        if not dt or cl is None or cl <= 0:
+            continue
+        hi = _finite(row[3]) if len(row) > 3 else cl
+        lo = _finite(row[4]) if len(row) > 4 else cl
+        dates.append(dt)
+        closes.append(round(cl, 4 if cl < 1 else 2))
+        if hi is not None and hi > 0:
+            highs.append(hi)
+        if lo is not None and lo > 0:
+            lows.append(lo)
+
+    if not closes:
+        return {}
+    return {
+        "dates": dates[-limit:],
+        "closes": closes[-limit:],
+        "high_52w": round(max(highs), 4 if max(highs) < 1 else 2) if highs else None,
+        "low_52w": round(min(lows), 4 if min(lows) < 1 else 2) if lows else None,
+    }
+
+
+def _fetch_cn_quote(symbol: str, timeout: int = 4) -> dict[str, Any]:
+    """Fetch live A-share quote from qt.gtimg.cn using exact CN field indices."""
+    if requests is None:
+        return {}
+    m = re.fullmatch(r"(\d{6})\.(SH|SZ|BJ)", symbol.strip().upper())
+    if not m:
+        return {}
+    code6, exch = m.group(1), m.group(2)
+    q_code = f"{exch.lower()}{code6}"
+    try:
+        resp = requests.get(f"https://qt.gtimg.cn/q={q_code}", headers=_HEADERS, timeout=timeout)
+        if resp.status_code != 200 or not resp.content:
+            return {}
+    except Exception:
+        return {}
+    received_at = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
+    for line in resp.content.decode("gbk", errors="replace").splitlines():
+        if "=" not in line or "~" not in line:
+            continue
+        parts = line.split("~")
+        if len(parts) < 47:
+            continue
+        price = _finite(parts[3])
+        if price is None or price <= 0:
+            continue
+        ts_raw = parts[30].strip()
+        ts_fmt = (
+            f"{ts_raw[0:4]}-{ts_raw[4:6]}-{ts_raw[6:8]} {ts_raw[8:10]}:{ts_raw[10:12]}"
+            if len(ts_raw) >= 12 and ts_raw.isdigit()
+            else ts_raw
+        )
+        vol_lots = _finite(parts[36])
+        turnover_wan = _finite(parts[37])
+        mcap_yi = _finite(parts[45])
+        return {
+            "symbol": symbol,
+            "name_cn": parts[1].strip(),
+            "name_en": parts[1].strip(),
+            "price": round(price, 2),
+            "prev_close": _finite(parts[4]),
+            "change_amt": _finite(parts[31]),
+            "change_pct": _finite(parts[32]),
+            "as_of": ts_fmt,
+            "market_at": f"{ts_fmt} BJT" if ts_fmt else received_at,
+            "received_at": received_at,
+            "source": "tencent_gtimg",
+            "session": "closed",
+            "volume": vol_lots * 100.0 if vol_lots is not None else None,
+            "turnover": turnover_wan * 1e4 if turnover_wan is not None else None,
+            "pe_ttm": _finite(parts[39]),
+            "pb": _finite(parts[46]),
+            "mcap_raw": mcap_yi * 1e8 if mcap_yi is not None else None,
+            "q_code": q_code,
+        }
+    return {}
+
+
+def _fetch_cn_f10(symbol: str, timeout: int = 4) -> dict[str, Any]:
+    """Fetch A-share fundamental indicators & latest quarters from EastMoney F10."""
+    if requests is None:
+        return {}
+    m = re.fullmatch(r"(\d{6})\.(SH|SZ|BJ)", symbol.strip().upper())
+    if not m:
+        return {}
+    em_code = f"{m.group(2)}{m.group(1)}"
+    try:
+        resp = requests.get(
+            f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=0&code={em_code}",
+            headers=_HEADERS,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return {}
+        rows = (resp.json() or {}).get("data") or []
+    except Exception:
+        return {}
+    if not rows or not isinstance(rows[0], dict):
+        return {}
+
+    latest = rows[0]
+    gm_pct = _finite(latest.get("XSMLL"))
+    nm_pct = _finite(latest.get("XSJLL"))
+    roe_pct = _finite(latest.get("ROEJQ"))
+    rev_yoy_pct = _finite(latest.get("TOTALOPERATEREVETZ"))
+    earn_yoy_pct = _finite(latest.get("PARENTNETPROFITTZ"))
+    zcfzl = _finite(latest.get("ZCFZL"))
+    debt_eq = (zcfzl / (100.0 - zcfzl) * 100.0) if (zcfzl is not None and 0 < zcfzl < 99.0) else None
+
+    quarters: list[dict[str, str]] = []
+    for row in rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        period = str(row.get("REPORT_DATE_NAME") or row.get("REPORT_DATE") or "").strip()[:12]
+        if not period:
+            continue
+        rev = _finite(row.get("TOTALOPERATEREVE"))
+        net_inc = _finite(row.get("PARENTNETPROFIT"))
+        row_gm = _finite(row.get("XSMLL"))
+        gp = (rev * row_gm / 100.0) if (rev is not None and row_gm is not None and row_gm > 0) else None
+        quarters.append(
+            {
+                "period": period,
+                "revenue_fmt": _fmt_money_compact(rev, currency="¥"),
+                "gross_profit_fmt": _fmt_money_compact(gp, currency="¥"),
+                "op_income_fmt": "—",
+                "net_income_fmt": _fmt_money_compact(net_inc, currency="¥"),
+                "fcf_fmt": "—",
+            }
+        )
+
+    return {
+        "eps_ttm": _finite(latest.get("EPSJB")),
+        "gross_margin": gm_pct / 100.0 if gm_pct is not None else None,
+        "net_margin": nm_pct / 100.0 if nm_pct is not None else None,
+        "roe": roe_pct / 100.0 if roe_pct is not None else None,
+        "rev_growth": rev_yoy_pct / 100.0 if rev_yoy_pct is not None else None,
+        "earnings_growth": earn_yoy_pct / 100.0 if earn_yoy_pct is not None else None,
+        "current_ratio": _finite(latest.get("LD")),
+        "debt_to_equity": round(debt_eq, 1) if debt_eq is not None else None,
+        "ttm_revenue": _finite(latest.get("TOTALOPERATEREVE")),
+        "quarters": quarters,
+    }
+
+
+def _fetch_hk_quote(symbol: str, timeout: int = 4) -> dict[str, Any]:
+    """Fetch live HK quote from qt.gtimg.cn using exact HK field indices."""
+    if requests is None:
+        return {}
+    m = re.fullmatch(r"(\d{5})\.HK", symbol.strip().upper())
+    if not m:
+        return {}
+    q_code = f"hk{m.group(1)}"
+    try:
+        resp = requests.get(f"https://qt.gtimg.cn/q={q_code}", headers=_HEADERS, timeout=timeout)
+        if resp.status_code != 200 or not resp.content:
+            return {}
+    except Exception:
+        return {}
+    received_at = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
+    for line in resp.content.decode("gbk", errors="replace").splitlines():
+        if "=" not in line or "~" not in line:
+            continue
+        parts = line.split("~")
+        if len(parts) < 50:
+            continue
+        price = _finite(parts[3])
+        if price is None or price <= 0:
+            continue
+        mcap_yi = _finite(parts[45])
+        div_pct = _finite(parts[47])
+        if div_pct is not None and (div_pct <= 0 or div_pct >= 25.0):
+            div_pct = None
+        ts_raw = parts[30].strip()
+        return {
+            "symbol": symbol,
+            "name_cn": parts[1].strip(),
+            "name_en": parts[46].strip() or parts[1].strip(),
+            "price": round(price, 3 if price < 10 else 2),
+            "prev_close": _finite(parts[4]),
+            "change_amt": _finite(parts[31]),
+            "change_pct": _finite(parts[32]),
+            "as_of": ts_raw,
+            "market_at": f"{ts_raw} HKT" if ts_raw else received_at,
+            "received_at": received_at,
+            "source": "tencent_gtimg",
+            "session": "closed",
+            "volume": _finite(parts[36]),
+            "turnover": _finite(parts[37]),
+            "pe_ttm": _finite(parts[39]),
+            "mcap_raw": mcap_yi * 1e8 if mcap_yi is not None else None,
+            "dividend_yield_pct": div_pct,
+            "high_52w": _finite(parts[48]),
+            "low_52w": _finite(parts[49]),
+            "q_code": q_code,
+        }
+    return {}
+
+
+def _fetch_hk_f10(symbol: str, timeout: int = 4) -> dict[str, Any]:
+    """Fetch HK fundamental indicators sorted newest-first from EastMoney Datacenter."""
+    if requests is None:
+        return {}
+    m = re.fullmatch(r"(\d{5})\.HK", symbol.strip().upper())
+    if not m:
+        return {}
+    code5 = m.group(1)
+    url = (
+        "https://datacenter.eastmoney.com/securities/api/data/v1/get"
+        f"?reportName=RPT_HKF10_FN_MAININDICATOR&columns=ALL"
+        f"&filter=(SECURITY_CODE%3D%22{code5}%22)"
+        "&sortColumns=REPORT_DATE&sortTypes=-1&pageSize=4"
+    )
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=timeout)
+        if resp.status_code != 200:
+            return {}
+        rows = ((resp.json() or {}).get("result") or {}).get("data") or []
+    except Exception:
+        return {}
+    if not rows or not isinstance(rows[0], dict):
+        return {}
+
+    latest = rows[0]
+    rpt_cur = "¥" if str(latest.get("CURRENCY") or "").upper() in ("CNY", "RMB", "人民币") else "HK$"
+    gm_pct = _finite(latest.get("GROSS_PROFIT_RATIO"))
+    nm_pct = _finite(latest.get("NET_PROFIT_RATIO"))
+    roe_pct = _finite(latest.get("ROE_YEARLY") if latest.get("ROE_YEARLY") is not None else latest.get("ROE_AVG"))
+    roa_pct = _finite(latest.get("ROA"))
+    rev_yoy = _finite(latest.get("OPERATE_INCOME_YOY"))
+    earn_yoy = _finite(latest.get("HOLDER_PROFIT_YOY"))
+    div_pct = _finite(latest.get("DIVIDEND_RATE"))
+    if div_pct is not None and (div_pct <= 0 or div_pct >= 25.0):
+        div_pct = None
+    liab = _finite(latest.get("TOTAL_LIABILITIES"))
+    eq = _finite(latest.get("TOTAL_PARENT_EQUITY"))
+    debt_eq = (liab / eq * 100.0) if (liab is not None and eq is not None and eq > 0) else None
+    if debt_eq is None:
+        eq_ratio = _finite(latest.get("EQUITY_RATIO"))
+        if eq_ratio is not None:
+            debt_eq = eq_ratio * 100.0 if eq_ratio < 5.0 else eq_ratio
+
+    quarters: list[dict[str, str]] = []
+    for row in rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        period = str(row.get("REPORT_TYPE") or row.get("REPORT_DATE") or "").strip()[:14]
+        if not period:
+            continue
+        rcur = "¥" if str(row.get("CURRENCY") or "").upper() in ("CNY", "RMB", "人民币") else "HK$"
+        rev = _finite(row.get("OPERATE_INCOME"))
+        gp = _finite(row.get("GROSS_PROFIT"))
+        if gp == 0 and rev is not None and rev > 0:
+            gp = None
+        quarters.append(
+            {
+                "period": period,
+                "revenue_fmt": _fmt_money_compact(rev, currency=rcur),
+                "gross_profit_fmt": _fmt_money_compact(gp, currency=rcur),
+                "op_income_fmt": _fmt_money_compact(_finite(row.get("OPERATE_PROFIT")), currency=rcur),
+                "net_income_fmt": _fmt_money_compact(_finite(row.get("HOLDER_PROFIT")), currency=rcur),
+                "fcf_fmt": _fmt_money_compact(_finite(row.get("NETCASH_OPERATE")), currency=rcur),
+            }
+        )
+
+    return {
+        "pe_ttm": _finite(latest.get("PE_TTM")),
+        "pb": _finite(latest.get("PB_TTM")),
+        "eps_ttm": _finite(latest.get("EPS_TTM") if latest.get("EPS_TTM") is not None else latest.get("BASIC_EPS")),
+        "dividend_yield_pct": div_pct,
+        "gross_margin": gm_pct / 100.0 if gm_pct is not None else None,
+        "net_margin": nm_pct / 100.0 if nm_pct is not None else None,
+        "roe": roe_pct / 100.0 if roe_pct is not None else None,
+        "roa": roa_pct / 100.0 if roa_pct is not None else None,
+        "rev_growth": rev_yoy / 100.0 if rev_yoy is not None else None,
+        "earnings_growth": earn_yoy / 100.0 if earn_yoy is not None else None,
+        "current_ratio": _finite(latest.get("CURRENT_RATIO")),
+        "debt_to_equity": round(debt_eq, 1) if debt_eq is not None else None,
+        "total_cash": _finite(latest.get("END_CASH")),
+        "total_debt": liab,
+        "ttm_revenue": _finite(latest.get("OPERATE_INCOME")),
+        "ttm_ocf": _finite(latest.get("NETCASH_OPERATE")),
+        "quarters": quarters,
+        "report_currency": rpt_cur,
+    }
+
+
+def _fetch_us_f10(symbol: str, timeout: int = 4) -> dict[str, Any]:
+    """Fetch CN-reachable US fundamental indicators from EastMoney Datacenter."""
+    if requests is None:
+        return {}
+    sym = symbol.strip().upper()
+    if not re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z]{1,2})?", sym):
+        return {}
+    url = (
+        "https://datacenter.eastmoney.com/securities/api/data/v1/get"
+        f"?reportName=RPT_USF10_FN_GMAININDICATOR&columns=ALL"
+        f"&filter=(SECURITY_CODE%3D%22{urllib.parse.quote(sym)}%22)"
+        "&sortColumns=REPORT_DATE&sortTypes=-1&pageSize=4"
+    )
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=timeout)
+        if resp.status_code != 200:
+            return {}
+        rows = ((resp.json() or {}).get("result") or {}).get("data") or []
+    except Exception:
+        return {}
+    if not rows or not isinstance(rows[0], dict):
+        return {}
+
+    latest = rows[0]
+    gm_pct = _finite(latest.get("GROSS_PROFIT_RATIO"))
+    nm_pct = _finite(latest.get("NET_PROFIT_RATIO"))
+    roe_pct = _finite(latest.get("ROE_AVG"))
+    roa_pct = _finite(latest.get("ROA"))
+    rev_yoy = _finite(latest.get("OPERATE_INCOME_YOY"))
+    earn_yoy = _finite(latest.get("PARENT_HOLDER_NETPROFIT_YOY"))
+
+    quarters: list[dict[str, str]] = []
+    for row in rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        period = str(row.get("REPORT_TYPE") or row.get("REPORT_DATE") or "").strip()[:14]
+        if not period:
+            continue
+        cur_abbr = str(row.get("CURRENCY_ABBR") or row.get("CURRENCY") or "").upper()
+        rcur = "¥" if cur_abbr in ("CNY", "RMB", "人民币") else "$"
+        rev = _finite(row.get("OPERATE_INCOME"))
+        gp = _finite(row.get("GROSS_PROFIT"))
+        if gp == 0 and rev is not None and rev > 0:
+            gp = None
+        quarters.append(
+            {
+                "period": period,
+                "revenue_fmt": _fmt_money_compact(rev, currency=rcur),
+                "gross_profit_fmt": _fmt_money_compact(gp, currency=rcur),
+                "op_income_fmt": "—",
+                "net_income_fmt": _fmt_money_compact(_finite(row.get("PARENT_HOLDER_NETPROFIT")), currency=rcur),
+                "fcf_fmt": "—",
+            }
+        )
+
+    return {
+        "eps_ttm": _finite(latest.get("BASIC_EPS")),
+        "gross_margin": gm_pct / 100.0 if gm_pct is not None else None,
+        "net_margin": nm_pct / 100.0 if nm_pct is not None else None,
+        "roe": roe_pct / 100.0 if roe_pct is not None else None,
+        "roa": roa_pct / 100.0 if roa_pct is not None else None,
+        "rev_growth": rev_yoy / 100.0 if rev_yoy is not None else None,
+        "earnings_growth": earn_yoy / 100.0 if earn_yoy is not None else None,
+        "current_ratio": _finite(latest.get("CURRENT_RATIO")),
+        "debt_to_equity": _finite(latest.get("EQUITY_RATIO")),
+        "ttm_revenue": _finite(latest.get("OPERATE_INCOME")),
+        "quarters": quarters,
+    }
 
 
 def _create_yahoo_session(timeout: int = 7) -> tuple[Any, str] | tuple[None, str]:
@@ -589,9 +1468,11 @@ def _build_pre_trade_checklist(
     low_52w: float | None,
     high_52w: float | None,
     risk_gate: dict[str, Any] | None = None,
+    currency_symbol: str = "$",
 ) -> dict[str, Any]:
-    ma20 = round(sum(closes[-20:]) / 20.0, 2) if len(closes) >= 20 else None
-    ma50 = round(sum(closes[-50:]) / 50.0, 2) if len(closes) >= 50 else None
+    px_prec = 4 if closes and abs(price) < 1 else 2
+    ma20 = round(sum(closes[-20:]) / 20.0, px_prec) if len(closes) >= 20 else None
+    ma50 = round(sum(closes[-50:]) / 50.0, px_prec) if len(closes) >= 50 else None
     bias20_pct = round((price - ma20) / ma20 * 100.0, 2) if (ma20 is not None and ma20 > 0) else None
     bias50_pct = round((price - ma50) / ma50 * 100.0, 2) if (ma50 is not None and ma50 > 0) else None
 
@@ -607,7 +1488,7 @@ def _build_pre_trade_checklist(
                 "key": "ma20_trend",
                 "label": "20日均线位置",
                 "status": "pass" if above20 else "warn",
-                "detail": f"现价 ${price:.2f} {'站上' if above20 else '低于'} MA20 (${ma20:.2f})，乖离 {bias20_pct:+.2f}%",
+                "detail": f"现价 {_fmt_px(price, currency_symbol)} {'站上' if above20 else '低于'} MA20 ({_fmt_px(ma20, currency_symbol)})，乖离 {bias20_pct:+.2f}%",
             }
         )
     if ma50 is not None and bias50_pct is not None:
@@ -617,7 +1498,7 @@ def _build_pre_trade_checklist(
                 "key": "ma50_trend",
                 "label": "50日均线趋势",
                 "status": "pass" if above50 else "warn",
-                "detail": f"现价 ${price:.2f} {'站上' if above50 else '低于'} MA50 (${ma50:.2f})，乖离 {bias50_pct:+.2f}%",
+                "detail": f"现价 {_fmt_px(price, currency_symbol)} {'站上' if above50 else '低于'} MA50 ({_fmt_px(ma50, currency_symbol)})，乖离 {bias50_pct:+.2f}%",
             }
         )
 
@@ -728,6 +1609,161 @@ def _parse_pct_value(raw: Any) -> float | None:
         return None
 
 
+def _build_crypto_quick_thesis(
+    profile: dict[str, Any],
+    *,
+    risk_gate: dict[str, Any] | None = None,
+    signals: list[dict[str, Any]] | None = None,
+    kol_digest: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    sym = str(profile.get("symbol") or "").strip().upper()
+    cn_name = str(profile.get("name_cn") or sym).strip()
+    price = _finite(profile.get("price"))
+    bias20 = _finite(profile.get("bias20_pct"))
+    bias50 = _finite(profile.get("bias50_pct"))
+    pos_52w = _finite(profile.get("range_52w_pos"))
+    checklist = profile.get("pre_trade_checklist") or {}
+    chase_alert = str(checklist.get("chase_alert") or "normal")
+    health = profile.get("health") or {}
+    h_score = _finite(health.get("score"))
+    cm = profile.get("crypto_metrics") or {}
+    vol_30d = _finite(cm.get("vol_30d_ann_pct"))
+    mdd_90d = _finite(cm.get("max_drawdown_90d_pct"))
+    vol_ratio = _finite(cm.get("vol_ratio_30d"))
+    turnover_24h = str(cm.get("turnover_24h_fmt") or (profile.get("overview") or {}).get("turnover_fmt") or "—")
+
+    rg = risk_gate or {}
+    gate_light = str(rg.get("light") or checklist.get("risk_gate_light") or "YELLOW").upper()
+    gate_cap = _finite(rg.get("long_risk_cap"))
+    if gate_cap is None:
+        gate_cap = _finite(checklist.get("risk_gate_cap"))
+    if gate_cap is None:
+        gate_cap = 0.0 if gate_light == "RED" else (0.5 if gate_light == "YELLOW" else 1.0)
+    gate_label = str(rg.get("label") or ("红灯防守" if gate_light == "RED" else ("绿灯顺风" if gate_light == "GREEN" else "黄灯控险"))).strip()
+
+    bull_sig_titles: list[str] = []
+    bear_sig_titles: list[str] = []
+    sym_re = re.compile(rf"(?<![A-Z0-9]){re.escape(sym)}(?![A-Z0-9])") if sym else None
+    for s in signals or []:
+        if not isinstance(s, dict):
+            continue
+        tickers_up = {str(t).strip().upper() for t in (s.get("tickers") or []) if t}
+        ttl = str(s.get("title") or "").strip()
+        txt = f"{ttl} {s.get('summary') or ''}"
+        matched = (sym in tickers_up) or (sym_re is not None and bool(sym_re.search(txt.upper())))
+        if not matched and cn_name and len(cn_name) >= 2 and cn_name in txt:
+            matched = True
+        if not matched:
+            continue
+        d = str(s.get("direction") or "neutral").lower()
+        if d == "bullish" and ttl and ttl not in bull_sig_titles:
+            bull_sig_titles.append(ttl)
+        elif d == "bearish" and ttl and ttl not in bear_sig_titles:
+            bear_sig_titles.append(ttl)
+
+    kol_bull = 0
+    kol_bear = 0
+    for k in kol_digest or []:
+        if not isinstance(k, dict):
+            continue
+        k_txt = f"{k.get('headline') or ''} {k.get('takeaway') or ''}"
+        if (sym_re is not None and sym_re.search(k_txt.upper())) or (cn_name and len(cn_name) >= 2 and cn_name in k_txt):
+            st_k = str(k.get("stance") or "")
+            if "偏多" in st_k:
+                kol_bull += 1
+            elif "偏空" in st_k:
+                kol_bear += 1
+
+    raw_score = 52.0
+    if h_score is not None:
+        raw_score += (h_score - 5.0) * 3.5
+    if bias50 is not None:
+        raw_score += 7.0 if bias50 > 0 else -7.0
+    if chase_alert == "overextended_long" or (bias20 is not None and bias20 > 10.0):
+        raw_score -= 6.0
+    elif bias20 is not None and 0.0 <= bias20 <= 8.0:
+        raw_score += 5.0
+    elif bias20 is not None and bias20 < -10.0:
+        raw_score -= 8.0
+    if vol_ratio is not None and vol_ratio >= 1.3 and (profile.get("change_pct") or 0) > 0:
+        raw_score += 4.0
+    if mdd_90d is not None and abs(mdd_90d) >= 35.0:
+        raw_score -= 6.0
+    raw_score += max(-4, min(4, len(bull_sig_titles) - len(bear_sig_titles))) * 2.0
+    raw_score += max(-2, min(2, kol_bull - kol_bear)) * 2.0
+    if gate_light == "RED":
+        raw_score -= 12.0
+    elif gate_light == "YELLOW":
+        raw_score -= 4.0
+    elif gate_light == "GREEN":
+        raw_score += 3.0
+
+    score = int(round(max(0.0, min(100.0, raw_score))))
+    downtrend_stretched = bias20 is not None and bias20 < -8.0
+
+    if chase_alert == "overextended_long" or (bias20 is not None and bias20 > 8.0):
+        stance = "追高警示"
+    elif gate_light == "RED" and (downtrend_stretched or score < 62):
+        stance = "偏空逆风"
+    elif score <= 44:
+        stance = "偏空逆风"
+    elif score >= 64 and gate_light != "RED" and not downtrend_stretched:
+        stance = "偏多顺风"
+    else:
+        stance = "中性观望"
+
+    bulls: list[str] = []
+    if bias50 is not None and bias50 > 0:
+        bulls.append(f"现价站稳 50 日均线（偏离 {bias50:+.1f}%），中期结构维持多头")
+    if turnover_24h and turnover_24h != "—":
+        vr_txt = f"（较 30 日均值 {vol_ratio:.2f}x）" if vol_ratio is not None else ""
+        bulls.append(f"24h 现货成交额 {turnover_24h}{vr_txt}，流动性充沛")
+    if bull_sig_titles:
+        bulls.append(f"站内命中 {len(bull_sig_titles)} 条偏多加密快讯：{bull_sig_titles[0][:44]}")
+    if pos_52w is not None and len(bulls) < 2:
+        px_txt = f"最新价 {_fmt_px(price, '$')}，" if price is not None else ""
+        bulls.append(f"{px_txt}位于近一年区间 {pos_52w:.1f}% 分位")
+    if len(bulls) < 2:
+        bulls.append(f"{cn_name} 现货连续交易度高，关注 ETF 资金流与宏观流动性催化")
+
+    bears: list[str] = []
+    if gate_light in ("RED", "YELLOW"):
+        bears.append(f"宏观风控「{gate_label}」限制方向性多头上限至 {gate_cap:.1f}x，忌高杠杆重仓")
+    if bias20 is not None:
+        if bias20 > 8.0:
+            bears.append(f"MA20 正乖离 {bias20:+.1f}% 已超过 +8% 警示线，短线谨防插针回踩")
+        elif bias20 < -8.0:
+            bears.append(f"现价低于 MA20 达 {abs(bias20):.1f}%，空头动量占优，忌盲目左侧抄底")
+        else:
+            bears.append(f"MA20 乖离 {bias20:+.1f}%，留意关键均线放量得失")
+    if vol_30d is not None or mdd_90d is not None:
+        v_part = f"30日年化波动 {vol_30d:.1f}%" if vol_30d is not None else ""
+        d_part = f"90日最大回撤 {mdd_90d:.1f}%" if mdd_90d is not None else ""
+        sep = "，" if (v_part and d_part) else ""
+        bears.append(f"{v_part}{sep}{d_part}，仓位须按波动率严格折减")
+    if bear_sig_titles and len(bears) < 3:
+        bears.append(f"近期录得 {len(bear_sig_titles)} 条偏空快讯提醒：{bear_sig_titles[0][:44]}")
+    if len(bears) < 2:
+        bears.append("数字资产 7×24 小时交易易受宏观数据与衍生品去杠杆放大波动，务必预留强平缓冲")
+
+    if stance == "追高警示":
+        action_hint = "短线乖离处于过热区，严禁合约追高加杠杆，等回踩 MA20 缩量企稳后再评估。"
+    elif stance == "偏多顺风":
+        action_hint = f"趋势结构与流动性共振偏强，可结合风控上限（{gate_cap:.1f}x）分批配置并设好移动止损。"
+    elif stance == "偏空逆风":
+        action_hint = "宏观门控与均线趋势双紧，优先控制杠杆与强平距离，等待日线站稳均线后再转攻。"
+    else:
+        action_hint = f"多空处在震荡消化期（多头上限 {gate_cap:.1f}x），轻仓观察成交量与关键支撑位响应。"
+
+    return {
+        "stance": stance,
+        "score": score,
+        "bull_points": [_scrub(x) for x in bulls[:3]],
+        "bear_points": [_scrub(x) for x in bears[:3]],
+        "action_hint": _scrub(action_hint),
+    }
+
+
 def build_quick_thesis(
     profile: dict[str, Any],
     *,
@@ -735,9 +1771,13 @@ def build_quick_thesis(
     signals: list[dict[str, Any]] | None = None,
     kol_digest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Synthesize deterministic fast multi-angle stock thesis (stance, 0-100 score, bull/bear points, discipline hint)."""
+    """Synthesize deterministic fast multi-angle stock/crypto thesis."""
+    if str(profile.get("market") or "").lower() == "crypto" or str(profile.get("asset_type") or "").lower() == "crypto":
+        return _build_crypto_quick_thesis(profile, risk_gate=risk_gate, signals=signals, kol_digest=kol_digest)
+
     sym = str(profile.get("symbol") or "").strip().upper()
     cn_name = str(profile.get("name_cn") or sym).strip()
+    cur_sym = str(profile.get("currency_symbol") or "$").strip() or "$"
     price = _finite(profile.get("price"))
     ma20 = _finite(profile.get("ma20"))
     ma50 = _finite(profile.get("ma50"))
@@ -765,7 +1805,7 @@ def build_quick_thesis(
     earn_g = _parse_pct_value(financials.get("earnings_growth_yoy"))
     gm_val = _parse_pct_value(financials.get("gross_margin"))
     fcf_display = str(financials.get("ttm_fcf_fmt") or "")
-    fcf_sign = _parse_pct_value(fcf_display.replace("$", "").rstrip("KMBT"))
+    fcf_sign = _parse_pct_value(fcf_display.replace("HK$", "").replace("$", "").replace("¥", "").rstrip("KMBT"))
     growth = [(label, val) for label, val in (("营收", rev_g), ("盈利", earn_g)) if val is not None]
     declines = [f"{label}同比 {val:g}%" for label, val in growth if val < 0]
 
@@ -781,14 +1821,19 @@ def build_quick_thesis(
     # Match relevant station signals & KOL notes
     bull_sig_titles: list[str] = []
     bear_sig_titles: list[str] = []
-    sym_re = re.compile(rf"(?<![A-Z0-9]){re.escape(sym)}(?![A-Z0-9])") if sym else None
+    sym_code = sym.split(".")[0]
+    sym_re = re.compile(rf"(?<![A-Z0-9]){re.escape(sym_code)}(?![A-Z0-9])") if sym_code else None
     for s in signals or []:
         if not isinstance(s, dict):
             continue
         tickers_up = {str(t).strip().upper() for t in (s.get("tickers") or []) if t}
         ttl = str(s.get("title") or "").strip()
         txt = f"{ttl} {s.get('summary') or ''}"
-        matched = (sym in tickers_up) or (sym_re is not None and bool(sym_re.search(txt.upper())))
+        matched = (
+            (sym in tickers_up)
+            or (sym_code in tickers_up)
+            or (sym_re is not None and bool(sym_re.search(txt.upper())))
+        )
         if not matched and cn_name and len(cn_name) >= 2 and cn_name in txt:
             matched = True
         if not matched:
@@ -880,11 +1925,11 @@ def build_quick_thesis(
     if gm_val is not None and gm_val >= 50:
         margin_cash.append(f"毛利率 {gm_val:g}%")
     if fcf_sign is not None and fcf_sign > 0:
-        margin_cash.append(f"近 12 个月自由现金流为正（{fcf_display}）")
+        margin_cash.append(f"近期现金流充沛（{fcf_display}）")
     if margin_cash:
         bull_points.append("，".join(margin_cash))
     if upside_pct is not None and upside_pct > 2.0:
-        bull_points.append(f"华尔街一致目标均价 ${target_px:.2f}，较现价存 {upside_pct:+.1f}% 修复空间")
+        bull_points.append(f"机构一致目标均价 {_fmt_px(target_px, cur_sym)}，较现价存 {upside_pct:+.1f}% 修复空间")
     if bull_sig_titles:
         bull_points.append(f"站内命中 {len(bull_sig_titles)} 条偏多催化快讯：{bull_sig_titles[0][:44]}")
     if len(bull_points) < 2 and sec_filings:
@@ -892,7 +1937,7 @@ def build_quick_thesis(
     if len(bull_points) < 2:
         mcap_txt = f"市值 {mcap_fmt}、" if mcap_fmt and mcap_fmt != "—" else ""
         pos_txt = f"位于 52 周区间 {pos_52w:.1f}% 分位" if pos_52w is not None else "流动性与盘面报价保持活跃"
-        px_txt = f"最新价 ${price:.2f}，" if price is not None else ""
+        px_txt = f"最新价 {_fmt_px(price, cur_sym)}，" if price is not None else ""
         bull_points.append(f"{px_txt}{mcap_txt}{pos_txt}")
     if len(bull_points) < 2:
         bull_points.append(f"{cn_name} 所属赛道关注度维持高位，具备基本面与市场催化双线观察价值")
@@ -961,14 +2006,57 @@ def _assemble_profile(
     gtimg: dict[str, Any],
     sec_filings: list[dict[str, str]] | None = None,
     risk_gate: dict[str, Any] | None = None,
+    *,
+    market: str | None = None,
+    currency: str | None = None,
+    currency_symbol: str | None = None,
 ) -> dict[str, Any] | None:
-    meta = STOCK_META_MAP.get(symbol)
-    cn_name = meta[1] if meta else _scrub(yahoo.get("name_en") or gtimg.get("name_en") or symbol)
-    exch = meta[2] if meta else _scrub(yahoo.get("exchange") or "美股")
-    sector_cn = meta[3] if meta else _scrub(yahoo.get("sector_en") or "美股个股")
-    peer_group = meta[4] if meta else "自选检索"
-    overview_cn = meta[5] if meta else _scrub(
-        f"{gtimg.get('name_en') or yahoo.get('name_en') or symbol}（{symbol}），所属行业 {yahoo.get('industry_en') or sector_cn}。"
+    meta_map = MULTI_MARKET_META_MAP.get(symbol)
+    meta_legacy = STOCK_META_MAP.get(symbol)
+
+    resolved_market = market or (meta_map["market"] if meta_map else "us")
+    resolved_currency = currency or (
+        meta_map["currency"]
+        if meta_map
+        else {"cn": "CNY", "hk": "HKD"}.get(resolved_market, "USD")
+    )
+    resolved_cur_sym = currency_symbol or (
+        meta_map["currency_symbol"]
+        if meta_map
+        else {"cn": "¥", "hk": "HK$"}.get(resolved_market, "$")
+    )
+
+    cn_name = (
+        meta_map["name_cn"]
+        if meta_map
+        else (
+            meta_legacy[1]
+            if meta_legacy
+            else _scrub(gtimg.get("name_cn") or yahoo.get("name_en") or gtimg.get("name_en") or symbol)
+        )
+    )
+    default_exch = {"cn": "A股", "hk": "港交所", "crypto": "现货 · Binance/Gate"}.get(resolved_market, "美股")
+    default_sec = {"cn": "A股个股", "hk": "港股个股", "crypto": "数字资产 · 加密现货"}.get(resolved_market, "美股个股")
+    default_peer = {"cn": "A股自选检索", "hk": "港股自选检索", "crypto": "加密核心资产"}.get(resolved_market, "自选检索")
+
+    exch = (
+        meta_map["exchange"]
+        if meta_map
+        else _scrub(gtimg.get("exchange") or yahoo.get("exchange") or default_exch)
+    )
+    sector_cn = (
+        meta_map["sector_cn"]
+        if meta_map
+        else _scrub(yahoo.get("sector_en") or default_sec)
+    )
+    peer_group = meta_map["peer_group"] if meta_map else default_peer
+    overview_cn = (
+        meta_map["overview_cn"]
+        if meta_map
+        else _scrub(
+            f"{cn_name}（{symbol}），{exch}挂牌交易标的，"
+            + (f"所属行业 {yahoo['industry_en']}。" if yahoo.get("industry_en") else f"归属 {sector_cn}。")
+        )
     )
 
     price = _finite(gtimg.get("price")) or _finite(yahoo.get("price"))
@@ -985,29 +2073,35 @@ def _assemble_profile(
     pe_ttm = _finite(gtimg.get("pe_ttm")) or _finite(yahoo.get("pe_ttm"))
     pe_fwd = _finite(yahoo.get("pe_forward"))
     eps_ttm = _finite(gtimg.get("eps_ttm")) or _finite(yahoo.get("eps_ttm"))
-    pb = _finite(yahoo.get("pb")) or _finite(gtimg.get("pb"))
+    pb = _finite(gtimg.get("pb")) or _finite(yahoo.get("pb"))
     div_pct = yahoo.get("dividend_yield_pct")
     if div_pct is None:
         div_pct = gtimg.get("dividend_yield_pct")
+    if _finite(div_pct) is not None and not (0 <= float(div_pct) < 25.0):
+        div_pct = None
     div_fmt = f"{div_pct:.2f}%" if _finite(div_pct) is not None else "—"
-
-    low_52w = _finite(yahoo.get("low_52w")) or _finite(gtimg.get("low_52w"))
-    high_52w = _finite(yahoo.get("high_52w")) or _finite(gtimg.get("high_52w"))
-
-    vol = _finite(gtimg.get("volume")) or _finite(yahoo.get("volume_raw"))
-    vol_fmt = f"{vol / 1e6:.2f}M" if (vol is not None and vol >= 1e5) else (_fmt_num(vol, 0) if vol is not None else "—")
-    turnover_fmt = _fmt_money_compact(gtimg.get("turnover"))
 
     chart = yahoo.get("chart") or {}
     closes = [float(c) for c in (chart.get("closes") or []) if _finite(c) is not None]
     dates = list(chart.get("dates") or [])[: len(closes)]
 
+    low_52w = _finite(yahoo.get("low_52w")) or _finite(gtimg.get("low_52w")) or _finite(chart.get("low_52w"))
+    high_52w = _finite(yahoo.get("high_52w")) or _finite(gtimg.get("high_52w")) or _finite(chart.get("high_52w"))
+
+    vol = _finite(gtimg.get("volume")) or _finite(yahoo.get("volume_raw"))
+    vol_fmt = f"{vol / 1e6:.2f}M" if (vol is not None and vol >= 1e5) else (_fmt_num(vol, 0) if vol is not None else "—")
+    turnover_fmt = _fmt_money_compact(gtimg.get("turnover"), currency=resolved_cur_sym)
+
+    px_prec = 4 if abs(price) < 1 else (3 if resolved_market == "hk" and price < 10 else 2)
+    rounded_price = round(price, px_prec)
+
     checklist = _build_pre_trade_checklist(
-        price=round(price, 2),
+        price=rounded_price,
         closes=closes,
         low_52w=low_52w,
         high_52w=high_52w,
         risk_gate=risk_gate,
+        currency_symbol=resolved_cur_sym,
     )
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
     as_of_str = _scrub(gtimg.get("as_of") or datetime.now(BJT).strftime("%Y-%m-%d %H:%M"))
@@ -1015,17 +2109,22 @@ def _assemble_profile(
     received_at = str(gtimg.get("received_at") or now_bjt)
     quote_source = str(gtimg.get("source") or ("yahoo_finance" if yahoo else "local_cache"))
     session = str(gtimg.get("session") or "closed")
+    fin_cur_sym = str(yahoo.get("report_currency") or resolved_cur_sym)
 
     assembled: dict[str, Any] = {
         "symbol": symbol,
+        "market": resolved_market,
+        "asset_type": "crypto" if resolved_market == "crypto" else "equity",
+        "currency": resolved_currency,
+        "currency_symbol": resolved_cur_sym,
         "name_cn": _scrub(cn_name),
-        "name_en": _scrub(gtimg.get("name_en") or yahoo.get("name_en") or symbol),
+        "name_en": _scrub(gtimg.get("name_en") or yahoo.get("name_en") or cn_name or symbol),
         "exchange": _scrub(exch),
         "sector_cn": _scrub(sector_cn),
         "peer_group": _scrub(peer_group),
         "business_overview_cn": _scrub(overview_cn),
-        "price": round(price, 2),
-        "change_amt": round(change_amt, 2),
+        "price": rounded_price,
+        "change_amt": round(change_amt, px_prec),
         "change_pct": round(change_pct, 2),
         "as_of": as_of_str,
         "market_at": market_at,
@@ -1051,7 +2150,7 @@ def _assemble_profile(
         "health": _build_health(yahoo, gtimg),
         "overview": {
             "market_cap_raw": mcap_raw,
-            "market_cap_fmt": _fmt_money_compact(mcap_raw),
+            "market_cap_fmt": _fmt_money_compact(mcap_raw, currency=resolved_cur_sym),
             "pe_ttm": round(pe_ttm, 2) if pe_ttm is not None else None,
             "pe_forward": round(pe_fwd, 2) if pe_fwd is not None else None,
             "eps_ttm": round(eps_ttm, 2) if eps_ttm is not None else None,
@@ -1059,8 +2158,8 @@ def _assemble_profile(
             "dividend_yield_fmt": div_fmt,
             "volume_fmt": vol_fmt,
             "turnover_fmt": turnover_fmt,
-            "low_52w": round(low_52w, 2) if low_52w is not None else None,
-            "high_52w": round(high_52w, 2) if high_52w is not None else None,
+            "low_52w": round(low_52w, px_prec) if low_52w is not None else None,
+            "high_52w": round(high_52w, px_prec) if high_52w is not None else None,
             "beta": round(yahoo["beta"], 2) if _finite(yahoo.get("beta")) is not None else None,
             "short_ratio": round(yahoo["short_ratio"], 2) if _finite(yahoo.get("short_ratio")) is not None else None,
             "insider_pct": _fmt_pct_from_ratio(yahoo.get("insider_ratio")),
@@ -1081,12 +2180,12 @@ def _assemble_profile(
             "roa": _fmt_pct_from_ratio(yahoo.get("roa")),
             "current_ratio": _fmt_num(yahoo.get("current_ratio")),
             "debt_to_equity": _fmt_num(yahoo.get("debt_to_equity")),
-            "total_cash_fmt": _fmt_money_compact(yahoo.get("total_cash")),
-            "total_debt_fmt": _fmt_money_compact(yahoo.get("total_debt")),
-            "ttm_revenue_fmt": _fmt_money_compact(yahoo.get("ttm_revenue")),
-            "ttm_ebitda_fmt": _fmt_money_compact(yahoo.get("ttm_ebitda")),
-            "ttm_ocf_fmt": _fmt_money_compact(yahoo.get("ttm_ocf")),
-            "ttm_fcf_fmt": _fmt_money_compact(yahoo.get("ttm_fcf")),
+            "total_cash_fmt": _fmt_money_compact(yahoo.get("total_cash"), currency=fin_cur_sym),
+            "total_debt_fmt": _fmt_money_compact(yahoo.get("total_debt"), currency=fin_cur_sym),
+            "ttm_revenue_fmt": _fmt_money_compact(yahoo.get("ttm_revenue"), currency=fin_cur_sym),
+            "ttm_ebitda_fmt": _fmt_money_compact(yahoo.get("ttm_ebitda"), currency=fin_cur_sym),
+            "ttm_ocf_fmt": _fmt_money_compact(yahoo.get("ttm_ocf"), currency=fin_cur_sym),
+            "ttm_fcf_fmt": _fmt_money_compact(yahoo.get("ttm_fcf"), currency=fin_cur_sym),
             "quarters": list(yahoo.get("quarters") or []),
         },
         "valuation": {
@@ -1101,6 +2200,486 @@ def _assemble_profile(
     }
     assembled["quick_thesis"] = build_quick_thesis(assembled, risk_gate=risk_gate)
     return assembled
+
+
+def _fetch_crypto_profile(
+    base_symbol: str,
+    *,
+    risk_gate: dict[str, Any] | None = None,
+    timeout: int = 4,
+) -> dict[str, Any] | None:
+    """Build full spot research profile for any crypto asset using Binance Vision + Gate.io fallback."""
+    if requests is None:
+        return None
+    base = re.sub(r"[^A-Z0-9]", "", base_symbol.strip().upper())
+    if not base or len(base) > 12:
+        return None
+
+    ticker_price: float | None = None
+    change_pct: float | None = None
+    change_amt: float | None = None
+    quote_vol_24h: float | None = None
+    base_vol_24h: float | None = None
+    high_24h: float | None = None
+    low_24h: float | None = None
+    src_name = ""
+
+    dates: list[str] = []
+    closes: list[float] = []
+    highs: list[float] = []
+    lows: list[float] = []
+    quote_vols: list[float] = []
+
+    # 1. Primary: Binance data-api.binance.vision (CN-VPS reachable)
+    bn_pair = f"{base}USDT"
+    try:
+        rt = requests.get(
+            "https://data-api.binance.vision/api/v3/ticker/24hr",
+            params={"symbol": bn_pair},
+            headers=_HEADERS,
+            timeout=timeout,
+        )
+        if rt.status_code == 200:
+            tk = rt.json() or {}
+            px = _finite(tk.get("lastPrice"))
+            if px is not None and px > 0:
+                ticker_price = px
+                change_pct = _finite(tk.get("priceChangePercent"))
+                change_amt = _finite(tk.get("priceChange"))
+                quote_vol_24h = _finite(tk.get("quoteVolume"))
+                base_vol_24h = _finite(tk.get("volume"))
+                high_24h = _finite(tk.get("highPrice"))
+                low_24h = _finite(tk.get("lowPrice"))
+                src_name = "binance_spot"
+    except Exception:
+        pass
+
+    try:
+        rk = requests.get(
+            "https://data-api.binance.vision/api/v3/klines",
+            params={"symbol": bn_pair, "interval": "1d", "limit": "365"},
+            headers=_HEADERS,
+            timeout=timeout,
+        )
+        if rk.status_code == 200:
+            rows = rk.json() or []
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 8:
+                    continue
+                ts_ms = _finite(row[0])
+                cl = _finite(row[4])
+                if ts_ms is None or cl is None or cl <= 0:
+                    continue
+                dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+                hi = _finite(row[2]) or cl
+                lo = _finite(row[3]) or cl
+                qv = _finite(row[7]) or 0.0
+                dates.append(dt)
+                closes.append(round(cl, 6 if cl < 0.05 else (4 if cl < 1 else 2)))
+                highs.append(hi)
+                lows.append(lo)
+                quote_vols.append(qv)
+    except Exception:
+        pass
+
+    # 2. Fallback: Gate.io public spot API (also verified CN-VPS reachable)
+    if ticker_price is None or not closes:
+        gate_pair = f"{base}_USDT"
+        if ticker_price is None:
+            try:
+                rgt = requests.get(
+                    "https://api.gateio.ws/api/v4/spot/tickers",
+                    params={"currency_pair": gate_pair},
+                    headers=_HEADERS,
+                    timeout=timeout,
+                )
+                if rgt.status_code == 200:
+                    arr = rgt.json() or []
+                    if arr and isinstance(arr[0], dict):
+                        tk = arr[0]
+                        px = _finite(tk.get("last"))
+                        if px is not None and px > 0:
+                            ticker_price = px
+                            change_pct = _finite(tk.get("change_percentage"))
+                            quote_vol_24h = _finite(tk.get("quote_volume"))
+                            base_vol_24h = _finite(tk.get("base_volume"))
+                            high_24h = _finite(tk.get("high_24h"))
+                            low_24h = _finite(tk.get("low_24h"))
+                            src_name = "gateio_spot"
+            except Exception:
+                pass
+        if not closes:
+            try:
+                rgk = requests.get(
+                    "https://api.gateio.ws/api/v4/spot/candlesticks",
+                    params={"currency_pair": gate_pair, "interval": "1d", "limit": "365"},
+                    headers=_HEADERS,
+                    timeout=timeout,
+                )
+                if rgk.status_code == 200:
+                    for row in rgk.json() or []:
+                        if not isinstance(row, list) or len(row) < 6:
+                            continue
+                        ts_s = _finite(row[0])
+                        cl = _finite(row[2])
+                        if ts_s is None or cl is None or cl <= 0:
+                            continue
+                        dt = datetime.fromtimestamp(ts_s, tz=timezone.utc).strftime("%Y-%m-%d")
+                        hi = _finite(row[3]) or cl
+                        lo = _finite(row[4]) or cl
+                        qv = _finite(row[1]) or 0.0
+                        dates.append(dt)
+                        closes.append(round(cl, 6 if cl < 0.05 else (4 if cl < 1 else 2)))
+                        highs.append(hi)
+                        lows.append(lo)
+                        quote_vols.append(qv)
+            except Exception:
+                pass
+
+    if ticker_price is None and closes:
+        ticker_price = closes[-1]
+    if ticker_price is None or ticker_price <= 0:
+        return None
+    if change_amt is None and change_pct is not None and abs(change_pct) > 1e-9:
+        prev_px = ticker_price / (1.0 + change_pct / 100.0)
+        change_amt = ticker_price - prev_px
+
+    low_52w = min(lows) if lows else low_24h
+    high_52w = max(highs) if highs else high_24h
+    px_prec = 6 if abs(ticker_price) < 0.05 else (4 if abs(ticker_price) < 1 else 2)
+    rounded_px = round(ticker_price, px_prec)
+
+    # Quantitative crypto risk/trend metrics
+    vol_30d_ann_pct: float | None = None
+    if len(closes) >= 31:
+        rets: list[float] = []
+        sub = closes[-31:]
+        for a, b in zip(sub[:-1], sub[1:]):
+            if a > 0 and b > 0:
+                rets.append(math.log(b / a))
+        if len(rets) >= 15:
+            mean_r = sum(rets) / len(rets)
+            var_r = sum((x - mean_r) ** 2 for x in rets) / max(1, len(rets) - 1)
+            vol_30d_ann_pct = round(math.sqrt(var_r) * math.sqrt(365.0) * 100.0, 1)
+
+    max_dd_90d_pct: float | None = None
+    if len(closes) >= 10:
+        sub90 = closes[-90:]
+        peak = sub90[0]
+        worst = 0.0
+        for c in sub90:
+            if c > peak:
+                peak = c
+            if peak > 0:
+                dd = (c - peak) / peak * 100.0
+                if dd < worst:
+                    worst = dd
+        max_dd_90d_pct = round(worst, 1)
+
+    vol_ratio_30d: float | None = None
+    if quote_vol_24h is not None and len(quote_vols) >= 10:
+        recent_vols = [v for v in quote_vols[-31:-1] if v > 0]
+        if recent_vols:
+            avg_v = sum(recent_vols) / len(recent_vols)
+            if avg_v > 0:
+                vol_ratio_30d = round(quote_vol_24h / avg_v, 2)
+
+    ma200 = round(sum(closes[-200:]) / 200.0, px_prec) if len(closes) >= 200 else None
+
+    resolved_rg = risk_gate or _load_default_risk_gate()
+    checklist = _build_pre_trade_checklist(
+        price=rounded_px,
+        closes=closes,
+        low_52w=low_52w,
+        high_52w=high_52w,
+        risk_gate=resolved_rg,
+        currency_symbol="$",
+    )
+
+    ma20 = checklist["ma20"]
+    ma50 = checklist["ma50"]
+    above_ma50 = ma50 is not None and rounded_px >= ma50
+    ma_bull = ma20 is not None and ma50 is not None and ma20 >= ma50
+    dd_ok = max_dd_90d_pct is not None and abs(max_dd_90d_pct) < 30.0
+    liq_ok = quote_vol_24h is not None and quote_vol_24h >= 5e7
+
+    c_score = 2
+    if above_ma50:
+        c_score += 2
+    if ma_bull:
+        c_score += 2
+    if dd_ok:
+        c_score += 2
+    if liq_ok:
+        c_score += 2
+    c_score = max(1, min(10, c_score))
+
+    meta_entry = MULTI_MARKET_META_MAP.get(base)
+    cn_name = meta_entry["name_cn"] if meta_entry else f"{base} 现货"
+    sector_cn = meta_entry["sector_cn"] if meta_entry else "数字资产 · 加密现货"
+    overview_cn = (
+        meta_entry["overview_cn"]
+        if meta_entry
+        else f"{base}/USDT 全天候现货交易标的，采用 365 日日线波动与量能结构进行趋势评估。"
+    )
+    now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
+    vol_fmt = (
+        f"{base_vol_24h / 1e6:.2f}M"
+        if (base_vol_24h is not None and base_vol_24h >= 1e5)
+        else (_fmt_num(base_vol_24h, 2) if base_vol_24h is not None else "—")
+    )
+    turnover_24h_fmt = _fmt_money_compact(quote_vol_24h, currency="$")
+
+    prof: dict[str, Any] = {
+        "symbol": base,
+        "market": "crypto",
+        "asset_type": "crypto",
+        "currency": "USD",
+        "currency_symbol": "$",
+        "name_cn": cn_name,
+        "name_en": f"{base}/USDT",
+        "exchange": "现货 · Binance/Gate",
+        "sector_cn": sector_cn,
+        "peer_group": "加密核心资产",
+        "business_overview_cn": overview_cn,
+        "price": rounded_px,
+        "change_amt": round(change_amt or 0.0, px_prec),
+        "change_pct": round(change_pct or 0.0, 2),
+        "as_of": now_bjt[:16],
+        "market_at": now_bjt,
+        "received_at": now_bjt,
+        "source": src_name or "binance_spot",
+        "session": "24x7",
+        "earnings_date": "",
+        "ma20": ma20,
+        "ma50": ma50,
+        "bias20_pct": checklist["bias20_pct"],
+        "bias50_pct": checklist["bias50_pct"],
+        "range_52w_pos": checklist["range_52w_pos"],
+        "pre_trade_checklist": checklist,
+        "chart": {
+            "dates": dates,
+            "closes": closes,
+            "return_1w": _compute_return(closes, 7),
+            "return_1m": _compute_return(closes, 30),
+            "return_3m": _compute_return(closes, 90),
+            "return_6m": _compute_return(closes, 180),
+            "return_1y": _compute_return(closes, min(364, max(1, len(closes) - 1))),
+        },
+        "health": {
+            "score": c_score,
+            "checks": [
+                {"label": "站上 50 日均线", "pass": bool(above_ma50), "detail": _fmt_px(ma50, "$")},
+                {"label": "MA20 高于 MA50", "pass": bool(ma_bull), "detail": f"{checklist['bias50_pct']:+.1f}%" if checklist["bias50_pct"] is not None else "—"},
+                {"label": "90日回撤 < 30%", "pass": bool(dd_ok), "detail": f"{max_dd_90d_pct:.1f}%" if max_dd_90d_pct is not None else "—"},
+                {"label": "24h成交 > $50M", "pass": bool(liq_ok), "detail": turnover_24h_fmt},
+            ],
+        },
+        "crypto_metrics": {
+            "turnover_24h_fmt": turnover_24h_fmt,
+            "base_vol_24h_fmt": f"{vol_fmt} {base}" if vol_fmt != "—" else "—",
+            "high_24h": round(high_24h, px_prec) if high_24h is not None else None,
+            "low_24h": round(low_24h, px_prec) if low_24h is not None else None,
+            "vol_30d_ann_pct": vol_30d_ann_pct,
+            "max_drawdown_90d_pct": max_dd_90d_pct,
+            "vol_ratio_30d": vol_ratio_30d,
+            "ma200": ma200,
+        },
+        "overview": {
+            "market_cap_raw": None,
+            "market_cap_fmt": "—",
+            "pe_ttm": None,
+            "pe_forward": None,
+            "eps_ttm": None,
+            "dividend_yield_pct": None,
+            "dividend_yield_fmt": "—",
+            "volume_fmt": vol_fmt,
+            "turnover_fmt": turnover_24h_fmt,
+            "low_52w": round(low_52w, px_prec) if low_52w is not None else None,
+            "high_52w": round(high_52w, px_prec) if high_52w is not None else None,
+            "beta": None,
+            "short_ratio": None,
+            "insider_pct": "—",
+            "institution_pct": "—",
+            "target_mean_price": None,
+            "analyst_rating": "—",
+            "analyst_count": None,
+        },
+        "financials": {
+            "rev_growth_yoy": "—",
+            "earnings_growth_yoy": "—",
+            "gross_margin": "—",
+            "operating_margin": "—",
+            "net_margin": "—",
+            "roe": "—",
+            "roa": "—",
+            "current_ratio": "—",
+            "debt_to_equity": "—",
+            "total_cash_fmt": "—",
+            "total_debt_fmt": "—",
+            "ttm_revenue_fmt": "—",
+            "ttm_ebitda_fmt": "—",
+            "ttm_ocf_fmt": "—",
+            "ttm_fcf_fmt": "—",
+            "quarters": [],
+        },
+        "valuation": {
+            "pe_ttm": None,
+            "pe_forward": None,
+            "ps_ttm": None,
+            "pb": None,
+            "ev_ebitda": None,
+            "peg": None,
+        },
+        "sec_filings": [],
+    }
+    prof["quick_thesis"] = _build_crypto_quick_thesis(prof, risk_gate=resolved_rg)
+    return prof
+
+
+def _fetch_cn_equity_profile(
+    symbol: str,
+    *,
+    risk_gate: dict[str, Any] | None = None,
+    timeout: int = 4,
+) -> dict[str, Any] | None:
+    quote = _fetch_cn_quote(symbol, timeout=timeout)
+    if not quote:
+        return None
+    q_code = str(quote.get("q_code") or "")
+    chart: dict[str, Any] = {}
+    f10: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_k = pool.submit(fetch_ifzq_kline, q_code, is_us=False, limit=252, timeout=timeout)
+        f_f = pool.submit(_fetch_cn_f10, symbol, timeout)
+        try:
+            chart = f_k.result() or {}
+        except Exception:
+            chart = {}
+        try:
+            f10 = f_f.result() or {}
+        except Exception:
+            f10 = {}
+    f10["chart"] = chart
+    m_code = re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol)
+    exch_cn = {"SH": "上交所", "SZ": "深交所", "BJ": "北交所"}.get(m_code.group(1) if m_code else "", "A股")
+    quote.setdefault("exchange", exch_cn)
+    return _assemble_profile(
+        symbol,
+        f10,
+        quote,
+        sec_filings=[],
+        risk_gate=risk_gate or _load_default_risk_gate(),
+        market="cn",
+        currency="CNY",
+        currency_symbol="¥",
+    )
+
+
+def _fetch_hk_equity_profile(
+    symbol: str,
+    *,
+    risk_gate: dict[str, Any] | None = None,
+    timeout: int = 4,
+) -> dict[str, Any] | None:
+    quote = _fetch_hk_quote(symbol, timeout=timeout)
+    if not quote:
+        return None
+    q_code = str(quote.get("q_code") or "")
+    chart: dict[str, Any] = {}
+    f10: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_k = pool.submit(fetch_ifzq_kline, q_code, is_us=False, limit=252, timeout=timeout)
+        f_f = pool.submit(_fetch_hk_f10, symbol, timeout)
+        try:
+            chart = f_k.result() or {}
+        except Exception:
+            chart = {}
+        try:
+            f10 = f_f.result() or {}
+        except Exception:
+            f10 = {}
+    f10["chart"] = chart
+    quote.setdefault("exchange", "港交所")
+    return _assemble_profile(
+        symbol,
+        f10,
+        quote,
+        sec_filings=[],
+        risk_gate=risk_gate or _load_default_risk_gate(),
+        market="hk",
+        currency="HKD",
+        currency_symbol="HK$",
+    )
+
+
+def _merge_us_fallbacks(
+    sym: str,
+    yahoo: dict[str, Any],
+    gtimg: dict[str, Any],
+    *,
+    timeout: int = 4,
+) -> dict[str, Any]:
+    """Backfill US chart & F10 fundamentals via CN-direct ifzq / EastMoney when Yahoo cache lacks them."""
+    merged = dict(yahoo or {})
+    has_chart = bool((merged.get("chart") or {}).get("closes"))
+    has_fund = any(
+        merged.get(k) is not None
+        for k in ("rev_growth", "gross_margin", "roe", "ttm_revenue")
+    )
+    if has_chart and has_fund:
+        return merged
+    kline_sym = str(gtimg.get("gtimg_kline_sym") or "").strip()
+    futures: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        if not has_chart and kline_sym:
+            futures["chart"] = pool.submit(fetch_ifzq_kline, f"us{kline_sym}", is_us=True, limit=252, timeout=timeout)
+        if not has_fund:
+            futures["f10"] = pool.submit(_fetch_us_f10, sym, timeout)
+        for key, fut in futures.items():
+            try:
+                res = fut.result() or {}
+            except Exception:
+                res = {}
+            if key == "chart" and res.get("closes"):
+                merged["chart"] = res
+            elif key == "f10" and res:
+                for fk, fv in res.items():
+                    if fk == "quarters":
+                        if not merged.get("quarters") and fv:
+                            merged["quarters"] = fv
+                    elif merged.get(fk) is None and fv is not None:
+                        merged[fk] = fv
+    return merged
+
+
+def build_non_us_preset_profiles(
+    *,
+    risk_gate: dict[str, Any] | None = None,
+    timeout: int = 5,
+) -> dict[str, dict[str, Any]]:
+    """Build live research profiles for curated A-share, HK, and Crypto preset assets."""
+    resolved_rg = risk_gate or _load_default_risk_gate()
+    profiles: dict[str, dict[str, Any]] = {}
+
+    def _run_one(row: tuple[str, ...]) -> tuple[str, dict[str, Any] | None]:
+        sym, market = row[0], row[6]
+        try:
+            if market == "cn":
+                return sym, _fetch_cn_equity_profile(sym, risk_gate=resolved_rg, timeout=timeout)
+            if market == "hk":
+                return sym, _fetch_hk_equity_profile(sym, risk_gate=resolved_rg, timeout=timeout)
+            if market == "crypto":
+                return sym, _fetch_crypto_profile(sym, risk_gate=resolved_rg, timeout=timeout)
+        except Exception:
+            return sym, None
+        return sym, None
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for sym, prof in pool.map(_run_one, CORE_MULTI_MARKET_ASSETS):
+            if prof is not None:
+                profiles[sym] = prof
+    return profiles
 
 
 def _read_cache() -> dict[str, dict[str, Any]]:
@@ -1118,7 +2697,7 @@ def build_stock_profiles(
     *,
     risk_gate: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Build and cache fundamental & chart profiles for 20 core US stocks."""
+    """Build and cache fundamental & chart profiles for core US, A-share, HK, and Crypto assets."""
     symbols = [row[0] for row in CORE_RESEARCH_STOCKS]
     gtimg_map = fetch_gtimg_batch(symbols)
     yahoo_cache = _read_cache()
@@ -1159,15 +2738,25 @@ def build_stock_profiles(
     resolved_rg = risk_gate or _load_default_risk_gate()
     profiles: dict[str, dict[str, Any]] = {}
     for sym in symbols:
+        yahoo_item = yahoo_cache.get(sym) or {}
+        gtimg_item = gtimg_map.get(sym) or {}
+        if not (yahoo_item.get("chart") or {}).get("closes"):
+            yahoo_item = _merge_us_fallbacks(sym, yahoo_item, gtimg_item, timeout=4)
         prof = _assemble_profile(
             sym,
-            yahoo_cache.get(sym) or {},
-            gtimg_map.get(sym) or {},
+            yahoo_item,
+            gtimg_item,
             sec_filings=filings_map.get(sym, []),
             risk_gate=resolved_rg,
+            market="us",
+            currency="USD",
+            currency_symbol="$",
         )
         if prof is not None:
             profiles[sym] = prof
+
+    for sym, prof in build_non_us_preset_profiles(risk_gate=resolved_rg, timeout=5).items():
+        profiles[sym] = prof
     return profiles
 
 
@@ -1176,38 +2765,72 @@ def fetch_single_stock_profile(
     *,
     risk_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Live lookup for an arbitrary US stock ticker via gtimg + Yahoo Finance."""
-    sym = symbol.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9.]{1,10}", sym):
+    """Live multi-market lookup (US / A-share / HK / Crypto) by code or Chinese name."""
+    resolved = resolve_research_symbol(symbol, timeout=3)
+    if resolved is None:
         return None
-    gtimg = fetch_gtimg_batch([sym]).get(sym) or {}
-    cache = _read_cache()
-    yahoo = cache.get(sym)
-    if not yahoo or (time.time() - float(yahoo.get("yahoo_fetched_at") or 0.0)) > CACHE_TTL_SECONDS:
-        sess, crumb = _create_yahoo_session(timeout=3)
-        fresh = _fetch_yahoo_one(sym, sess, crumb, timeout=4) if sess is not None else None
-        if fresh:
-            yahoo = fresh
-            cache[sym] = fresh
-            try:
-                atomic_write_json(CACHE_PATH, cache)
-            except Exception:
-                pass
-    sec_filings: list[dict[str, str]] = []
-    if sym in SEC_CIK_MAP:
-        try:
-            sec_filings = fetch_sec_filings_map([sym], force_refresh=False, timeout=2).get(sym, [])
-        except Exception:
-            sec_filings = []
-    return _assemble_profile(
-        sym,
-        yahoo or {},
-        gtimg,
-        sec_filings=sec_filings,
-        risk_gate=risk_gate or _load_default_risk_gate(),
-    )
+    canon_sym, market = resolved
+    now = time.time()
+
+    with _ON_DEMAND_LOCK:
+        hit = _ON_DEMAND_CACHE.get(canon_sym)
+        if hit and (now - hit[0]) < ON_DEMAND_TTL_SECONDS:
+            return dict(hit[1])
+
+    resolved_rg = risk_gate or _load_default_risk_gate()
+    prof: dict[str, Any] | None = None
+
+    if market == "cn":
+        prof = _fetch_cn_equity_profile(canon_sym, risk_gate=resolved_rg, timeout=4)
+    elif market == "hk":
+        prof = _fetch_hk_equity_profile(canon_sym, risk_gate=resolved_rg, timeout=4)
+    elif market == "crypto":
+        prof = _fetch_crypto_profile(canon_sym, risk_gate=resolved_rg, timeout=4)
+    else:
+        gtimg = fetch_gtimg_batch([canon_sym], timeout=4).get(canon_sym) or {}
+        if gtimg:
+            cache = _read_cache()
+            yahoo = cache.get(canon_sym) or {}
+            if not yahoo or (now - float(yahoo.get("yahoo_fetched_at") or 0.0)) > CACHE_TTL_SECONDS:
+                sess, crumb = _create_yahoo_session(timeout=2)
+                fresh = _fetch_yahoo_one(canon_sym, sess, crumb, timeout=3) if sess is not None else None
+                if fresh:
+                    yahoo = fresh
+                    cache[canon_sym] = fresh
+                    try:
+                        atomic_write_json(CACHE_PATH, cache)
+                    except Exception:
+                        pass
+            yahoo = _merge_us_fallbacks(canon_sym, yahoo, gtimg, timeout=4)
+            sec_filings: list[dict[str, str]] = []
+            if canon_sym in SEC_CIK_MAP:
+                try:
+                    sec_filings = fetch_sec_filings_map([canon_sym], force_refresh=False, timeout=2).get(canon_sym, [])
+                except Exception:
+                    sec_filings = []
+            prof = _assemble_profile(
+                canon_sym,
+                yahoo,
+                gtimg,
+                sec_filings=sec_filings,
+                risk_gate=resolved_rg,
+                market="us",
+                currency="USD",
+                currency_symbol="$",
+            )
+        elif "." not in canon_sym and re.fullmatch(r"[A-Z0-9]{2,10}", canon_sym):
+            # Fallback: arbitrary unlisted crypto spot token (e.g. WIF, TRUMP, SATS)
+            prof = _fetch_crypto_profile(canon_sym, risk_gate=resolved_rg, timeout=4)
+
+    if prof is not None:
+        with _ON_DEMAND_LOCK:
+            if len(_ON_DEMAND_CACHE) > 256:
+                oldest_key = min(_ON_DEMAND_CACHE, key=lambda k: _ON_DEMAND_CACHE[k][0])
+                _ON_DEMAND_CACHE.pop(oldest_key, None)
+            _ON_DEMAND_CACHE[canon_sym] = (now, dict(prof))
+    return prof
 
 
 if __name__ == "__main__":
     profs = build_stock_profiles()
-    print(f"Built {len(profs)} stock profiles; sample AAPL PE={profs.get('AAPL', {}).get('overview', {}).get('pe_ttm')}")
+    print(f"Built {len(profs)} research profiles; AAPL PE={profs.get('AAPL', {}).get('overview', {}).get('pe_ttm')}")

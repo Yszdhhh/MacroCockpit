@@ -277,9 +277,9 @@ def build_static_bundle(
     css_block = f"<style>\n{css_src}\n</style>"
     if "<!-- INLINE_CSS -->" in html_src:
         html_src = html_src.replace("<!-- INLINE_CSS -->", css_block, 1)
-    elif re.search(r'<link[^>]+href=["\'](?:\./)?styles\.css["\'][^>]*>', html_src, flags=re.IGNORECASE):
+    elif re.search(r'<link[^>]+href=["\'](?:\./)?styles\.css(?:\?[^"\']*)?["\'][^>]*>', html_src, flags=re.IGNORECASE):
         html_src = re.sub(
-            r'<link[^>]+href=["\'](?:\./)?styles\.css["\'][^>]*>',
+            r'<link[^>]+href=["\'](?:\./)?styles\.css(?:\?[^"\']*)?["\'][^>]*>',
             lambda _m: css_block,
             html_src,
             count=1,
@@ -311,12 +311,12 @@ def build_static_bundle(
     if "<!-- INLINE_JS -->" in html_src:
         html_src = html_src.replace("<!-- INLINE_JS -->", js_bundle, 1)
     elif re.search(
-        r'<script[^>]+src=["\'](?:\./)?app\.js["\'][^>]*>\s*</script>',
+        r'<script[^>]+src=["\'](?:\./)?app\.js(?:\?[^"\']*)?["\'][^>]*>\s*</script>',
         html_src,
         flags=re.IGNORECASE,
     ):
         html_src = re.sub(
-            r'<script[^>]+src=["\'](?:\./)?app\.js["\'][^>]*>\s*</script>',
+            r'<script[^>]+src=["\'](?:\./)?app\.js(?:\?[^"\']*)?["\'][^>]*>\s*</script>',
             lambda _m: js_bundle,
             html_src,
             count=1,
@@ -807,6 +807,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             "/api/muse-spec.md",
             "/api/caffeine-brief.md",
             "/api/stock",
+            "/api/stock/search",
             "/api/v2/signals",
         }
         allow_qtok = path in v1_token_paths
@@ -958,19 +959,38 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(200, r)
                 return
 
-            if path == "/api/stock":
-                sym = (urllib.parse.parse_qs(u.query, keep_blank_values=True).get("symbol") or [""])[0].strip().upper()
-                if not re.fullmatch(r"[A-Z0-9.]{1,10}", sym):
-                    self._send_json(400, {"error": "股票代码格式无效"})
+            if path == "/api/stock/search":
+                q_raw = (urllib.parse.parse_qs(u.query, keep_blank_values=True).get("q") or [""])[0].strip()
+                if not q_raw or len(q_raw) > 40 or any(c in q_raw for c in ("/", "\\", "..", "<", ">", "\x00", "\n", "\r")):
+                    self._send_json(400, {"error": "检索关键词无效"})
                     return
-                prof = (self._state().get("stock_profiles") or {}).get(sym)
-                if prof is None and self.server.role != "consumer":
-                    try:
-                        from backend.stock_research import fetch_single_stock_profile
+                from backend.stock_research import search_research_symbols
 
-                        prof = fetch_single_stock_profile(sym)
-                    except Exception:
-                        prof = None
+                self._send_json(200, {"items": search_research_symbols(q_raw, limit=8)})
+                return
+
+            if path == "/api/stock":
+                raw_sym = (urllib.parse.parse_qs(u.query, keep_blank_values=True).get("symbol") or [""])[0].strip()
+                if not raw_sym or len(raw_sym) > 32 or any(c in raw_sym for c in ("/", "\\", "..", "<", ">", "\x00", "\n", "\r")):
+                    self._send_json(400, {"error": "标的代码格式无效"})
+                    return
+                from backend.stock_research import fetch_single_stock_profile, resolve_research_symbol
+
+                st = self._state()
+                profiles_map = st.get("stock_profiles") or {}
+                prof = profiles_map.get(raw_sym.upper())
+                if prof is None:
+                    resolved = resolve_research_symbol(raw_sym, timeout=3)
+                    if resolved is None:
+                        self._send_json(404, {"error": "暂未识别该标的（支持 AAPL / 600519 / 00700.HK / BTC / 茅台）"})
+                        return
+                    canon_sym, _mkt = resolved
+                    prof = profiles_map.get(canon_sym)
+                    if prof is None:
+                        try:
+                            prof = fetch_single_stock_profile(canon_sym, risk_gate=st.get("risk_gate"))
+                        except Exception:
+                            prof = None
                 if prof is None:
                     self._send_json(404, {"error": "暂未找到该标的投研数据"})
                     return

@@ -754,7 +754,7 @@ def test_server_auth_gate_muse_digest_rss_and_sync_isolation(tmp_path: Path) -> 
         # Health is public
         with urllib.request.urlopen(f"{base}/api/health", timeout=5) as resp:
             h = json.loads(resp.read().decode("utf-8"))
-            assert h["ok"] is True and h["auth_enabled"] is True
+            assert h["ok"] is True and h["auth_enabled"] is True and h["role"] == "standalone"
 
         # Unauthenticated root redirects to /login; API returns 401
         no_redir = urllib.request.build_opener(_NoRedirect())
@@ -951,11 +951,13 @@ def test_six_module_web_ui_and_offline_bundle_invariants() -> None:
     assert "<title>宏观金融决策驾驶舱</title>" in html_src
     for required_id in (
         "view-today", "view-portfolio", "view-research-hub", "view-research", "view-records",
-        "newsModeSwitch", "sectorRibbon", "subtopicChips", "positionDrawer", "importDrawer",
-        "articleDrawer", "pushDrawer", "mobileTabbar", "museDigestUrl", "museFeedUrl",
+        "newsModeSwitch", "sectorRibbon", "subtopicChips", "stockMarketTabs", "stockSuggest",
+        "positionDrawer", "importDrawer", "articleDrawer", "pushDrawer", "mobileTabbar",
+        "museDigestUrl", "museFeedUrl",
     ):
         assert f'id="{required_id}"' in html_src
     assert 'data-sector="ashare"' in html_src
+    assert ">推送<" in html_src
 
     combined = "\n".join((html_src, css_src, js_src))
     for pat in FORBIDDEN_JARGON:
@@ -988,6 +990,7 @@ def test_offline_bundle_strips_private_journal_and_candidates(tmp_path: Path) ->
     bundle_txt = out_html.read_text(encoding="utf-8")
 
     assert secret_marker not in bundle_txt
+    assert "styles.css?" not in bundle_txt and "app.js?" not in bundle_txt
     m = re.search(r"window\.__INITIAL_COCKPIT_STATE__\s*=\s*(\{.*?\});\s*</script>", bundle_txt, re.DOTALL)
     assert m is not None
     embedded = json.loads(m.group(1).replace("<\\/", "</"))
@@ -1205,6 +1208,79 @@ def test_stock_research_profiles_and_api_endpoint(tmp_path: Path) -> None:
         with pytest.raises(urllib.error.HTTPError) as exc_400:
             urllib.request.urlopen(f"{base}/api/stock?symbol={bad_q}&token=ro-tok", timeout=5)
         assert exc_400.value.code == 400
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_multimarket_symbol_resolution_search_and_consumer_on_demand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify A-share/HK/US/Crypto resolution, /api/stock/search, and consumer on-demand lookup."""
+    from backend import stock_research
+    from backend.public_snapshot import publish_generation
+
+    assert stock_research.resolve_research_symbol("AAPL") == ("AAPL", "us")
+    assert stock_research.resolve_research_symbol("600519") == ("600519.SH", "cn")
+    assert stock_research.resolve_research_symbol("sz300750") == ("300750.SZ", "cn")
+    assert stock_research.resolve_research_symbol("700.HK") == ("00700.HK", "hk")
+    assert stock_research.resolve_research_symbol("00700") == ("00700.HK", "hk")
+    assert stock_research.resolve_research_symbol("BTC-USDT") == ("BTC", "crypto")
+    assert stock_research.resolve_research_symbol("茅台") == ("600519.SH", "cn")
+    assert stock_research.resolve_research_symbol("腾讯") == ("00700.HK", "hk")
+    assert stock_research.resolve_research_symbol("../etc") is None
+
+    # Consumer mode with published state allows authenticated /api/stock/search & on-demand /api/stock
+    publish_generation(
+        tmp_path,
+        {"generated_at_bjt": "2026-11-23 20:00:00+08:00", "stock_profiles": {}, "signals": []},
+    )
+    stub_profiles = {
+        "600519.SH": {"symbol": "600519.SH", "market": "cn", "currency_symbol": "¥", "price": 1439.0, "name_cn": "贵州茅台"},
+        "00700.HK": {"symbol": "00700.HK", "market": "hk", "currency_symbol": "HK$", "price": 344.0, "name_cn": "腾讯控股"},
+        "DOGE": {"symbol": "DOGE", "market": "crypto", "currency_symbol": "$", "price": 0.21, "name_cn": "DOGE 现货"},
+    }
+    monkeypatch.setattr(
+        stock_research,
+        "fetch_single_stock_profile",
+        lambda sym, risk_gate=None: dict(stub_profiles[sym]) if sym in stub_profiles else None,
+    )
+
+    srv = server.create_server(
+        "127.0.0.1",
+        0,
+        web_dir=WEB_DIR,
+        state_path=tmp_path / "data" / "cockpit_state.json",
+        db_path=tmp_path / "data" / "j.db",
+        access_password="pw-c",
+        read_token="ro-mm",
+        sync_token="sync-mm",
+        role="consumer",
+    )
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        for sym_q, exp_sym in [("茅台", "600519.SH"), ("700.HK", "00700.HK"), ("DOGE-USDT", "DOGE")]:
+            url = f"{base}/api/stock?symbol={urllib.parse.quote(sym_q)}&token=ro-mm"
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                assert resp.status == 200
+                data = json.loads(resp.read().decode("utf-8"))
+                assert data["symbol"] == exp_sym
+
+        with pytest.raises(urllib.error.HTTPError) as exc_s401:
+            urllib.request.urlopen(f"{base}/api/stock/search?q=BTC", timeout=5)
+        assert exc_s401.value.code == 401
+
+        with urllib.request.urlopen(f"{base}/api/stock/search?q={urllib.parse.quote('茅台')}&token=ro-mm", timeout=5) as resp:
+            assert resp.status == 200
+            items = json.loads(resp.read().decode("utf-8")).get("items") or []
+            assert any(it.get("symbol") == "600519.SH" for it in items)
+
+        with pytest.raises(urllib.error.HTTPError) as exc_b400:
+            urllib.request.urlopen(f"{base}/api/stock?symbol={urllib.parse.quote('../etc')}&token=ro-mm", timeout=5)
+        assert exc_b400.value.code == 400
     finally:
         srv.shutdown()
         srv.server_close()
@@ -1468,4 +1544,255 @@ def test_opml_and_caffeine_brief_endpoints_and_ui_markers(tmp_path: Path) -> Non
     index_html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     assert 'data-asource="AI与金融研报"' in index_html
     assert 'id="exportOpmlBtn"' in index_html
+
+
+def test_equation_news_rest_etag_and_normalization(tmp_path: Path) -> None:
+    """Verify EquationNews REST+ETag conditional caching, item normalization, and cross-channel dedup."""
+    from unittest.mock import patch
+    from backend import rss_sources
+
+    main_payload = {
+        "items": [
+            {
+                "no": 16935,
+                "time": "2026-11-23T13:56:07.211Z",
+                "channels": ["main"],
+                "source": "AggrNews",
+                "zh": "*英伟达董事会恢复黄仁勋总裁、首席执行官及董事会职务：彭博社",
+                "en": "*NVIDIA BOARD REINSTATES JENSEN HUANG AS PRESIDENT, CEO & BOARD: BBG",
+                "coins": [],
+                "url": "https://eqn.news/main/16935",
+                "source_url": "https://x.com/AggrNews/status/1",
+                "ai": {
+                    "summary": None,
+                    "overview": {
+                        "zh": {
+                            "paragraphs": [
+                                {"text": "第一段概览：董事会一致同意黄仁勋复任。"},
+                                {"text": "英伟达股价盘前一度走高。"},
+                            ]
+                        }
+                    },
+                },
+            },
+            {
+                "no": 16704,
+                "time": "2026-11-22T19:35:42.204Z",
+                "channels": ["main"],
+                "source": "EquationNews",
+                "zh": "Fusionist Bridge 漏洞被利用，估计抽走 104 万美元 USDT",
+                "en": "Fusionist Bridge Exploit Drains $1.04M in USDT",
+                "coins": ["ACE"],
+                "url": "https://eqn.news/main/16704",
+                "ai": None,
+            },
+        ]
+    }
+    tradfi_payload = {
+        "items": [
+            {
+                "no": 16935,
+                "time": "2026-11-23T13:56:07.211Z",
+                "channels": ["main", "tradfi"],
+                "zh": "*英伟达董事会恢复黄仁勋职务",
+                "en": "NVIDIA reinstates CEO",
+                "coins": [],
+                "url": "https://eqn.news/main/16935",
+            },
+            {
+                "no": 16370,
+                "time": "2026-11-21T02:31:23.036Z",
+                "channels": ["tradfi"],
+                "source": "Tradfin",
+                "zh": "*软银考虑以 1 万亿美元收购 SK 海力士 ($SKHY)",
+                "en": "*SoftBank explored acquiring SK Hynix ($SKHY)",
+                "coins": [],
+                "url": "https://eqn.news/tradfi/16370",
+            },
+        ]
+    }
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: dict[str, Any] | None = None, etag: str = "") -> None:
+            self.status_code = status_code
+            self.content = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else b""
+            self.headers = {"ETag": etag} if etag else {}
+
+    seen_headers: list[tuple[str, dict[str, str]]] = []
+    phase = {"step": 1}
+
+    def _fake_get(url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None, timeout: int = 7) -> _FakeResp:
+        ch = str((params or {}).get("channel") or "")
+        seen_headers.append((ch, dict(headers or {})))
+        if phase["step"] == 1:
+            if ch == "main":
+                return _FakeResp(200, main_payload, 'W/"v1"')
+            return _FakeResp(200, tradfi_payload, 'W/"v2"')
+        return _FakeResp(304, None, "")
+
+    cache_path = tmp_path / "eqn_rest_cache.json"
+    with patch.object(rss_sources.requests, "get", side_effect=_fake_get):
+        sigs1, meta1 = rss_sources.collect_equation_news_with_meta(cache_path=cache_path)
+        assert meta1["changed"] is True
+        assert meta1["new_count"] == 3
+        assert len(sigs1) == 3
+        assert cache_path.is_file()
+
+        by_id = {s["id"]: s for s in sigs1}
+        assert set(by_id) == {"eqn-16935", "eqn-16704", "eqn-16370"}
+        assert all(s["source"] == "方程式快讯" and s["source_tier"] == "T1_5" for s in sigs1)
+        assert not by_id["eqn-16935"]["title"].startswith("*")
+        assert "第一段概览" in by_id["eqn-16935"]["summary"]
+        assert by_id["eqn-16935"]["url"] == "https://eqn.news/main/16935"
+        assert by_id["eqn-16935"]["importance"] == "高"
+        assert by_id["eqn-16704"]["category"] == "crypto"
+        assert "ACE" in by_id["eqn-16704"]["tickers"]
+        assert by_id["eqn-16370"]["category"] == "equities"
+        assert "SKHY" in by_id["eqn-16370"]["tickers"]
+
+        phase["step"] = 2
+        sigs2, meta2 = rss_sources.collect_equation_news_with_meta(cache_path=cache_path)
+        assert meta2["changed"] is False
+        assert meta2["new_count"] == 0
+        assert [s["id"] for s in sigs2] == [s["id"] for s in sigs1]
+        inm = {ch: hdr.get("If-None-Match") for ch, hdr in seen_headers[-2:]}
+        assert inm == {"main": 'W/"v1"', "tradfi": 'W/"v2"'}
+
+
+def test_eqn_fast_sync_skips_304_and_preserves_articles_on_200(tmp_path: Path) -> None:
+    """Verify run_eqn_fast_sync skips publishing on 304 and preserves articles while merging new items on 200."""
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+    from backend import cloud_collector, rss_sources
+    from backend.public_snapshot import load_published_generation, lookup_published_article, publish_generation
+
+    now_bjt_str = datetime.now(timezone.utc).astimezone(rss_sources.BJT).strftime("%Y-%m-%d %H:%M")
+    now_iso_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    existing_signal = {
+        "id": "wscn-old-1",
+        "source": "华尔街见闻",
+        "category": "equities",
+        "source_tier": "T1_5",
+        "direction": "bullish",
+        "importance": "高",
+        "time_bjt": now_bjt_str,
+        "title": "英伟达新一代数据中心 GPU 量产爬坡超预期",
+        "summary": "云计算大厂持续追加 AI 算力资本开支。",
+        "why_it_matters": "支撑科技权重估值。",
+        "tickers": ["NVDA"],
+        "topics": ["算力芯片"],
+        "url": "https://wallstreetcn.com/livenews/1",
+    }
+    article_md = "---\ntitle: \"深度投研示例\"\npublisher: \"Demo Desk\"\nurl: \"https://example.com/demo\"\nscore: 88\n---\n\nDeep analysis body preserved across fast sync.\n"
+    publish_generation(
+        tmp_path,
+        {
+            "schema_version": 2,
+            "generation": 1,
+            "generated_at_bjt": "2026-11-23 21:00:00+08:00",
+            "signals": [existing_signal],
+            "signal_candidates": [existing_signal],
+            "articles": [{"filename": "feed_demo.md", "title": "深度投研示例", "source": "AI与金融研报"}],
+            "stock_profiles": {},
+            "coverage": {"signals_count": 1, "articles_count": 1},
+        },
+        [{"filename": "feed_demo.md", "content": article_md}],
+        generation=1,
+    )
+
+    cache_path = tmp_path / "data" / "eqn_rest_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "channels": {
+                    "main": {
+                        "etag": 'W/"cached-1"',
+                        "fetched_epoch": 9999999999.0,
+                        "item_nos": [17000],
+                        "signals": [
+                            {
+                                "id": "eqn-17000",
+                                "source": "方程式快讯",
+                                "category": "macro",
+                                "source_tier": "T1_5",
+                                "direction": "neutral",
+                                "importance": "高",
+                                "time_bjt": now_bjt_str,
+                                "title": "旧快讯缓存条目",
+                                "summary": "已缓存内容。",
+                                "why_it_matters": "宏观跟踪。",
+                                "tickers": ["US10Y"],
+                                "topics": ["美联储"],
+                                "url": "https://eqn.news/main/17000",
+                            }
+                        ],
+                    },
+                    "tradfi": {"etag": 'W/"cached-2"', "fetched_epoch": 9999999999.0, "item_nos": [], "signals": []},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: dict[str, Any] | None = None, etag: str = "") -> None:
+            self.status_code = status_code
+            self.content = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else b""
+            self.headers = {"ETag": etag} if etag else {}
+
+    with patch.object(rss_sources.requests, "get", return_value=_FakeResp(304)):
+        res_304 = cloud_collector.run_eqn_fast_sync(tmp_path)
+        assert res_304["ok"] is True
+        assert res_304["changed"] is False
+        assert res_304["published"] is False
+        assert load_published_generation(tmp_path)["generation"] == 1
+
+    new_payload = {
+        "items": [
+            {
+                "no": 17001,
+                "time": now_iso_z,
+                "channels": ["main"],
+                "source": "EquationNews",
+                "zh": "*美联储理事暗示下月降息 25 个基点，纳指与比特币走高",
+                "en": "*Fed governor signals 25bps rate cut next month as Nasdaq and BTC rally",
+                "coins": ["BTC"],
+                "url": "https://eqn.news/main/17001",
+                "ai": {
+                    "overview": {
+                        "zh": {
+                            "paragraphs": [
+                                {"text": "美联储官员最新讲话强化下月降息预期，美元与美债收益率同步回落。"},
+                            ]
+                        }
+                    }
+                },
+            }
+        ]
+    }
+
+    def _fake_200(url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None, timeout: int = 7) -> _FakeResp:
+        if (params or {}).get("channel") == "main":
+            return _FakeResp(200, new_payload, 'W/"fresh-2"')
+        return _FakeResp(304)
+
+    with patch.object(rss_sources.requests, "get", side_effect=_fake_200):
+        res_200 = cloud_collector.run_eqn_fast_sync(tmp_path)
+        assert res_200["ok"] is True
+        assert res_200["changed"] is True
+        assert res_200["published"] is True
+        assert res_200["generation"] == 2
+        assert res_200["articles_preserved"] == 1
+
+    loaded_after = load_published_generation(tmp_path)
+    assert loaded_after["generation"] == 2
+    st = loaded_after["state"]
+    assert any(s.get("id") == "eqn-17001" for s in (st.get("signals") or []))
+    assert any(s.get("id") == "wscn-old-1" for s in (st.get("signals") or []))
+    assert [a.get("filename") for a in (st.get("articles") or [])] == ["feed_demo.md"]
+    art = lookup_published_article(tmp_path, "feed_demo.md")
+    assert art is not None and "Deep analysis body preserved across fast sync." in art["content"]
 

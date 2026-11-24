@@ -58,6 +58,7 @@ from backend.rss_sources import (
     _write_curated_article_files,
     build_opml_export,
     collect_cn_finance_wires,
+    collect_equation_news_with_meta,
 )
 from backend.sec_edgar import collect_recent_sec_signals, fetch_sec_filings_map
 from backend.signal_aggregator import (
@@ -77,6 +78,8 @@ from backend.stock_research import (
     _assemble_profile,
     _create_yahoo_session,
     _fetch_yahoo_one,
+    _merge_us_fallbacks,
+    build_non_us_preset_profiles,
     build_quick_thesis,
     fetch_gtimg_batch,
 )
@@ -409,16 +412,52 @@ def _load_cn_stock_profiles(
         sp_cache = {}
     profiles: dict[str, dict[str, Any]] = {}
     for sym in symbols:
+        y_item = sp_cache.get(sym) or {}
+        g_item = gtimg_map.get(sym) or {}
+        if not (y_item.get("chart") or {}).get("closes"):
+            y_item = _merge_us_fallbacks(sym, y_item, g_item, timeout=4)
         prof = _assemble_profile(
             sym,
-            sp_cache.get(sym) or {},
-            gtimg_map.get(sym) or {},
+            y_item,
+            g_item,
             sec_filings=filings_map.get(sym, []),
             risk_gate=risk_gate,
+            market="us",
+            currency="USD",
+            currency_symbol="$",
         )
         if prof is not None:
             profiles[sym] = prof
+    for sym, prof in build_non_us_preset_profiles(risk_gate=risk_gate, timeout=5).items():
+        profiles[sym] = prof
     return profiles
+
+
+def _bump_producer_generation(root: Path, data_dir: Path) -> int:
+    counter_path = data_dir / "producer_generation.json"
+    with file_lock(counter_path):
+        prev_gen = 0
+        if counter_path.is_file():
+            try:
+                prev_gen = int((_read_json(counter_path, {}) or {}).get("generation") or 0)
+            except (TypeError, ValueError):
+                prev_gen = 0
+        cur_pub_gen = 0
+        try:
+            cur_pub_gen = int((load_published_generation(root) or {}).get("generation") or 0)
+        except Exception:
+            cur_pub_gen = 0
+        next_gen = max(prev_gen, cur_pub_gen) + 1
+        atomic_write_json(counter_path, {"generation": next_gen})
+        return next_gen
+
+
+def _count_signal_categories(signals: list[dict[str, Any]]) -> dict[str, int]:
+    cat_counts: dict[str, int] = {}
+    for sig in signals:
+        c = str(sig.get("category") or "macro")
+        cat_counts[c] = cat_counts.get(c, 0) + 1
+    return cat_counts
 
 
 def run_cn_merge_and_publish(
@@ -453,6 +492,7 @@ def run_cn_merge_and_publish(
 
         cn_rss_signals: list[dict[str, Any]] = []
         cn_wires: list[dict[str, Any]] = []
+        eqn_signals: list[dict[str, Any]] = []
         cn_art_cands: list[dict[str, Any]] = []
         cls_depth_cands: list[dict[str, Any]] = []
         aihot_signals: list[dict[str, Any]] = []
@@ -463,6 +503,7 @@ def run_cn_merge_and_publish(
         with ThreadPoolExecutor(max_workers=10) as pool:
             rss_futs = [pool.submit(_fetch_one_feed, sp, 7) for sp in cn_rss_specs]
             wires_fut = pool.submit(collect_cn_finance_wires, 7)
+            eqn_fut = pool.submit(collect_equation_news_with_meta, cache_path=data_dir / "eqn_rest_cache.json")
             art_futs = [pool.submit(_fetch_article_candidates_from_feed, sp, 8) for sp in cn_art_specs]
             cls_fut = pool.submit(_fetch_cls_depth_candidates, 8)
             aihot_fut = pool.submit(_collect_aihot_signals)
@@ -479,6 +520,10 @@ def run_cn_merge_and_publish(
                 cn_wires = wires_fut.result()
             except Exception:
                 cn_wires = []
+            try:
+                eqn_signals, _eqn_meta = eqn_fut.result()
+            except Exception:
+                eqn_signals = []
             for fut in art_futs:
                 try:
                     cn_art_cands.extend(fut.result())
@@ -540,7 +585,7 @@ def run_cn_merge_and_publish(
         raw_signals = _strip_private_items(
             [
                 _ensure_signal_topics(s)
-                for s in (cn_rss_signals + cn_wires + intl_signals + sec_signals + aihot_signals + eq_signals)
+                for s in (cn_rss_signals + cn_wires + eqn_signals + intl_signals + sec_signals + aihot_signals + eq_signals)
             ]
         )
         all_signals, kazike_stats = process_financial_signals(
@@ -628,27 +673,8 @@ def run_cn_merge_and_publish(
             except Exception:
                 pass
 
-        cat_counts: dict[str, int] = {}
-        for sig in all_signals:
-            c = str(sig.get("category") or "macro")
-            cat_counts[c] = cat_counts.get(c, 0) + 1
-
-        # Advance monotonic generation atomically
-        counter_path = data_dir / "producer_generation.json"
-        with file_lock(counter_path):
-            prev_gen = 0
-            if counter_path.is_file():
-                try:
-                    prev_gen = int((_read_json(counter_path, {}) or {}).get("generation") or 0)
-                except (TypeError, ValueError):
-                    prev_gen = 0
-            cur_pub_gen = 0
-            try:
-                cur_pub_gen = int((load_published_generation(root) or {}).get("generation") or 0)
-            except Exception:
-                cur_pub_gen = 0
-            next_gen = max(prev_gen, cur_pub_gen) + 1
-            atomic_write_json(counter_path, {"generation": next_gen})
+        cat_counts = _count_signal_categories(all_signals)
+        next_gen = _bump_producer_generation(root, data_dir)
 
         coverage = {
             "signals_count": len(all_signals),
@@ -663,6 +689,7 @@ def run_cn_merge_and_publish(
             "intl_relay_stale": bool(intl_stale),
             "intl_fetched_at": str(relay.get("fetched_at") or ""),
             "intl_signals_count": len(intl_signals),
+            "eqn_signals_count": len(eqn_signals),
         }
 
         state: dict[str, Any] = {
@@ -700,8 +727,135 @@ def run_cn_merge_and_publish(
             "generation": manifest.get("generation"),
             "published_at": manifest.get("published_at"),
             "signals_count": len(all_signals),
+            "eqn_signals_count": len(eqn_signals),
             "articles_count": len(articles_payload),
             "intl_relay_stale": intl_stale,
+        }
+
+
+def run_eqn_fast_sync(
+    base_dir: Path | str = COCKPIT_ROOT,
+    *,
+    channels: tuple[str, ...] = ("main", "tradfi"),
+    limit: int = 20,
+    force_publish: bool = False,
+) -> dict[str, Any]:
+    """Fast incremental EquationNews REST+ETag sync: skip publish on 304, merge & publish on 200 changes."""
+    root = Path(base_dir)
+    data_dir = root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    eqn_signals, meta = collect_equation_news_with_meta(
+        channels=channels,
+        limit=limit,
+        cache_path=data_dir / "eqn_rest_cache.json",
+    )
+    if not meta.get("changed") and not force_publish:
+        return {
+            "ok": True,
+            "changed": False,
+            "published": False,
+            "eqn_signals_count": len(eqn_signals),
+            "channels": meta.get("channels") or {},
+        }
+
+    lock_path = data_dir / "cloud_merge.lock"
+    with file_lock(lock_path):
+        try:
+            loaded = load_published_generation(root)
+        except FileNotFoundError:
+            cn_res = run_cn_merge_and_publish(root)
+            return {
+                **cn_res,
+                "changed": True,
+                "published": True,
+                "fallback_full_merge": True,
+                "eqn_signals_count": len(eqn_signals),
+                "new_count": int(meta.get("new_count") or len(eqn_signals)),
+            }
+
+        cur_gen = int(loaded.get("generation") or 0)
+        cur_manifest = loaded.get("manifest")
+        cur_state = dict(loaded.get("state") or {})
+
+        articles_payload: list[dict[str, str]] = []
+        seen_fnames: set[str] = set()
+        gen_art_dir = data_dir / "generations" / f"gen_{cur_gen}" / "articles"
+        legacy_art_dir = root / "articles"
+        art_entries = (
+            (cur_manifest.get("articles") if isinstance(cur_manifest, dict) else None)
+            or cur_state.get("articles")
+            or []
+        )
+        for entry in art_entries:
+            if not isinstance(entry, dict):
+                continue
+            fname = safe_article_filename(entry.get("filename"))
+            if not fname or fname in seen_fnames:
+                continue
+            seen_fnames.add(fname)
+            art_file = gen_art_dir / fname
+            if not art_file.is_file():
+                art_file = legacy_art_dir / fname
+            if art_file.is_file():
+                try:
+                    articles_payload.append({"filename": fname, "content": art_file.read_text(encoding="utf-8")})
+                except OSError:
+                    pass
+
+        existing_pool = list(cur_state.get("signal_candidates") or cur_state.get("signals") or [])
+        fresh_ids = {str(s["id"]) for s in eqn_signals if isinstance(s, dict) and s.get("id")}
+        kept_existing = [
+            s for s in existing_pool if not (isinstance(s, dict) and str(s.get("id") or "") in fresh_ids)
+        ]
+        merged_raw = _strip_private_items(
+            [_ensure_signal_topics(s) for s in (eqn_signals + kept_existing)]
+        )
+        all_signals, kazike_stats = process_financial_signals(
+            merged_raw,
+            receipts_path=data_dir / "scoring_receipts.json",
+        )
+        signal_candidates = kazike_stats.pop("candidates", [])
+
+        cat_counts = _count_signal_categories(all_signals)
+        next_gen = _bump_producer_generation(root, data_dir)
+
+        coverage = dict(cur_state.get("coverage") or {})
+        coverage.update(
+            {
+                "signals_count": len(all_signals),
+                "signal_candidates_count": len(signal_candidates),
+                "signal_sources_count": int(kazike_stats.get("source_count") or 0),
+                "source_count": int(kazike_stats.get("source_count") or 0),
+                "category_breakdown": cat_counts,
+                "eqn_signals_count": len(eqn_signals),
+            }
+        )
+
+        cur_state["generation"] = next_gen
+        cur_state["generated_at_bjt"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
+        cur_state["signals"] = all_signals
+        cur_state["signal_candidates"] = signal_candidates
+        cur_state["kazike_stats"] = kazike_stats
+        cur_state["coverage"] = coverage
+
+        manifest = publish_generation(
+            root,
+            cur_state,
+            articles_payload,
+            producer_id="eqn-fast-sync",
+            generation=next_gen,
+        )
+        return {
+            "ok": True,
+            "changed": True,
+            "published": True,
+            "generation": manifest.get("generation"),
+            "published_at": manifest.get("published_at"),
+            "eqn_signals_count": len(eqn_signals),
+            "new_count": int(meta.get("new_count") or 0),
+            "signals_count": len(all_signals),
+            "articles_preserved": len(articles_payload),
         }
 
 
@@ -709,12 +863,13 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="MacroCockpit split-cloud collector (overseas push & CN merge)")
-    parser.add_argument("--role", choices=("intl-push", "cn-merge-publish"), required=True)
+    parser.add_argument("--role", choices=("intl-push", "cn-merge-publish", "eqn-fast-sync"), required=True)
     parser.add_argument("--base-dir", type=Path, default=COCKPIT_ROOT)
     parser.add_argument("--target-url", default="")
     parser.add_argument("--producer-id", default="github-actions-intl")
     parser.add_argument("--skip-yahoo", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force-publish", action="store_true")
     parser.add_argument("--max-articles", type=int, default=40)
     args = parser.parse_args()
 
@@ -732,6 +887,11 @@ def main() -> None:
         print(json.dumps({"ok": ok, **bundle["sources_status"], **res}, ensure_ascii=False))
         if not ok:
             raise SystemExit(1)
+        return
+
+    if args.role == "eqn-fast-sync":
+        res = run_eqn_fast_sync(args.base_dir, force_publish=args.force_publish)
+        print(json.dumps(res, ensure_ascii=False))
         return
 
     res = run_cn_merge_and_publish(args.base_dir, max_articles=args.max_articles)
