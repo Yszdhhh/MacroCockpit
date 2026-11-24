@@ -120,7 +120,7 @@
    - **Net Liquidity 单位统一**：实测 `WALCL` 最新 `6,741,452`（百万美元）、`WTREGEN` 最新 `916,613`（百万美元）、`RRPONTSYD` 最新 `0.401`（十亿美元）。计算公式必须统一为十亿美元（Billions USD）：
      $$\text{Net Liquidity (B)} = \frac{\text{WALCL}}{1000} - \frac{\text{WTREGEN}}{1000} - \text{RRPONTSYD}$$
      （若省略 `WTREGEN` 则用 $\text{WALCL}/1000 - \text{RRPONTSYD}$，禁止直接相减！）
-   - **CPI 同比计算**：`CPI.parquet`（`CPIAUCSL`）存的是月度定基指数，前端展示应计算近 12 个月同比变化率 `(CPI_t / CPI_{t-12} - 1) * 100%`，并保留 `as_of`（月度日期）和较上月变动（百分点）。
+   - **CPI 同比计算**：使用 FRED `CPIAUCNS` 未季调指数，只与上年同月对比，不混用旧 `CPI.parquet`（`CPIAUCSL`）。最新月份缺比较值时，标明该月同比不可用，并为保留的上期同比标日期；只有相邻两月都有同比时，才展示百分点变动。
 2. **腾讯财经编码与指数前缀规则**：
    - `qt.gtimg.cn` 返回 `GBK` 编码，分号换行；每条用 `~` 分隔，首字段必须校验 `fields[0] == '200'`；常见下标：`[1]` 中文简称、`[3]` 现价、`[4]` 昨收、`[32]` 涨跌幅 `%`。
    - **点号指数规则**：标准代码加 `us` 前缀（如 `usSPY`, `usNVDA`），纳指综合指数需写为 `us.IXIC`、道指为 `us.DJI`。任何 `price <= 0` 或解析异常的标的一律直接剔除，绝不展示为 `0` 或 `N/A`。

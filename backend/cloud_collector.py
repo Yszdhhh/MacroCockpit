@@ -30,6 +30,7 @@ from backend.correlation_engine import (
 )
 from backend.fred_and_market import (
     COCKPIT_ROOT,
+    CPI_NSA_KEY,
     FRED_SERIES_MAP,
     _fetch_gold_tail,
     _load_fred_api_key,
@@ -133,7 +134,7 @@ def _fetch_intl_fred_series() -> dict[str, list[list[Any]]]:
     out: dict[str, list[list[Any]]] = {}
 
     def _pull_one(key: str, sid: str) -> tuple[str, list[tuple[str, float]]]:
-        lim = 48 if key == "CPI" else 120
+        lim = 48 if key == CPI_NSA_KEY else 120
         return key, fetch_fred_observations(sid, api_key=api_key, limit=lim, timeout=12)
 
     with ThreadPoolExecutor(max_workers=6) as pool:

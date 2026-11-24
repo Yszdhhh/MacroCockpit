@@ -1,4 +1,4 @@
-"""Official 2026-2027 macro calendar (FOMC, BLS CPI, BLS NFP) & stock earnings calendar."""
+"""Official 2026-2027 release dates for US macro events and stock earnings dates."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -10,6 +10,7 @@ except ImportError:
     ZoneInfo = None  # type: ignore[assignment]
 
 UTC = timezone.utc
+MACRO_EVENT_TYPES = ("fomc", "cpi", "nfp", "pce", "gdp")
 
 # Verified against federalreserve.gov/monetarypolicy/fomccalendars.htm
 FOMC_2026_2027: tuple[tuple[str, str, str], ...] = (
@@ -77,6 +78,44 @@ BLS_NFP_2026_2027: tuple[tuple[str, str], ...] = (
     ("2027-12-03", "2027年11月"),
 )
 
+# BEA's schedules, checked 2026-11-23. Update the dates from the official
+# tables (not a recurrence rule); these selected releases are at 08:30 ET.
+BEA_RELEASE_SCHEDULE = "https://www.bea.gov/news/schedule"
+BEA_PCE_2026_2027: tuple[tuple[str, str], ...] = (
+    ("2026-11-25", "2026年10月"),
+    ("2026-12-23", "2026年11月"),
+    ("2027-01-28", "2026年12月"),
+    ("2027-02-25", "2027年1月"),
+    ("2027-03-31", "2027年2月"),
+    ("2027-04-29", "2027年3月"),
+    ("2027-05-27", "2027年4月"),
+    ("2027-06-25", "2027年5月"),
+    ("2027-07-29", "2027年6月"),
+    ("2027-08-25", "2027年7月"),
+    ("2027-09-30", "2027年8月"),
+    ("2027-10-28", "2027年9月"),
+    ("2027-11-24", "2027年10月"),
+    ("2027-12-22", "2027年11月"),
+)
+
+# Publication date, reference quarter, estimate stage, includes corporate profits.
+BEA_GDP_2026_2027: tuple[tuple[str, str, str, bool], ...] = (
+    ("2026-11-25", "2026年第三季度", "第二次估算", True),
+    ("2026-12-23", "2026年第三季度", "第三次估算", True),
+    ("2027-01-28", "2026年第四季度", "初步估算", False),
+    ("2027-02-25", "2026年第四季度", "第二次估算", False),
+    ("2027-03-31", "2026年第四季度", "第三次估算", True),
+    ("2027-04-29", "2027年第一季度", "初步估算", False),
+    ("2027-05-27", "2027年第一季度", "第二次估算", True),
+    ("2027-06-25", "2027年第一季度", "第三次估算", True),
+    ("2027-07-29", "2027年第二季度", "初步估算", False),
+    ("2027-08-25", "2027年第二季度", "第二次估算", True),
+    ("2027-09-30", "2027年第二季度", "第三次估算", True),
+    ("2027-10-28", "2027年第三季度", "初步估算", False),
+    ("2027-11-24", "2027年第三季度", "第二次估算", True),
+    ("2027-12-22", "2027年第三季度", "第三次估算", True),
+)
+
 
 def _us_eastern_to_utc(d_str: str, hour: int, minute: int) -> datetime:
     d = date.fromisoformat(d_str)
@@ -110,6 +149,7 @@ def _make_exact_event(
     now_utc: datetime,
     local_tz: timezone,
     impact: str = "高",
+    source_url: str | None = None,
 ) -> dict[str, Any]:
     dt_utc = _us_eastern_to_utc(date_et, hour_et, minute_et)
     dt_local = dt_utc.astimezone(local_tz)
@@ -130,6 +170,7 @@ def _make_exact_event(
         "tickers": list(tickers),
         "impact": impact,
         "source": source,
+        **({"source_url": source_url} if source_url else {}),
     }
 
 
@@ -172,7 +213,7 @@ def build_calendar_events(
     now_utc: datetime | None = None,
     tz_offset_hours: int = 8,
 ) -> list[dict[str, Any]]:
-    """Build combined FOMC, CPI, NFP and stock earnings events with honest time precision."""
+    """Build official macro and stock earnings events with honest time precision."""
     now = now_utc or datetime.now(UTC)
     local_tz = timezone(timedelta(hours=tz_offset_hours))
     events: list[dict[str, Any]] = []
@@ -245,6 +286,35 @@ def build_calendar_events(
                 local_tz=local_tz,
             )
         )
+
+    bea_releases = (
+        ("pce", "美国 PCE 通胀", (
+            (d_str, f"美国 {ref_month} PCE 物价指数公布")
+            for d_str, ref_month in BEA_PCE_2026_2027
+        )),
+        ("gdp", "美国经济增长", (
+            (d_str, f"美国 {ref_quarter} GDP {stage}{'及企业利润' if includes_profits else ''}公布")
+            for d_str, ref_quarter, stage, includes_profits in BEA_GDP_2026_2027
+        )),
+    )
+    for event_type, category_cn, releases in bea_releases:
+        for d_str, title in releases:
+            events.append(
+                _make_exact_event(
+                    ev_id=f"cal-{event_type}-{d_str}",
+                    event_type=event_type,
+                    category_cn=category_cn,
+                    title=title,
+                    date_et=d_str,
+                    hour_et=8,
+                    minute_et=30,
+                    tickers=macro_tickers,
+                    source="BEA",
+                    source_url=BEA_RELEASE_SCHEDULE,
+                    now_utc=now,
+                    local_tz=local_tz,
+                )
+            )
 
     # Stock earnings dates from stock_profiles (strictly date precision; never fabricate hours)
     for sym, prof in sorted((stock_profiles or {}).items()):

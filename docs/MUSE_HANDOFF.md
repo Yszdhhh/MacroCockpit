@@ -106,10 +106,12 @@
 | `signal_search` | `RO`, `RW` | 支持 `scope` / `category`（含 `ashare`）/ `subtopic` / `instrument_id` / `event_id` / `direction` / `sort`（`importance\|time`）/ `from` / `to` / `limit` / `cursor`；`RO` 拒绝 `watch`/`rules` 与 `held+instrument_id` 反推 |
 | `research_get` | `RO`, `RW` | 按 `symbol` 分段返回 `profile` / `trend` / `filings` / `checklist`；`RO` 仅返回公共纪律检查 |
 | `portfolio_risk` | `RO`, `RW` | `RO` 请求 `view="summary"` 仅返回 **10% 区间脱敏桶**，请求 `detail` 拒绝 `403`；`RW` 支持完整 `summary` 与 `detail` |
-| `calendar_list` | `RO`, `RW` | 按 `type`（`all/macro/earnings/fomc/cpi/nfp`）/ `symbol` / 时间窗口查询日历，保留精确时刻与仅日期精度边界 |
+| `calendar_list` | `RO`, `RW` | 按 `type`（`all/macro/earnings/fomc/cpi/nfp/pce/gdp`）/ `symbol` / 时间窗口查询日历，保留精确时刻与仅日期精度边界；`macro` 包含 PCE 与 GDP/企业利润 |
 | `preferences_get` | `RW` | 读取个人展示偏好与信源筛选规则 |
 | `import_preview` | `RW` | 校验并解析自然文本或 CSV 持仓，生成预览差异与 `preview_id` |
 | `workspace_commit` | `RW` | 基于 `expected_revision` + `request_id` 幂等提交 `ops` 或 `preview_id`（互斥） |
+
+日历维护：`backend/calendar_events.py` 中的 PCE 和 GDP/企业利润日期来自 BEA [本年发布日程](https://www.bea.gov/news/schedule)和[次年发布日程](https://www.bea.gov/news/schedule/next-year)。仅纳入已公布的日期，不按月推算；BEA 改期或发布新一年的日程时更新表项并运行 `python -m pytest tests/test_bea_calendar.py -q`。日程时刻按美国东部时间录入，由日历统一换算为 UTC 和北京时间。
 
 ---
 
