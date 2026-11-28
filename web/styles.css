@@ -1738,6 +1738,70 @@ body[data-view="today"][data-has-holdings="0"] #toggleAmtBtn { display: none; }
   color: inherit;
 }
 
+.stock-chip-pill {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 30px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  overflow: hidden;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+.stock-chip-pill:hover { border-color: var(--ink-2); }
+.stock-chip-pill.is-active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+}
+.stock-chip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 3px 6px 3px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.stock-chip-pill.is-active .chip-mkt {
+  background: var(--chip-mkt-active-bg);
+  color: inherit;
+}
+.stock-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 28px;
+  padding: 0 8px 0 3px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.stock-chip-pill.is-active .stock-chip-x {
+  color: var(--bg);
+  opacity: 0.72;
+}
+.stock-chip-x:hover {
+  color: var(--bear);
+  opacity: 1;
+}
+.stock-chip-pill.is-active .stock-chip-x:hover {
+  color: var(--bear);
+  opacity: 1;
+}
+
 .stock-banner {
   display: flex;
   flex-wrap: wrap;

@@ -123,6 +123,7 @@ def _parse_eastmoney_fx(payload: dict[str, Any], received_at: str) -> dict[str, 
     return {
         "pair": "USD/CNH",
         "rate": rate_str,
+        "hkd_per_usd": str(HKD_PER_USDT_REF),
         "basis": "offshore",
         "label": "人民币估值 · 离岸价",
         "source": "eastmoney",
@@ -150,6 +151,7 @@ def _parse_frankfurter_fx(payload: dict[str, Any], received_at: str) -> dict[str
     return {
         "pair": "USD/CNY",
         "rate": rate_str,
+        "hkd_per_usd": str(HKD_PER_USDT_REF),
         "basis": "reference",
         "label": "在岸参考价",
         "source": "frankfurter",
@@ -182,6 +184,7 @@ def fetch_fx_snapshot(
     ):
         snap = dict(cached.get("snapshot") or {})
         if snap.get("rate"):
+            snap.setdefault("hkd_per_usd", str(HKD_PER_USDT_REF))
             snap["cached"] = True
             snap["stale"] = False
             snap["status"] = "ok"
@@ -222,6 +225,7 @@ def fetch_fx_snapshot(
 
     if cached and isinstance(cached.get("snapshot"), dict) and cached["snapshot"].get("rate"):
         stale_snap = dict(cached["snapshot"])
+        stale_snap.setdefault("hkd_per_usd", str(HKD_PER_USDT_REF))
         stale_snap["status"] = "stale_cache"
         stale_snap["stale"] = True
         stale_snap["cached"] = True
@@ -230,6 +234,7 @@ def fetch_fx_snapshot(
     return {
         "pair": "USD/CNH",
         "rate": None,
+        "hkd_per_usd": str(HKD_PER_USDT_REF),
         "basis": None,
         "label": "人民币估值不可用",
         "source": None,

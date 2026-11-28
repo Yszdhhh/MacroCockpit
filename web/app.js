@@ -8,13 +8,20 @@
     capital: "macro_cockpit_capital_v1",
     showAmt: "macro_cockpit_show_amt_v1",
     currency: "macro_cockpit_currency_v1",
+    pinnedStocks: "macro_cockpit_pinned_stocks_v1",
     readBriefs: "macro_cockpit_read_briefs_v1",
     readEvents: "macro_cockpit_read_events_v1",
     newsMode: "macro_cockpit_news_mode_v1",
     feedView: "macro_cockpit_feed_view_v1"
   };
 
-  const TOP_VIEWS = ["today", "portfolio", "research", "records"];
+  const TOP_VIEWS = ["today", "research", "portfolio", "records"];
+  const DEFAULT_RESEARCH_SYMBOLS = [
+    "AAPL", "NVDA", "MSFT", "GOOG", "META", "AMZN", "TSLA", "QQQ",
+    "02513.HK", "01810.HK",
+    "688825.SH", "600519.SH",
+    "BTC", "ETH", "SOL", "BNB"
+  ];
   const CATEGORY_LABELS = { macro: "宏观", equities: "美股", ashare: "A股·港股", ai: "AI", crypto: "加密" };
   const SECTOR_ORDER = ["equities", "ashare", "ai", "crypto", "macro"];
   const SECTOR_FULL_LABELS = {
@@ -162,7 +169,7 @@
     lastPollAt: 0,
     pollTimerId: 0,
     capitalBase: DEFAULT_CAPITAL,
-    currency: "USD",
+    currency: "DEFAULT",
     showAmounts: true,
     theme: "light",
     view: "today",
@@ -173,6 +180,17 @@
     stockMarket: "all",
     stockRange: "1y",
     customStocks: {},
+    pinnedStocks: (() => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEYS.pinnedStocks);
+        if (raw === null) return DEFAULT_RESEARCH_SYMBOLS.slice();
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed.map((s) => String(s || "").trim().toUpperCase()).filter(Boolean);
+        }
+      } catch (_e) { /* fallback */ }
+      return DEFAULT_RESEARCH_SYMBOLS.slice();
+    })(),
     daily: {
       scope: "all",
       cat: "all",
@@ -415,18 +433,15 @@
     return map;
   }
 
-  function getFxContext() {
+  function getCnyRateSnapshot() {
     const ws = appState.workspace || {};
     const fx = ws.fx_snapshot || state().fx_snapshot || {};
-    const cur = appState.currency === "CNY" ? "CNY" : "USD";
-    if (cur === "USD") {
-      return { currency: "USD", rate: 1, symbol: "$", available: true, label: "美元基准", as_of: "" };
-    }
-    if (fx.status === "unavailable") {
-      return { currency: "CNY", rate: null, symbol: "¥", available: false, label: "人民币估值不可用", as_of: fx.as_of || "" };
-    }
+    const hkdPerUsd = toNum(fx.hkd_per_usd) > 0 ? toNum(fx.hkd_per_usd) : 7.79;
     let rate = toNum(fx.rate);
     let label = fx.label || "人民币估值";
+    if (fx.status === "unavailable") {
+      return { cnyPerUsd: null, hkdPerUsd, unavailable: true, label, as_of: fx.as_of || "" };
+    }
     if (!Number.isFinite(rate) || rate <= 0) {
       const mFx = macroById().usdcnh;
       if (mFx && Number.isFinite(toNum(mFx.raw_value)) && toNum(mFx.raw_value) > 0) {
@@ -435,9 +450,119 @@
       }
     }
     if (!Number.isFinite(rate) || rate <= 0) {
-      return { currency: "CNY", rate: null, symbol: "¥", available: false, label: "人民币估值不可用", as_of: fx.as_of || "" };
+      return { cnyPerUsd: null, hkdPerUsd, unavailable: true, label: "人民币估值不可用", as_of: fx.as_of || "" };
     }
-    return { currency: "CNY", rate, symbol: "¥", available: true, label, as_of: fx.as_of || "" };
+    return { cnyPerUsd: rate, hkdPerUsd, unavailable: false, label, as_of: fx.as_of || "" };
+  }
+
+  function getFxContext() {
+    const cur = appState.currency === "CNY" ? "CNY" : "USD";
+    const cross = getCnyRateSnapshot();
+    if (cur === "USD") {
+      return { currency: "USD", rate: 1, symbol: "$", available: true, label: "美元基准", as_of: cross.as_of, hkdPerUsd: cross.hkdPerUsd };
+    }
+    if (cross.unavailable || !Number.isFinite(cross.cnyPerUsd)) {
+      return { currency: "CNY", rate: null, symbol: "¥", available: false, label: "人民币估值不可用", as_of: cross.as_of, hkdPerUsd: cross.hkdPerUsd };
+    }
+    return { currency: "CNY", rate: cross.cnyPerUsd, symbol: "¥", available: true, label: cross.label, as_of: cross.as_of, hkdPerUsd: cross.hkdPerUsd };
+  }
+
+  function currencySymbolFor(code) {
+    const c = String(code || "USD").trim().toUpperCase();
+    if (c === "CNY" || c === "RMB" || c === "CNH") return "¥";
+    if (c === "HKD") return "HK$";
+    return "$";
+  }
+
+  function assetNativeCurrency(profileOrCur) {
+    if (typeof profileOrCur === "string") {
+      const s = profileOrCur.trim().toUpperCase();
+      if (s === "CNY" || s === "RMB" || s === "CNH" || s === "¥") return "CNY";
+      if (s === "HKD" || s === "HK$") return "HKD";
+      return "USD";
+    }
+    if (profileOrCur && !isBlank(profileOrCur.currency)) {
+      return assetNativeCurrency(String(profileOrCur.currency));
+    }
+    const m = assetMarket(profileOrCur);
+    return m === "cn" ? "CNY" : m === "hk" ? "HKD" : "USD";
+  }
+
+  function targetCurrencyFor(nativeCur) {
+    if (appState.currency === "USD") return "USD";
+    if (appState.currency === "CNY") return "CNY";
+    return nativeCur;
+  }
+
+  function crossFxMultiplier(fromCur, toCur) {
+    const src = assetNativeCurrency(fromCur);
+    const dst = assetNativeCurrency(toCur);
+    if (src === dst) return 1;
+    const cross = getCnyRateSnapshot();
+    if ((src === "CNY" || dst === "CNY") && (!Number.isFinite(cross.cnyPerUsd) || cross.cnyPerUsd <= 0)) {
+      return null;
+    }
+    const toUsd = src === "USD" ? 1 : (src === "HKD" ? 1 / cross.hkdPerUsd : 1 / cross.cnyPerUsd);
+    const fromUsd = dst === "USD" ? 1 : (dst === "HKD" ? cross.hkdPerUsd : cross.cnyPerUsd);
+    return toUsd * fromUsd;
+  }
+
+  function convertAssetValue(val, profileOrCur) {
+    const n = toNum(val);
+    const nativeCur = assetNativeCurrency(profileOrCur);
+    const targetCur = targetCurrencyFor(nativeCur);
+    const sym = currencySymbolFor(targetCur);
+    const mult = crossFxMultiplier(nativeCur, targetCur);
+    if (mult === null) {
+      return { value: null, currency: targetCur, symbol: sym, available: false, mult: null };
+    }
+    return {
+      value: Number.isFinite(n) ? n * mult : null,
+      currency: targetCur,
+      symbol: sym,
+      available: true,
+      mult
+    };
+  }
+
+  function formatConvertedAssetPrice(val, profileOrCur) {
+    const n = toNum(val);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    const conv = convertAssetValue(n, profileOrCur);
+    if (!conv.available || !Number.isFinite(conv.value)) return "人民币估值不可用";
+    return formatAssetPrice(conv.value, conv.symbol);
+  }
+
+  function formatMoneyCompact(val, sym) {
+    const n = toNum(val);
+    if (!Number.isFinite(n)) return "—";
+    const sign = n < 0 ? "-" : "";
+    const a = Math.abs(n);
+    const s = sym || "$";
+    if (a >= 1e12) return sign + s + (a / 1e12).toFixed(2) + "T";
+    if (a >= 1e9) return sign + s + (a / 1e9).toFixed(2) + "B";
+    if (a >= 1e6) return sign + s + (a / 1e6).toFixed(2) + "M";
+    if (a >= 1e3) return sign + s + (a / 1e3).toFixed(2) + "K";
+    return sign + s + a.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function convertCompactMoneyText(fmtStr, profileOrCur) {
+    const raw = String(fmtStr || "").trim();
+    if (!raw || raw === "—") return "—";
+    const nativeCur = assetNativeCurrency(profileOrCur);
+    const targetCur = targetCurrencyFor(nativeCur);
+    if (targetCur === nativeCur) return raw;
+    const conv = convertAssetValue(1, profileOrCur);
+    if (!conv.available || !Number.isFinite(conv.mult)) return "人民币估值不可用";
+    const m = raw.match(/^([+-]?)\s*(HK\$|US\$|[$¥])?\s*([\d,]+(?:\.\d+)?)\s*([TBMK万亿])?$/i);
+    if (!m) return raw;
+    const sign = m[1] === "-" ? -1 : 1;
+    const num = Number(m[3].replace(/,/g, ""));
+    if (!Number.isFinite(num)) return raw;
+    const unit = (m[4] || "").toUpperCase();
+    const scaleMap = { T: 1e12, B: 1e9, M: 1e6, K: 1e3, "万": 1e4, "亿": 1e8 };
+    const absVal = sign * num * (scaleMap[unit] || 1) * conv.mult;
+    return formatMoneyCompact(absVal, conv.symbol);
   }
 
   function formatDisplayMoney(usdVal, opts) {
@@ -892,7 +1017,8 @@
   }
 
   async function applyCurrency(cur, persist) {
-    const next = cur === "CNY" ? "CNY" : "USD";
+    const raw = String(cur || "").trim().toUpperCase();
+    const next = raw === "CNY" ? "CNY" : (raw === "USD" ? "USD" : "DEFAULT");
     appState.currency = next;
     setActive(dom.currencySeg, "data-currency", next);
     if (persist) safeStorageSet(STORAGE_KEYS.currency, next);
@@ -904,7 +1030,8 @@
 
   function loadPreferences() {
     applyTheme(document.documentElement.getAttribute("data-theme"), false);
-    const savedCur = safeStorageGet(STORAGE_KEYS.currency) === "CNY" ? "CNY" : "USD";
+    const savedRaw = String(safeStorageGet(STORAGE_KEYS.currency) || "DEFAULT").toUpperCase();
+    const savedCur = savedRaw === "CNY" ? "CNY" : (savedRaw === "USD" ? "USD" : "DEFAULT");
     appState.currency = savedCur;
     setActive(dom.currencySeg, "data-currency", savedCur);
     const rawCap = safeStorageGet(STORAGE_KEYS.capital);
@@ -2274,7 +2401,7 @@
     const attr = isClickable ? ' data-open-stock="' + escapeHtml(sym) + '" role="button" tabindex="0" title="查看 ' + escapeHtml(sym) + ' 投研"' : "";
     return '<div class="tile"' + attr + ">" +
       '<div class="tile-name"><span>' + escapeHtml(row.name || row.symbol) + '</span><span class="tile-sym">' + escapeHtml(row.symbol) + "</span></div>" +
-      '<div class="tile-price num-plain">' + escapeHtml(formatPrice(row.price)) + "</div>" +
+      '<div class="tile-price num-plain">' + escapeHtml(formatConvertedAssetPrice(row.price, "USD")) + "</div>" +
       '<div class="tile-chg num-plain ' + toneClass(row.change_pct) + '">' + escapeHtml(formatSignedPct(row.change_pct)) +
       (showTag && !isBlank(row.tag) ? ' <span class="tile-sym">' + escapeHtml(row.tag) + "</span>" : "") + "</div>" +
       "</div>";
@@ -2420,8 +2547,8 @@
             const isCash = Boolean(r.is_cash) || String(r.asset_class || "").toLowerCase() === "cash";
             const pxNum = toNum(r.price_usd);
             const pxText = (!isBlank(r.price_usd) && Number.isFinite(pxNum) && pxNum > 0)
-              ? formatPrice(pxNum)
-              : (isCash ? "$1.00" : "未取得报价");
+              ? formatConvertedAssetPrice(pxNum, "USD")
+              : (isCash ? formatConvertedAssetPrice(1, "USD") : "未取得报价");
             return "<tr>" +
               "<td>" + escapeHtml(r.symbol) + "</td>" +
               "<td>" + escapeHtml(r.asset_class_cn || r.asset_class || "现货") + "</td>" +
@@ -2458,18 +2585,18 @@
             const sideCls = d.side === "short" ? "badge-bear" : "badge-bull";
             const modeLabel = d.margin_mode === "cross" ? "全仓" : "逐仓";
             const markNum = toNum(d.mark_price);
-            const markText = (!isBlank(d.mark_price) && Number.isFinite(markNum) && markNum > 0) ? formatPrice(markNum) : "未取得报价";
+            const markText = (!isBlank(d.mark_price) && Number.isFinite(markNum) && markNum > 0) ? formatConvertedAssetPrice(markNum, "USD") : "未取得报价";
             const buf = toNum(d.liq_buffer_pct);
             const liqText = d.liq_status === "无法估算" || !Number.isFinite(toNum(d.liq_price))
               ? "无法估算"
-              : formatPrice(d.liq_price) + (Number.isFinite(buf) ? " (" + buf.toFixed(1) + "%)" : "");
+              : formatConvertedAssetPrice(d.liq_price, "USD") + (Number.isFinite(buf) ? " (" + buf.toFixed(1) + "%)" : "");
             const fr = toNum(d.funding_rate);
             return "<tr>" +
               "<td>" + escapeHtml(d.symbol) + "</td>" +
               '<td><span class="badge ' + sideCls + '">' + sideLabel + "</span></td>" +
               "<td>" + modeLabel + "</td>" +
               '<td class="num">' + qtyHtml(d.qty) + "</td>" +
-              '<td class="num">' + escapeHtml(formatPrice(d.entry_price)) + "</td>" +
+              '<td class="num">' + escapeHtml(formatConvertedAssetPrice(d.entry_price, "USD")) + "</td>" +
               '<td class="num">' + escapeHtml(markText) + "</td>" +
               '<td class="num ' + (liqText === "无法估算" ? "tone-flat" : (Number.isFinite(buf) && buf < 15 ? "tone-down" : "")) + '">' + escapeHtml(liqText) + "</td>" +
               '<td class="num">' + escapeHtml(Number.isFinite(fr) ? (fr * 100).toFixed(4) + "%" : "—") + "</td>" +
@@ -2490,7 +2617,7 @@
           const sideLabel = d.side === "short" ? "空" : "多";
           const sideCls = d.side === "short" ? "badge-bear" : "badge-bull";
           const markNum = toNum(d.mark_price);
-          const markText = (!isBlank(d.mark_price) && Number.isFinite(markNum) && markNum > 0) ? formatPrice(markNum) : "未取得报价";
+          const markText = (!isBlank(d.mark_price) && Number.isFinite(markNum) && markNum > 0) ? formatConvertedAssetPrice(markNum, "USD") : "未取得报价";
           const wt = toNum(d.weight_pct);
           const buf = toNum(d.liq_buffer_pct);
           const bufStr = d.liq_status === "无法估算" || !Number.isFinite(buf) ? "无法估算" : "安全垫 " + buf.toFixed(1) + "%";
@@ -2502,7 +2629,7 @@
             '<div class="deriv-details">' +
             '<div class="deriv-kv-grid">' +
             '<div><span>模式</span><b>' + (d.margin_mode === "cross" ? "全仓" : "逐仓") + "</b></div>" +
-            '<div><span>开仓价</span><b class="num-plain">' + escapeHtml(formatPrice(d.entry_price)) + "</b></div>" +
+            '<div><span>开仓价</span><b class="num-plain">' + escapeHtml(formatConvertedAssetPrice(d.entry_price, "USD")) + "</b></div>" +
             '<div><span>占用保证金</span><b>' + amtHtml(d.margin_usd) + "</b></div>" +
             '<div><span>未实现盈亏</span><b>' + amtHtml(d.unrealized_pnl_usd, { signed: true, cls: toneClass(d.unrealized_pnl_usd) }) + "</b></div>" +
             "</div>" +
@@ -2795,7 +2922,8 @@
     if (appState.offline) return;
     const hadWs = Boolean(appState.workspace);
     try {
-      const ws = await apiJson("/api/v2/workspace?currency=" + encodeURIComponent(appState.currency));
+      const apiCur = appState.currency === "CNY" ? "CNY" : "USD";
+      const ws = await apiJson("/api/v2/workspace?currency=" + encodeURIComponent(apiCur));
       if (ws && typeof ws === "object") {
         appState.workspace = ws;
         renderAll();
@@ -2854,29 +2982,72 @@
     return m === "cn" ? "¥" : m === "hk" ? "HK$" : "$";
   }
 
+  function savePinnedStocks(list) {
+    const clean = [];
+    const seen = new Set();
+    arr(list).forEach((s) => {
+      const sym = String(s || "").trim().toUpperCase();
+      if (sym && !seen.has(sym)) {
+        seen.add(sym);
+        clean.push(sym);
+      }
+    });
+    appState.pinnedStocks = clean;
+    safeStorageSet(STORAGE_KEYS.pinnedStocks, JSON.stringify(clean));
+    return clean;
+  }
+
+  function isStockPinned(sym) {
+    const up = String(sym || "").trim().toUpperCase();
+    return Boolean(up) && appState.pinnedStocks.includes(up);
+  }
+
+  function pinStock(sym) {
+    const up = String(sym || "").trim().toUpperCase();
+    if (!up || appState.pinnedStocks.includes(up)) return false;
+    savePinnedStocks(appState.pinnedStocks.concat([up]));
+    return true;
+  }
+
+  function unpinStock(sym) {
+    const up = String(sym || "").trim().toUpperCase();
+    if (!up || !appState.pinnedStocks.includes(up)) return false;
+    savePinnedStocks(appState.pinnedStocks.filter((s) => s !== up));
+    if (appState.adHocStock === up) appState.adHocStock = "";
+    if (appState.stockSymbol === up) appState.stockSymbol = "";
+    return true;
+  }
+
+  function resetPinnedStocks() {
+    savePinnedStocks(DEFAULT_RESEARCH_SYMBOLS);
+    appState.adHocStock = "";
+    const keys = filteredStockKeys();
+    appState.stockSymbol = keys[0] || "";
+    renderResearch();
+    syncUrlHash();
+    showToast("已恢复默认投研标的", "ok");
+  }
+
   function filteredStockKeys() {
     const map = allStockProfiles();
-    const keys = Object.keys(map);
     const mkt = appState.stockMarket || "all";
-    if (mkt === "all") return keys;
-    return keys.filter((k) => assetMarket(map[k]) === mkt);
+    return appState.pinnedStocks.filter((k) => map[k] && (mkt === "all" || assetMarket(map[k]) === mkt));
   }
 
   function getActiveStock() {
     const map = allStockProfiles();
-    const sym = String(appState.stockSymbol || "AAPL").toUpperCase();
+    const sym = String(appState.stockSymbol || "").toUpperCase();
     const mkt = appState.stockMarket || "all";
-    if (map[sym] && (mkt === "all" || assetMarket(map[sym]) === mkt)) return map[sym];
     const mKeys = filteredStockKeys();
+    if (sym && map[sym] && (mKeys.includes(sym) || appState.adHocStock === sym) && (mkt === "all" || assetMarket(map[sym]) === mkt)) {
+      return map[sym];
+    }
     if (mKeys.length) {
       appState.stockSymbol = mKeys[0];
       return map[mKeys[0]];
     }
-    if (map[sym]) return map[sym];
-    const keys = Object.keys(map);
-    if (keys.length) {
-      appState.stockSymbol = keys[0];
-      return map[keys[0]];
+    if (sym && map[sym] && appState.adHocStock === sym && mkt === "all") {
+      return map[sym];
     }
     return null;
   }
@@ -2896,7 +3067,9 @@
     const keys = filteredStockKeys();
     const mktFilter = appState.stockMarket || "all";
     if (!keys.length) {
-      dom.stockChips.innerHTML = '<span class="panel-meta">该市场暂无预设标的，可在右侧输入代码或名称实时检索</span>';
+      dom.stockChips.innerHTML =
+        '<span class="panel-meta">当前市场暂无自选标的，可在右侧输入代码或名称添加</span>' +
+        '<button type="button" class="btn btn-sm" data-reset-stocks>恢复默认</button>';
       return;
     }
     dom.stockChips.innerHTML = keys.map((sym) => {
@@ -2906,31 +3079,35 @@
       const m = assetMarket(p);
       const showCn = m !== "us" && !isBlank(p.name_cn) && p.name_cn !== sym;
       const mTag = mktFilter === "all" && m !== "us" ? '<span class="chip-mkt">' + escapeHtml(RESEARCH_MARKET_LABELS[m] || m) + "</span>" : "";
-      return '<button type="button" class="chip' + (on ? " is-active" : "") + '" data-open-stock="' + escapeHtml(sym) + '" aria-pressed="' + String(on) + '">' +
+      return '<div class="stock-chip-pill' + (on ? " is-active" : "") + '">' +
+        '<button type="button" class="stock-chip-main" data-open-stock="' + escapeHtml(sym) + '" aria-pressed="' + String(on) + '">' +
         mTag +
         '<span class="num-plain">' + escapeHtml(sym) + "</span>" +
-        (showCn ? '<span>' + escapeHtml(p.name_cn) + "</span>" : "") +
+        (showCn ? "<span>" + escapeHtml(p.name_cn) + "</span>" : "") +
         (Number.isFinite(chg) ? '<span class="num-plain ' + toneClass(chg) + '">' + escapeHtml(formatSignedPct(chg)) + "</span>" : "") +
-        "</button>";
+        "</button>" +
+        '<button type="button" class="stock-chip-x" data-remove-stock="' + escapeHtml(sym) + '" title="移出投研列表" aria-label="移出 ' + escapeHtml(sym) + '">×</button>' +
+        "</div>";
     }).join("");
   }
 
   function renderStockBanner(p) {
     if (!dom.stockBanner) return;
     if (!p) {
-      dom.stockBanner.innerHTML = '<div class="empty-hint">暂无投研数据，请在上方搜索框输入代码或名称检索</div>';
+      dom.stockBanner.innerHTML = '<div class="empty-hint">暂无投研数据，请在上方搜索框输入代码或名称添加标的</div>';
       return;
     }
     const chg = toNum(p.change_pct);
-    const curSym = assetCurrencySym(p);
+    const pxShown = formatConvertedAssetPrice(p.price, p) || "—";
     const mktLbl = RESEARCH_MARKET_LABELS[assetMarket(p)] || "美股";
+    const pinned = isStockPinned(p.symbol);
     dom.stockBanner.innerHTML =
       '<div class="sb-left">' +
       '<div class="sb-mark">' + escapeHtml(p.symbol) + "</div>" +
       '<div class="min-w-0">' +
       '<div class="sb-title-row">' +
       '<h2 class="sb-title">' + escapeHtml(assetMarket(p) === "us" ? (p.name_en || p.name_cn || p.symbol) : (p.name_cn || p.name_en || p.symbol)) + "</h2>" +
-      '<span class="sb-price num-plain">' + escapeHtml(formatAssetPrice(p.price, curSym)) + "</span>" +
+      '<span class="sb-price num-plain">' + escapeHtml(pxShown) + "</span>" +
       '<span class="sb-chg num-plain ' + toneClass(chg) + '">' + escapeHtml(formatSignedPct(chg)) + "</span>" +
       "</div>" +
       '<div class="sb-meta">' +
@@ -2941,6 +3118,7 @@
       (!isBlank(p.as_of) ? '<span class="num-plain">· ' + escapeHtml(p.as_of) + "</span>" : "") +
       "</div></div></div>" +
       '<div class="sb-actions">' +
+      '<button type="button" class="btn btn-sm" data-toggle-pin-stock="' + escapeHtml(p.symbol) + '">' + (pinned ? "移出列表" : "加入列表") + "</button>" +
       '<button type="button" class="btn btn-sm" data-jump="today">返回今日</button>' +
       (!appState.offline ? '<button type="button" class="btn btn-sm btn-accent" id="stockReviewBtn">记入操作复盘</button>' : "") +
       "</div>";
@@ -2969,7 +3147,9 @@
   function renderStockChart(p) {
     if (!dom.stockChartWrap) return;
     setActive(dom.stockRangeSeg, "data-srange", appState.stockRange);
-    const curSym = assetCurrencySym(p);
+    const conv = convertAssetValue(1, p);
+    const scale = conv.available && Number.isFinite(conv.mult) ? conv.mult : 1;
+    const curSym = conv.available ? conv.symbol : assetCurrencySym(p);
     activeChartCurSym = curSym;
     const series = sliceStockChart(p);
     if (dom.stockChartRet) {
@@ -2980,7 +3160,7 @@
         dom.stockChartRet.textContent = "";
       }
     }
-    const closes = series.closes;
+    const closes = series.closes.map((v) => v * scale);
     const dates = series.dates;
     if (closes.length < 2) {
       activeChartPts = [];
@@ -3076,7 +3256,7 @@
 
     const headlineHtml = isCrypto
       ? '<div><div class="val-kicker">盘面量能 · 趋势评分</div>' +
-        '<div class="val-big"><span><span class="val-pe-num">' + escapeHtml(cm.turnover_24h_fmt || ov.turnover_fmt || "—") + '</span> <span class="val-sub">24h成交额</span></span>' +
+        '<div class="val-big"><span><span class="val-pe-num">' + escapeHtml(convertCompactMoneyText(cm.turnover_24h_fmt || ov.turnover_fmt, p)) + '</span> <span class="val-sub">24h成交额</span></span>' +
         '<span class="val-sub num-plain">30日年化波动 ' + escapeHtml(cm.vol_30d_ann_pct != null ? cm.vol_30d_ann_pct + "%" : "—") + "</span>" +
         '<span class="val-sub num-plain">90日回撤 ' + escapeHtml(cm.max_drawdown_90d_pct != null ? cm.max_drawdown_90d_pct + "%" : "—") + "</span></div></div>"
       : '<div><div class="val-kicker">估值定位 · 健康评分</div>' +
@@ -3089,11 +3269,11 @@
         '<div class="mini-kv"><span>MA20 乖离</span><b class="' + toneClass(p.bias20_pct) + '">' + escapeHtml(Number.isFinite(toNum(p.bias20_pct)) ? formatSignedPct(p.bias20_pct) : "—") + "</b></div>" +
         '<div class="mini-kv"><span>MA50 乖离</span><b class="' + toneClass(p.bias50_pct) + '">' + escapeHtml(Number.isFinite(toNum(p.bias50_pct)) ? formatSignedPct(p.bias50_pct) : "—") + "</b></div>" +
         '<div class="mini-kv"><span>30日放量比</span><b>' + escapeHtml(cm.vol_ratio_30d != null ? cm.vol_ratio_30d + "x" : "—") + "</b></div>" +
-        '<div class="mini-kv"><span>MA200 均线</span><b>' + escapeHtml(cm.ma200 != null ? formatAssetPrice(cm.ma200, curSym) : "—") + "</b></div></div>"
+        '<div class="mini-kv"><span>MA200 均线</span><b>' + escapeHtml(cm.ma200 != null ? (formatConvertedAssetPrice(cm.ma200, p) || "—") : "—") + "</b></div></div>"
       : '<div class="mini-kv-grid">' +
         '<div class="mini-kv"><span>营收同比</span><b class="' + toneClass(parseFloat(fin.rev_growth_yoy)) + '">' + escapeHtml(fin.rev_growth_yoy || "—") + "</b></div>" +
         '<div class="mini-kv"><span>净利同比</span><b class="' + toneClass(parseFloat(fin.earnings_growth_yoy)) + '">' + escapeHtml(fin.earnings_growth_yoy || "—") + "</b></div>" +
-        '<div class="mini-kv"><span>总市值</span><b>' + escapeHtml(ov.market_cap_fmt || "—") + "</b></div>" +
+        '<div class="mini-kv"><span>总市值</span><b>' + escapeHtml(convertCompactMoneyText(ov.market_cap_fmt, p)) + "</b></div>" +
         '<div class="mini-kv"><span>股息率</span><b>' + escapeHtml(ov.dividend_yield_fmt || "—") + "</b></div></div>";
 
     dom.stockSummaryPanel.innerHTML =
@@ -3104,7 +3284,7 @@
       '</svg><span class="health-score">' + score + '</span></div><div class="health-checks">' + checksHtml + "</div></div>" +
       '<div class="range-52w"><div class="val-kicker">' + (isCrypto ? "365日价格区间" : "52 周价格区间") + "</div>" +
       '<div class="range-bar"><span class="range-fill" style="width:' + pos52.toFixed(1) + '%"></span><span class="range-thumb" style="left:' + pos52.toFixed(1) + '%"></span></div>' +
-      '<div class="range-labels num-plain"><span>' + escapeHtml(formatAssetPrice(lo52, curSym)) + " (低)</span><span>现价 " + escapeHtml(formatAssetPrice(px, curSym)) + "</span><span>" + escapeHtml(formatAssetPrice(hi52, curSym)) + " (高)</span></div></div>" +
+      '<div class="range-labels num-plain"><span>' + escapeHtml(formatConvertedAssetPrice(lo52, p) || "—") + " (低)</span><span>现价 " + escapeHtml(formatConvertedAssetPrice(px, p) || "—") + "</span><span>" + escapeHtml(formatConvertedAssetPrice(hi52, p) || "—") + " (高)</span></div></div>" +
       kvHtml;
   }
 
@@ -3285,9 +3465,10 @@
     dom.stockSuggest.innerHTML = items.map((it) => {
       const m = it.market || "us";
       const lbl = RESEARCH_MARKET_LABELS[m] || m;
+      const pinned = isStockPinned(it.symbol);
       return '<button type="button" class="stock-suggest-item" role="option" data-pick-stock="' + escapeHtml(it.symbol) + '">' +
         '<span class="ss-left"><span class="ss-sym">' + escapeHtml(it.symbol) + '</span><span class="ss-name">' + escapeHtml(it.name || it.symbol) + "</span></span>" +
-        '<span class="badge">' + escapeHtml(lbl) + "</span></button>";
+        '<span class="badge' + (pinned ? " badge-accent" : "") + '">' + escapeHtml(pinned ? lbl + " · 已加入" : lbl + " · +加入") + "</span></button>";
     }).join("");
     dom.stockSuggest.hidden = false;
   }
@@ -3347,7 +3528,7 @@
           '<div class="mini-kv-grid" style="margin-top:12px;border-top:0;padding-top:0">' +
           '<div class="mini-kv"><span>综合评级</span><b>' + escapeHtml(ov.analyst_rating || "—") + "</b></div>" +
           '<div class="mini-kv"><span>覆盖机构</span><b>' + escapeHtml(ov.analyst_count != null ? String(ov.analyst_count) + " 家" : "—") + "</b></div>" +
-          '<div class="mini-kv"><span>目标均价</span><b>' + escapeHtml(Number.isFinite(tgt) ? formatAssetPrice(tgt, curSym) : "—") + "</b></div>" +
+          '<div class="mini-kv"><span>目标均价</span><b>' + escapeHtml(Number.isFinite(tgt) ? (formatConvertedAssetPrice(tgt, p) || "—") : "—") + "</b></div>" +
           '<div class="mini-kv"><span>隐含空间</span><b class="' + toneClass(upside) + '">' + escapeHtml(Number.isFinite(upside) ? formatSignedPct(upside) : "—") + "</b></div>" +
           "</div></section>"
         : "";
@@ -3397,25 +3578,25 @@
               const prCm = pr.crypto_metrics || {};
               const cChg = toNum(pr.change_pct);
               return '<tr class="' + (pr.symbol === p.symbol ? "is-current" : "") + '" data-open-stock="' + escapeHtml(pr.symbol) + '">' +
-                "<td>" + escapeHtml(pr.symbol) + "</td><td>" + escapeHtml(pr.name_cn) + "</td><td>" + escapeHtml(formatAssetPrice(pr.price, assetCurrencySym(pr))) + '</td><td class="' + toneClass(cChg) + '">' + escapeHtml(Number.isFinite(cChg) ? formatSignedPct(cChg) : "—") + "</td><td>" + escapeHtml(prCm.vol_30d_ann_pct != null ? prCm.vol_30d_ann_pct + "%" : "—") + "</td><td>" + escapeHtml(prCm.max_drawdown_90d_pct != null ? prCm.max_drawdown_90d_pct + "%" : "—") + "</td><td>" + escapeHtml(prCm.turnover_24h_fmt || "—") + "</td></tr>";
+                "<td>" + escapeHtml(pr.symbol) + "</td><td>" + escapeHtml(pr.name_cn) + "</td><td>" + escapeHtml(formatConvertedAssetPrice(pr.price, pr) || "—") + '</td><td class="' + toneClass(cChg) + '">' + escapeHtml(Number.isFinite(cChg) ? formatSignedPct(cChg) : "—") + "</td><td>" + escapeHtml(prCm.vol_30d_ann_pct != null ? prCm.vol_30d_ann_pct + "%" : "—") + "</td><td>" + escapeHtml(prCm.max_drawdown_90d_pct != null ? prCm.max_drawdown_90d_pct + "%" : "—") + "</td><td>" + escapeHtml(convertCompactMoneyText(prCm.turnover_24h_fmt, pr)) + "</td></tr>";
             }).join("") +
             "</tbody></table></div>"
           : "";
         dom.stockSectionsCol.innerHTML =
           '<section class="panel"><h3 class="sec-title">盘面与流动性概览</h3>' +
           '<div class="metric-grid-3" style="margin-top:14px">' +
-          mCard("24h 成交额", cm.turnover_24h_fmt || ov.turnover_fmt) +
+          mCard("24h 成交额", convertCompactMoneyText(cm.turnover_24h_fmt || ov.turnover_fmt, p)) +
           mCard("24h 成交量", cm.base_vol_24h_fmt || ov.volume_fmt) +
           mCard("30日量比", cm.vol_ratio_30d != null ? cm.vol_ratio_30d + "x" : "—") +
-          mCard("24h 最高", cm.high_24h != null ? formatAssetPrice(cm.high_24h, curSym) : "—") +
-          mCard("24h 最低", cm.low_24h != null ? formatAssetPrice(cm.low_24h, curSym) : "—") +
-          mCard("365日高点", ov.high_52w != null ? formatAssetPrice(ov.high_52w, curSym) : "—") +
+          mCard("24h 最高", cm.high_24h != null ? (formatConvertedAssetPrice(cm.high_24h, p) || "—") : "—") +
+          mCard("24h 最低", cm.low_24h != null ? (formatConvertedAssetPrice(cm.low_24h, p) || "—") : "—") +
+          mCard("365日高点", ov.high_52w != null ? (formatConvertedAssetPrice(ov.high_52w, p) || "—") : "—") +
           "</div></section>" +
           '<section class="panel"><h3 class="sec-title">波动率与周期表现</h3>' +
           '<div class="metric-grid-3" style="margin-top:14px">' +
           mCard("30日年化波动", cm.vol_30d_ann_pct != null ? cm.vol_30d_ann_pct + "%" : "—") +
           mCard("90日最大回撤", cm.max_drawdown_90d_pct != null ? cm.max_drawdown_90d_pct + "%" : "—", toneClass(cm.max_drawdown_90d_pct)) +
-          mCard("MA200 均线", cm.ma200 != null ? formatAssetPrice(cm.ma200, curSym) : "—") +
+          mCard("MA200 均线", cm.ma200 != null ? (formatConvertedAssetPrice(cm.ma200, p) || "—") : "—") +
           mCard("近7日收益", ch.return_1w != null ? formatSignedPct(ch.return_1w) : "—", toneClass(ch.return_1w)) +
           mCard("近30日收益", ch.return_1m != null ? formatSignedPct(ch.return_1m) : "—", toneClass(ch.return_1m)) +
           mCard("近1年收益", ch.return_1y != null ? formatSignedPct(ch.return_1y) : "—", toneClass(ch.return_1y)) +
@@ -3441,7 +3622,7 @@
         ? '<h4 class="subsec-title">近期财报简表</h4><div class="table-scroll"><table class="fin-table sticky-table"><thead><tr><th>报告期</th>' +
           qCols.map((col) => "<th>" + escapeHtml(col.label) + "</th>").join("") +
           "</tr></thead><tbody>" +
-          quarters.map((q) => "<tr><td>" + escapeHtml(q.period) + "</td>" + qCols.map((col) => "<td>" + escapeHtml(q[col.key] || "—") + "</td>").join("") + "</tr>").join("") +
+          quarters.map((q) => "<tr><td>" + escapeHtml(q.period) + "</td>" + qCols.map((col) => "<td>" + escapeHtml(convertCompactMoneyText(q[col.key], p)) + "</td>").join("") + "</tr>").join("") +
           "</tbody></table></div>"
         : "";
 
@@ -3453,24 +3634,28 @@
         ? '<h4 class="subsec-title">同市场对比（点击切换标的）</h4><div class="table-scroll"><table class="fin-table sticky-table"><thead><tr><th>标的</th><th>名称</th><th>最新价</th><th>P/E</th><th>P/B</th><th>ROE</th><th>毛利率</th></tr></thead><tbody>' +
           peers.map((pr) =>
             '<tr class="' + (pr.symbol === p.symbol ? "is-current" : "") + '" data-open-stock="' + escapeHtml(pr.symbol) + '">' +
-            "<td>" + escapeHtml(pr.symbol) + "</td><td>" + escapeHtml(pr.name_cn) + "</td><td>" + escapeHtml(formatAssetPrice(pr.price, assetCurrencySym(pr))) + "</td><td>" + escapeHtml(fmtMetricVal((pr.valuation || {}).pe_ttm, 1)) + "</td><td>" + escapeHtml(fmtMetricVal((pr.valuation || {}).pb, 1)) + "</td><td>" + escapeHtml((pr.financials || {}).roe || "—") + "</td><td>" + escapeHtml((pr.financials || {}).gross_margin || "—") + "</td></tr>"
+            "<td>" + escapeHtml(pr.symbol) + "</td><td>" + escapeHtml(pr.name_cn) + "</td><td>" + escapeHtml(formatConvertedAssetPrice(pr.price, pr) || "—") + "</td><td>" + escapeHtml(fmtMetricVal((pr.valuation || {}).pe_ttm, 1)) + "</td><td>" + escapeHtml(fmtMetricVal((pr.valuation || {}).pb, 1)) + "</td><td>" + escapeHtml((pr.financials || {}).roe || "—") + "</td><td>" + escapeHtml((pr.financials || {}).gross_margin || "—") + "</td></tr>"
           ).join("") +
           "</tbody></table></div>"
         : "";
 
+      const epsConv = ov.eps_ttm != null ? convertAssetValue(ov.eps_ttm, p) : null;
+      const epsDisplay = (epsConv && epsConv.available && Number.isFinite(epsConv.value)) ? epsConv.symbol + fmtMetricVal(epsConv.value, 2) : "—";
+      const ttmCfRaw = fin.ttm_fcf_fmt !== "—" ? fin.ttm_fcf_fmt : fin.ttm_ocf_fmt;
+
       dom.stockSectionsCol.innerHTML =
         '<section class="panel"><h3 class="sec-title">公司概览</h3>' +
         '<div class="metric-grid-3" style="margin-top:14px">' +
-        mCard("总市值", ov.market_cap_fmt) + mCard("市盈率 P/E", fmtMetricVal(ov.pe_ttm, 2)) + mCard("远期 P/E", fmtMetricVal(ov.pe_forward, 2)) +
-        mCard("每股收益 EPS", ov.eps_ttm != null ? curSym + fmtMetricVal(ov.eps_ttm, 2) : "—") + mCard("股息率", ov.dividend_yield_fmt) + mCard("成交量", ov.volume_fmt) +
-        mCard("成交额", ov.turnover_fmt) + mCard("Beta 系数", fmtMetricVal(ov.beta, 2)) + mCard("机构持股占比", ov.institution_pct) +
+        mCard("总市值", convertCompactMoneyText(ov.market_cap_fmt, p)) + mCard("市盈率 P/E", fmtMetricVal(ov.pe_ttm, 2)) + mCard("远期 P/E", fmtMetricVal(ov.pe_forward, 2)) +
+        mCard("每股收益 EPS", epsDisplay) + mCard("股息率", ov.dividend_yield_fmt) + mCard("成交量", ov.volume_fmt) +
+        mCard("成交额", convertCompactMoneyText(ov.turnover_fmt, p)) + mCard("Beta 系数", fmtMetricVal(ov.beta, 2)) + mCard("机构持股占比", ov.institution_pct) +
         "</div></section>" +
         '<section class="panel"><h3 class="sec-title">财务体检</h3>' +
         '<div class="metric-grid-3" style="margin-top:14px">' +
-        mCard("营收规模", fin.ttm_revenue_fmt) + mCard("EBITDA TTM", fin.ttm_ebitda_fmt) + mCard("经营/自由现金流", fin.ttm_fcf_fmt !== "—" ? fin.ttm_fcf_fmt : fin.ttm_ocf_fmt) +
+        mCard("营收规模", convertCompactMoneyText(fin.ttm_revenue_fmt, p)) + mCard("EBITDA TTM", convertCompactMoneyText(fin.ttm_ebitda_fmt, p)) + mCard("经营/自由现金流", convertCompactMoneyText(ttmCfRaw, p)) +
         mCard("毛利率", fin.gross_margin) + mCard("营业利润率", fin.operating_margin) + mCard("净利率", fin.net_margin) +
         mCard("净资产收益率 ROE", fin.roe) + mCard("总资产收益率 ROA", fin.roa) + mCard("流动比率", fin.current_ratio) +
-        mCard("现金储备", fin.total_cash_fmt) + mCard("总负债", fin.total_debt_fmt) + mCard("负债/权益", fin.debt_to_equity && fin.debt_to_equity !== "—" ? fin.debt_to_equity + "%" : "—") +
+        mCard("现金储备", convertCompactMoneyText(fin.total_cash_fmt, p)) + mCard("总负债", convertCompactMoneyText(fin.total_debt_fmt, p)) + mCard("负债/权益", fin.debt_to_equity && fin.debt_to_equity !== "—" ? fin.debt_to_equity + "%" : "—") +
         "</div>" + qTable + "</section>" +
         '<section class="panel"><h3 class="sec-title">估值判断与同行对比</h3>' +
         '<div class="metric-grid-3" style="margin-top:14px">' +
@@ -3490,7 +3675,8 @@
     renderStockLower(p);
   }
 
-  async function openStockResearch(sym, switchToView) {
+  async function openStockResearch(sym, switchToView, opts) {
+    const o = opts || {};
     let raw = String(sym || "").trim().replace(/^([A-Za-z0-9]+)\/([A-Za-z0-9]+)$/, "$1-$2");
     if (!raw) return;
     hideStockSuggest();
@@ -3499,6 +3685,10 @@
     const existing = allStockProfiles()[up];
     if (existing) {
       appState.stockSymbol = up;
+      appState.adHocStock = up;
+      if (o.pin && pinStock(up)) {
+        showToast("已将 " + up + " 加入投研列表", "ok");
+      }
       const m = assetMarket(existing);
       if (appState.stockMarket !== "all" && appState.stockMarket !== m) {
         appState.stockMarket = m;
@@ -3514,6 +3704,8 @@
         if (prof && prof.symbol) {
           appState.customStocks[prof.symbol] = prof;
           appState.stockSymbol = prof.symbol;
+          appState.adHocStock = prof.symbol;
+          if (o.pin) pinStock(prof.symbol);
           const m = assetMarket(prof);
           if (appState.stockMarket !== "all" && appState.stockMarket !== m) {
             appState.stockMarket = m;
@@ -3533,7 +3725,7 @@
   function commitStockSearch() {
     const raw = (dom.stockSearchInput ? dom.stockSearchInput.value : "").trim();
     if (!raw) return;
-    openStockResearch(raw, false);
+    openStockResearch(raw, false, { pin: true });
   }
 
   /* ---------- 宏观与关联 ---------- */
@@ -5061,7 +5253,7 @@
       '<span class="review-date num-plain">' + escapeHtml(r.trade_date) + "</span>" +
       (!appState.offline ? '<div class="review-actions"><button type="button" class="btn btn-sm" data-edit-review="' + id + '">编辑</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-del-review="' + id + '">删除</button></div>' : "") +
       '</div><div class="review-figs"><span>仓位<b>' + escapeHtml(formatWeight(r.size_pct)) + "</b></span>" +
-      (price > 0 ? "<span>参考均价<b>" + escapeHtml(formatPrice(price)) + "</b></span>" : "") +
+      (price > 0 ? "<span>参考均价<b>" + escapeHtml(formatConvertedAssetPrice(price, "USD")) + "</b></span>" : "") +
       (showPnl ? "<span>盈亏<b>" + amtHtml(pnl, { signed: true, cls: toneClass(pnl) }) + "</b></span>" : "") +
       "</div>" + (notes ? '<dl class="review-notes">' + notes + "</dl>" : "") +
       (tags ? '<div class="essay-tags">' + tags + "</div>" : "") + "</article>";
@@ -5109,10 +5301,10 @@
         : "") +
       "</div>" +
       '<div class="review-figs">' +
-      '<span>信号价<b>' + escapeHtml(formatPrice(p.entry_price)) + "</b></span>" +
-      '<span>现价<b class="num-plain ' + retCls + '">' + escapeHtml(formatPrice(p.current_price)) + escapeHtml(retStr) + "</b></span>" +
-      '<span>目标参考<b>' + escapeHtml(formatPrice(p.target_price)) + "</b></span>" +
-      '<span>失效保护<b>' + escapeHtml(formatPrice(p.stop_price)) + "</b></span>" +
+      '<span>信号价<b>' + escapeHtml(formatConvertedAssetPrice(p.entry_price, "USD")) + "</b></span>" +
+      '<span>现价<b class="num-plain ' + retCls + '">' + escapeHtml(formatConvertedAssetPrice(p.current_price, "USD")) + escapeHtml(retStr) + "</b></span>" +
+      '<span>目标参考<b>' + escapeHtml(formatConvertedAssetPrice(p.target_price, "USD")) + "</b></span>" +
+      '<span>失效保护<b>' + escapeHtml(formatConvertedAssetPrice(p.stop_price, "USD")) + "</b></span>" +
       "</div>" +
       (!isBlank(p.signal_reason) ? '<p class="sigplan-plan-text"><b>触发依据</b>' + escapeHtml(p.signal_reason) + "</p>" : "") +
       (!isBlank(p.action_plan) ? '<p class="sigplan-plan-text"><b>布局建议</b>' + escapeHtml(p.action_plan) + "</p>" : "") +
@@ -5868,7 +6060,35 @@
       try { window.history.replaceState(null, "", currentHash()); } catch (_) { /* ignore */ }
       return undefined;
     }
-    if ((el = hit("[data-pick-stock]"))) return openStockResearch(el.getAttribute("data-pick-stock"), false);
+    if ((el = hit("[data-pick-stock]"))) return openStockResearch(el.getAttribute("data-pick-stock"), false, { pin: true });
+    if ((el = hit("[data-remove-stock]"))) {
+      const sym = el.getAttribute("data-remove-stock") || "";
+      if (unpinStock(sym)) {
+        renderResearch();
+        syncUrlHash();
+        showToast("已将 " + sym + " 移出列表");
+      }
+      return;
+    }
+    if ((el = hit("[data-toggle-pin-stock]"))) {
+      const sym = (el.getAttribute("data-toggle-pin-stock") || "").toUpperCase();
+      if (sym) {
+        if (isStockPinned(sym)) {
+          unpinStock(sym);
+          showToast("已将 " + sym + " 移出列表");
+        } else {
+          pinStock(sym);
+          showToast("已将 " + sym + " 加入列表", "ok");
+        }
+        renderResearch();
+        syncUrlHash();
+      }
+      return;
+    }
+    if (hit("[data-reset-stocks]")) {
+      resetPinnedStocks();
+      return;
+    }
     if ((el = hit("#stockMarketTabs [data-smarket]"))) {
       appState.stockMarket = el.getAttribute("data-smarket") || "all";
       renderResearch();

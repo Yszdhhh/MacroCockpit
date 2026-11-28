@@ -1039,6 +1039,22 @@ def test_six_module_web_ui_and_offline_bundle_invariants() -> None:
     assert 'data-sector="ashare"' in html_src
     assert ">推送<" in html_src
 
+    # Nav order: 投研 before 持仓 on both desktop #viewNav and mobile #mobileTabbar
+    assert html_src.index('data-view="research"') < html_src.index('data-view="portfolio"')
+    assert html_src.index('data-mtab="research"') < html_src.index('data-mtab="portfolio"')
+    assert ">投研<" in html_src and ">持仓<" in html_src
+    assert 'data-currency="DEFAULT"' in html_src and ">Default<" in html_src
+    assert 'data-currency="USD"' in html_src and ">USD<" in html_src
+    assert 'data-currency="CNY"' in html_src and ">RMB<" in html_src
+
+    from backend import stock_research
+
+    assert stock_research.resolve_research_symbol("QQQ", timeout=1) == ("QQQ", "us")
+    assert stock_research.resolve_research_symbol("GLM", timeout=1) == ("02513.HK", "hk")
+    assert stock_research.resolve_research_symbol("小米", timeout=1) == ("01810.HK", "hk")
+    assert stock_research.resolve_research_symbol("长鑫", timeout=1) == ("688825.SH", "cn")
+    assert stock_research.resolve_research_symbol("茅台", timeout=1) == ("600519.SH", "cn")
+
     combined = "\n".join((html_src, tokens_src, css_src, js_src))
     for pat in FORBIDDEN_JARGON:
         assert not re.search(pat, combined)
