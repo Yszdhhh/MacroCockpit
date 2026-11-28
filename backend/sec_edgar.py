@@ -6,7 +6,7 @@ import json
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +19,8 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import DATA_DIR, atomic_write_json
+from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json
 
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
 
 SEC_CACHE_PATH = DATA_DIR / "sec_filings_cache.json"
 SEC_CACHE_TTL = 6 * 3600

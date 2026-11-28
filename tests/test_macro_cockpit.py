@@ -932,6 +932,18 @@ def test_server_auth_gate_muse_digest_rss_and_sync_isolation(tmp_path: Path) -> 
             assert st["generated_at_bjt"] == "2026-11-22 14:25:00+08:00"
             assert any(r["symbol"] == "ETH" for r in st["journal"]["trade_reviews"])
 
+        # PORTFOLIO_RW Bearer token aligns with cookie role on GET /api/state (includes journal)
+        rw_state_req = urllib.request.Request(f"{base}/api/state", headers={"Authorization": "Bearer tok-rw-789"})
+        with urllib.request.urlopen(rw_state_req, timeout=5) as resp:
+            st_rw = json.loads(resp.read().decode("utf-8"))
+            assert any(r["symbol"] == "ETH" for r in st_rw["journal"]["trade_reviews"])
+
+        # READ_ONLY Bearer token must still have journal stripped on GET /api/state
+        ro_state_after_req = urllib.request.Request(f"{base}/api/state", headers={"Authorization": "Bearer tok-test-456"})
+        with urllib.request.urlopen(ro_state_after_req, timeout=5) as resp:
+            st_ro = json.loads(resp.read().decode("utf-8"))
+            assert "journal" not in st_ro
+
         with authed.open(f"{base}/api/article?file=sync_doc.md", timeout=5) as resp:
             art = json.loads(resp.read().decode("utf-8"))
             assert "同步长文标题" in art["body_md"]
@@ -992,10 +1004,12 @@ def test_vps_sync_dry_run_and_safe_article_filter() -> None:
 
 def test_six_module_web_ui_and_offline_bundle_invariants() -> None:
     html_src = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    tokens_src = (WEB_DIR / "tokens.css").read_text(encoding="utf-8")
     css_src = (WEB_DIR / "styles.css").read_text(encoding="utf-8")
     js_src = (WEB_DIR / "app.js").read_text(encoding="utf-8")
 
     assert "<title>宏观金融决策驾驶舱</title>" in html_src
+    assert 'value="100000"' not in html_src
     for required_id in (
         "view-today", "view-portfolio", "view-research-hub", "view-research", "view-records",
         "newsModeSwitch", "sectorRibbon", "subtopicChips", "stockMarketTabs", "stockSuggest",
@@ -1006,7 +1020,7 @@ def test_six_module_web_ui_and_offline_bundle_invariants() -> None:
     assert 'data-sector="ashare"' in html_src
     assert ">推送<" in html_src
 
-    combined = "\n".join((html_src, css_src, js_src))
+    combined = "\n".join((html_src, tokens_src, css_src, js_src))
     for pat in FORBIDDEN_JARGON:
         assert not re.search(pat, combined)
     for term in FORBIDDEN_PLACEHOLDERS_AND_BANNERS:
@@ -1037,7 +1051,8 @@ def test_offline_bundle_strips_private_journal_and_candidates(tmp_path: Path) ->
     bundle_txt = out_html.read_text(encoding="utf-8")
 
     assert secret_marker not in bundle_txt
-    assert "styles.css?" not in bundle_txt and "app.js?" not in bundle_txt
+    assert "tokens.css?" not in bundle_txt and 'href="tokens.css' not in bundle_txt and "styles.css?" not in bundle_txt and "app.js?" not in bundle_txt
+    assert "--paper-read:" in bundle_txt
     m = re.search(r"window\.__INITIAL_COCKPIT_STATE__\s*=\s*(\{.*?\});\s*</script>", bundle_txt, re.DOTALL)
     assert m is not None
     embedded = json.loads(m.group(1).replace("<\\/", "</"))

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -11,28 +11,18 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import DATA_DIR
+from backend.guardrails import scrub_forbidden
+from backend.runtime import BJT, DATA_DIR, read_json_safe as _read_json_safe
 from backend.kol_intel_engine import (
     MEDIA_WIRE_HANDLES,
     MIN_VERIFIED_SAMPLE,
     sanitize_output,
-    scrub_forbidden,
 )
 
-BJT = timezone(timedelta(hours=8))
 DEFAULT_CHAIN_MAP_PATH = DATA_DIR / "industry_chain_map.json"
 DEFAULT_SCORECARD_CACHE_PATH = DATA_DIR / "kol_scorecard_cache.json"
 
 _VALID_BADGES_VERIFIED = frozenset({"高胜率", "稳健参考", "观点敏锐"})
-
-
-def _read_json_safe(path: Path) -> Any:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
 
 
 def _default_kol_scorecards(cache_path: Path | str | None = None) -> list[dict[str, Any]]:

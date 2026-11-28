@@ -7,17 +7,23 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from backend.curation import _check_safe_regex, rank_curated_events, rank_curated_signals, validate_curation_rule
+from backend.guardrails import (
+    safe_article_filename,
+    FORBIDDEN_AUDIT_KEYS as _FORBIDDEN_AUDIT_KEYS,
+    check_safe_regex as _validate_safe_regex,  # noqa: F401 - compatibility import
+)
+from backend.http_security import VALID_BEARER_ROLES
+from backend.runtime import BJT as _BJT, now_bjt_iso as _now_iso
+from backend.curation import rank_curated_events, rank_curated_signals, validate_curation_rule
 from backend.journal_store import JournalStore, RevisionConflictError
 from backend.market_quotes import KNOWN_SWAP_MULTIPLIERS, fetch_crypto_quotes, fetch_fx_snapshot
 from backend.valuation import (
-    CORE_SLEEVE_IDS,
-    _derivative_quote_currency,
+    derivative_quote_currency,
     decimal_str,
     evaluate_portfolio,
     parse_decimal_str,
@@ -25,46 +31,13 @@ from backend.valuation import (
     to_decimal,
 )
 
-_BJT = timezone(timedelta(hours=8))
-
 DEFAULT_ACCOUNT_ID = "acct_default"
-VALID_ROLES = frozenset({"READ_ONLY", "PORTFOLIO_RW", "SYNC_PUBLISH"})
+VALID_ROLES = VALID_BEARER_ROLES
 VALID_ENTITIES = frozenset(
     {"account", "spot", "derivative", "rule", "setting", "review", "essay", "article_status"}
 )
 VALID_CURATION_KINDS = frozenset({"instrument", "sector", "keyword", "regex", "topic", "source"})
 VALID_CURATION_ACTIONS = frozenset({"watch", "block", "mute", "adjust"})
-_FORBIDDEN_AUDIT_KEYS = frozenset(
-    {
-        "token",
-        "access_token",
-        "read_token",
-        "rw_token",
-        "sync_token",
-        "secret",
-        "password",
-        "authorization",
-        "cookie",
-        "amount",
-        "qty",
-        "price",
-        "entry_price",
-        "mark_price",
-        "margin",
-        "margin_usd",
-        "margin_amount",
-        "upl",
-        "equity",
-        "net_equity",
-        "notional",
-        "debt",
-        "confirmed_debt_usd",
-        "raw_text",
-        "body",
-        "text",
-        "csv",
-    }
-)
 _MAX_RULES = 100
 
 
@@ -78,10 +51,6 @@ class ConstraintViolationError(ValueError):
 
 class PreviewExpiredError(ValueError):
     """An import preview expired before the write transaction could commit it."""
-
-
-def _now_iso() -> str:
-    return datetime.now(_BJT).isoformat(timespec="seconds")
 
 
 def _canonical_json(obj: Any) -> str:
@@ -123,10 +92,6 @@ def _verify_stored_token(token: str, salt: str, stored_hash: str) -> bool:
         hmac.compare_digest(c.encode("ascii"), stored_hash.encode("ascii"))
         for c in (cand1, cand2, cand3)
     )
-
-
-def _validate_safe_regex(pattern: str) -> None:
-    _check_safe_regex(pattern)
 
 
 def _sanitize_audit_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
@@ -811,7 +776,7 @@ class PortfolioStore:
             take_profit = parse_decimal_str(payload["take_profit"]) if payload.get("take_profit") not in (None, "") else None
 
             stored_instrument = db.execute("SELECT quote_currency FROM instrument WHERE id=?", (iid,)).fetchone()
-            default_quote = stored_instrument["quote_currency"] if stored_instrument else _derivative_quote_currency(iid, contract_type)
+            default_quote = stored_instrument["quote_currency"] if stored_instrument else derivative_quote_currency(iid, contract_type)
             quote_ccy = str(payload.get("quote_currency") or default_quote).upper()
             base_asset = str(payload.get("base_asset") or iid.split("-")[0]).upper()
             margin_ccy = str(payload.get("margin_currency") or (base_asset if contract_type == "inverse" else quote_ccy)).upper()
@@ -979,17 +944,7 @@ class PortfolioStore:
 
         # entity == "article_status"
         fname = str(payload.get("filename") or explicit_id or "").strip()
-        if (
-            not fname
-            or len(fname) > 180
-            or "\x00" in fname
-            or "/" in fname
-            or "\\" in fname
-            or ".." in fname
-            or Path(fname).name != fname
-            or not fname.lower().endswith(".md")
-            or "异常告警" in fname
-        ):
+        if safe_article_filename(fname) is None:
             raise ValueError(f"invalid article filename: {fname!r}")
         existing = db.execute("SELECT * FROM article_status WHERE filename=?", (fname,)).fetchone()
         before = dict(existing) if existing else None
@@ -1436,7 +1391,7 @@ class PortfolioStore:
                 {
                     **d,
                     "symbol": inst.get("symbol") or d["instrument_id"],
-                    "quote_currency": inst.get("quote_currency") or _derivative_quote_currency(d["instrument_id"], d["contract_type"]),
+                    "quote_currency": inst.get("quote_currency") or derivative_quote_currency(d["instrument_id"], d["contract_type"]),
                 }
             )
 

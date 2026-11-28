@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import io
 import json
 import os
@@ -12,11 +13,12 @@ from pathlib import Path
 from typing import Any, TextIO
 
 _BACKEND_DIR = Path(__file__).resolve().parent
-_COCKPIT_ROOT = _BACKEND_DIR.parent
-if str(_COCKPIT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_COCKPIT_ROOT))
+_REPO_ROOT = _BACKEND_DIR.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from backend.mcp_server import MCP_PROTOCOL_VERSION, McpDispatcher, _load_rpc_json, _rpc_error
+from backend.runtime import COCKPIT_ROOT, resolve_data_dir
+from backend.mcp_server import MCP_PROTOCOL_VERSION, McpDispatcher, load_rpc_json, rpc_error
 from backend.mobile_push import load_push_env
 
 
@@ -69,7 +71,7 @@ def run_stdio_loop(
     *,
     offline_public: bool = False,
     desktop_pro: bool = False,
-    base_dir: Path | str = _COCKPIT_ROOT,
+    base_dir: Path | str = COCKPIT_ROOT,
     mcp_url: str = "",
     mcp_token: str = "",
     timeout: int = 30,
@@ -89,9 +91,13 @@ def run_stdio_loop(
     elif desktop_pro:
         from backend.portfolio_store import PortfolioStore
 
-        db_path = Path(base_dir) / "data" / "user_journal.db"
+        db_path = resolve_data_dir(Path(base_dir)) / "user_journal.db"
         store = PortfolioStore(db_path)
-        dispatcher = McpDispatcher(store=store, base_dir=Path(base_dir), desktop_pro=True)
+        extensions = importlib.import_module("desktop.mcp_extensions")
+        dispatcher = McpDispatcher(
+            store=store, base_dir=Path(base_dir), desktop_pro=True,
+            desktop_handlers=extensions.build_desktop_mcp_handlers(Path(base_dir)),
+        )
         local_role = "PORTFOLIO_RW"
         local_actor = "stdio:desktop_pro"
         _log(stderr, f"started in --desktop-pro PORTFOLIO_RW mode (12 tools, base_dir={Path(base_dir)})")
@@ -115,14 +121,14 @@ def run_stdio_loop(
             continue
 
         try:
-            payload = _load_rpc_json(line)
+            payload = load_rpc_json(line)
         except ValueError as exc:
             _log(stderr, f"invalid JSON input: {exc}")
-            _write_json_line(stdout, _rpc_error(None, -32700, "Parse error"))
+            _write_json_line(stdout, rpc_error(None, -32700, "Parse error"))
             continue
 
         if not isinstance(payload, dict):
-            _write_json_line(stdout, _rpc_error(None, -32600, "Invalid Request"))
+            _write_json_line(stdout, rpc_error(None, -32600, "Invalid Request"))
             continue
 
         req_id = payload.get("id")
@@ -166,14 +172,14 @@ def run_stdio_loop(
                     pass
                 _write_json_line(
                     stdout,
-                    _rpc_error(req_id, -32000, f"Remote MCP HTTP {exc.code}", {"detail": err_body}),
+                    rpc_error(req_id, -32000, f"Remote MCP HTTP {exc.code}", {"detail": err_body}),
                 )
         except Exception as exc:
             _log(stderr, f"remote transport error: {type(exc).__name__}: {exc}")
             if not is_notification:
                 _write_json_line(
                     stdout,
-                    _rpc_error(req_id, -32000, f"Remote MCP error: {type(exc).__name__}"),
+                    rpc_error(req_id, -32000, f"Remote MCP error: {type(exc).__name__}"),
                 )
     return 0
 
@@ -196,11 +202,11 @@ def main() -> None:
         help="Serve read-only tools directly from local published snapshot without touching or creating any ledger DB",
     )
     ap.add_argument(
-        "--desktop-pro",
+        "--desktop-pro", "--include-desktop-tools",
         action="store_true",
         help="Enable local Desktop Pro PORTFOLIO_RW mode (12 tools including OpenBB, deep research, and cloud sync)",
     )
-    ap.add_argument("--base-dir", type=Path, default=_COCKPIT_ROOT, help="Base directory containing data/")
+    ap.add_argument("--base-dir", type=Path, default=COCKPIT_ROOT, help="Base directory containing data/")
     ap.add_argument("--data-dir", type=Path, help="Optional data directory override")
     ap.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds for remote proxy mode")
     args = ap.parse_args()

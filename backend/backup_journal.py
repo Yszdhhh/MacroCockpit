@@ -9,18 +9,14 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-BJT = timezone(timedelta(hours=8))
+from backend.runtime import now_bjt as _now_bjt, resolve_data_dir
+
 _SAFE_IDENT_RE_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 _JOURNAL_TABLES = {"meta", "trade_reviews", "essays", "article_status"}
 _PORTFOLIO_TABLES = {"account", "instrument", "spot_balance", "derivative_position"}
-
-
-def _now_bjt() -> datetime:
-    return datetime.now(BJT)
 
 
 def _sha256_file(path: Path) -> str:
@@ -234,8 +230,7 @@ def restore_verified_backup(backup_path: Path | str, target_db: Path | str) -> d
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    root = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-    data_dir = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (root / "data"))
+    data_dir = resolve_data_dir()
     parser = argparse.ArgumentParser(description="Create verified WAL backup of MacroCockpit journal SQLite DB")
     parser.add_argument("--db", type=Path, default=data_dir / "user_journal.db", help="Source DB, or target DB with --restore")
     parser.add_argument("--restore", type=Path, metavar="BACKUP", help="Verify and restore a backup into --db")

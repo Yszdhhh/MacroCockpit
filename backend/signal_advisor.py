@@ -8,14 +8,18 @@ import os
 import re
 import uuid
 from bisect import bisect_left
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.fred_and_market import DATA_DIR
-from backend.kol_intel_engine import load_price_series, scrub_forbidden
-
-BJT = timezone(timedelta(hours=8))
+from backend.guardrails import has_private_article_text, scrub_forbidden
+from backend.runtime import (
+    DATA_DIR,
+    file_lock,
+    finite_float as _finite_float,
+    now_bjt_iso,
+    reject_json_constant,
+)
+from backend.kol_intel_engine import load_price_series
 
 ADVISOR_LEDGER_VERSION = 1
 ADVISOR_LEDGER_FILENAME = "signal_advisor_ledger.json"
@@ -111,10 +115,6 @@ TRACK_FOR_SYMBOL: dict[str, str] = {
 }
 
 
-def _now_bjt_iso() -> str:
-    return datetime.now(BJT).strftime("%Y-%m-%d %H:%M+08:00")
-
-
 def _fmt_px(px: float) -> str:
     if px >= 1000:
         return f"{px:,.0f}"
@@ -153,10 +153,6 @@ def _wilder_rsi14(closes: list[float]) -> float:
         return 100.0 if avg_gain > 0 else 50.0
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
-
-
-def _reject_nonfinite_json(_const: str) -> Any:
-    raise ValueError("non-finite JSON")
 
 
 def _is_valid_review_block_schema(block: Any) -> bool:
@@ -217,7 +213,7 @@ def _try_load_advisor_ledger(path: Path) -> tuple[dict[str, Any], str]:
             return {"version": ADVISOR_LEDGER_VERSION, "plans": {}}, "missing"
         if path.stat().st_size > 16 * 1024 * 1024:
             return {"version": ADVISOR_LEDGER_VERSION, "plans": {}}, "error"
-        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_nonfinite_json)
+        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_json_constant)
         if (
             isinstance(raw, dict)
             and type(raw.get("version")) is int
@@ -558,16 +554,6 @@ def _evaluate_plan_reviews(
     return out
 
 
-def _finite_float(val: Any, default: float = 0.0) -> float:
-    if val is None or isinstance(val, bool):
-        return default
-    try:
-        num = float(val)
-        return num if math.isfinite(num) else default
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
 def _project_review_block(block: Any) -> dict[str, Any] | None:
     if not isinstance(block, dict):
         return None
@@ -587,8 +573,6 @@ def _project_review_block(block: Any) -> dict[str, Any] | None:
 
 def project_signal_plan(plan: Any) -> dict[str, Any] | None:
     """Strictly allowlist public-safe fields for one day-level signal plan & auto-review."""
-    from backend.public_snapshot import has_private_article_text
-
     if not _is_valid_plan_schema(plan):
         return None
     pid = str(plan["plan_id"]).strip()
@@ -750,7 +734,7 @@ def _scan_and_update_ledger(
                     **setup,
                     "signal_date": sdate,
                     "context_note": ctx,
-                    "created_at": _now_bjt_iso(),
+                    "created_at": now_bjt_iso(sep=" ", timespec="minutes"),
                 }
                 new_count += 1
             last_bar_by_sign[sign] = idx
@@ -771,7 +755,7 @@ def _scan_and_update_ledger(
 
     out_ledger = {
         "version": ADVISOR_LEDGER_VERSION,
-        "updated_at_bjt": _now_bjt_iso(),
+        "updated_at_bjt": now_bjt_iso(sep=" ", timespec="minutes"),
         "plans": pruned_map,
     }
     ordered_list = [dict(v) for _k, v in ordered_pairs]
@@ -788,8 +772,6 @@ def update_signal_advisor(
     persist: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scan day-level setups, auto-review T+5/T+20 outcomes, persist ledger under lock, and project public plans."""
-    from backend.public_snapshot import file_lock
-
     root_dir = Path(data_dir)
     ledger_path = root_dir / ADVISOR_LEDGER_FILENAME
     raw_series = load_price_series(price_series=price_series)

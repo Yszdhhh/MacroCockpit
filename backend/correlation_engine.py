@@ -1,15 +1,12 @@
 """Cross-asset 30D/90D correlation analyzer & standalone Notion interactive embed HTML builder."""
 from __future__ import annotations
 
-import html
 import json
 import math
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 try:
     import pandas as pd
@@ -20,16 +17,12 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
+from backend.runtime import BJT, DATA_DIR, DIST_DIR, UTC, atomic_write_json
 from backend.fred_and_market import (
-    COCKPIT_ROOT,
-    DATA_DIR,
     FRED_CACHE_PATH,
     PARQUET_MACRO_DIR,
-    _fetch_gold_tail,
-    atomic_write_json,
+    fetch_gold_tail,
 )
-
-BJT = timezone(timedelta(hours=8))
 
 _BTC_ENV = (os.environ.get("MACROCOCKPIT_BTC_KLINES_PARQUET") or "").strip()
 BTC_KLINES_CANDIDATES = (
@@ -37,7 +30,6 @@ BTC_KLINES_CANDIDATES = (
     if _BTC_ENV
     else (DATA_DIR / "parquet_btc" / "BTCUSDT.parquet",)
 )
-DIST_DIR = COCKPIT_ROOT / "dist"
 NOTION_VIZ_HTML_PATH = DIST_DIR / "notion_viz_embed.html"
 
 ASSET_ORDER: list[tuple[str, str, str]] = [
@@ -89,7 +81,7 @@ def _read_fred_cache_bundle(cache_path: Path = FRED_CACHE_PATH) -> dict[str, lis
         return {}
 
 
-def _save_series_to_fred_cache(
+def save_series_to_fred_cache(
     updates: dict[str, list[tuple[str, float]]],
     cache_path: Path = FRED_CACHE_PATH,
 ) -> None:
@@ -148,7 +140,7 @@ def fetch_btc_binance_daily(limit: int = 120, *, timeout: int = 6) -> list[tuple
                 except (TypeError, ValueError):
                     continue
                 if math.isfinite(close_px) and close_px > 0:
-                    day = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+                    day = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).strftime("%Y-%m-%d")
                     by_day[day] = round(close_px, 2)
         return sorted(by_day.items(), key=lambda x: x[0])
     except Exception:
@@ -182,7 +174,7 @@ def _load_btc_daily_series(
         return cached
     fetched = fetch_btc_binance_daily(limit=120)
     if fetched:
-        _save_series_to_fred_cache({"BTC": fetched}, cache_path=cache_path)
+        save_series_to_fred_cache({"BTC": fetched}, cache_path=cache_path)
         return fetched
     return cached
 
@@ -210,12 +202,12 @@ def _load_macro_close_series(
                 pass
     cached = list((cache_bundle or {}).get(key) or [])
     if key == "GOLD" and len(cached) < 35 and allow_remote:
-        gold_tail = _fetch_gold_tail()
+        gold_tail = fetch_gold_tail()
         if gold_tail:
             merged = dict(cached)
             merged.update(gold_tail)
             cached = sorted(merged.items(), key=lambda x: x[0])
-            _save_series_to_fred_cache({"GOLD": cached}, cache_path=cache_path)
+            save_series_to_fred_cache({"GOLD": cached}, cache_path=cache_path)
     return cached
 
 
@@ -257,6 +249,11 @@ def compute_cross_asset_correlations(
     allow_remote: bool = True,
 ) -> dict[str, Any]:
     """Compute real 30D & 90D Pearson correlation matrices using pure NumPy + fred_cache/Parquet."""
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("State refresh requires pandas and numpy") from exc
+
     cache_bundle = _read_fred_cache_bundle(fred_cache_path)
     raw_map: dict[str, list[tuple[str, float]]] = {
         "BTC": _load_btc_daily_series(cache_bundle, cache_path=fred_cache_path, allow_remote=allow_remote),

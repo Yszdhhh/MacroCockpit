@@ -8,15 +8,15 @@ import json
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
+from backend.runtime import now_bjt as _now_dt
 from backend.market_quotes import KNOWN_SWAP_MULTIPLIERS
-from backend.portfolio_store import DEFAULT_ACCOUNT_ID, PortfolioStore, PreviewExpiredError
-from backend.valuation import _derivative_quote_currency, parse_decimal_str
+from backend.portfolio_store import DEFAULT_ACCOUNT_ID, PortfolioStore, PreviewExpiredError as PreviewExpiredError
+from backend.valuation import derivative_quote_currency, parse_decimal_str
 
-_BJT = timezone(timedelta(hours=8))
 DEFAULT_PREVIEW_TTL_SECONDS = 600  # 10 minutes
 
 _CN_TICKER_ALIASES: dict[str, tuple[str, str]] = {
@@ -72,10 +72,6 @@ _SLEEVE_ALIASES: dict[str, str] = {
 
 class PreviewValidationError(ValueError):
     """Raised when attempting to commit an import preview that has blocking validation issues."""
-
-
-def _now_dt() -> datetime:
-    return datetime.now(_BJT)
 
 
 def _canonicalize_body(text: str) -> str:
@@ -351,7 +347,7 @@ def _parse_text_clause(
         if m_mmr:
             mmr_str = _parse_pct_or_dec(m_mmr.group(1))
 
-        quote_ccy = _derivative_quote_currency(iid, contract_type)
+        quote_ccy = derivative_quote_currency(iid, contract_type)
         margin_ccy = base_sym if contract_type == "inverse" else quote_ccy
         op_data: dict[str, Any] = {
             "account_id": account_id,
@@ -660,7 +656,7 @@ def _parse_csv_rows(
             raw_mm = (row.get("margin_mode") or "cross").strip().lower()
             margin_mode = "isolated" if raw_mm in ("isolated", "逐仓") else "cross"
             margin_str = parse_decimal_str(_strip_thousand_commas(row.get("margin") or "0") or "0")
-            quote_ccy = _derivative_quote_currency(iid, contract_type)
+            quote_ccy = derivative_quote_currency(iid, contract_type)
             margin_ccy = base_sym if contract_type == "inverse" else quote_ccy
 
             op_data: dict[str, Any] = {

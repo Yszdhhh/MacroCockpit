@@ -7,27 +7,30 @@ import json
 import math
 import os
 import re
-import urllib.parse
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from backend.fred_and_market import DATA_DIR, atomic_write_json
+from backend.guardrails import has_private_article_text, scrub_forbidden as _scrub_text
+from backend.runtime import (
+    BJT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json,
+    parse_iso_dt as _parse_iso_dt,
+    reject_json_constant,
+)
 from backend.kazike_engine import (
-    BROWSE_FLOOR,
     TIER_LABELS,
     TIER_PRIORITY,
-    _ROUNDUP_RE,
-    _extract_isolation_keys,
-    _extract_numeric_anchors,
-    _isolation_conflict,
+    ROUNDUP_RE,
+    extract_isolation_keys,
+    extract_numeric_anchors,
+    isolation_conflict,
     normalize_url,
-    parse_time_utc,
 )
-from backend.zh_brief import _deterministic_zh_brief, is_primarily_english
+from backend.zh_brief import deterministic_zh_brief, is_primarily_english
 
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
 
 LEDGER_VERSION = 1
 LEDGER_FILENAME = "event_ledger.json"
@@ -182,39 +185,6 @@ _MONTH_MAP = {
     "oct": "10", "october": "10", "nov": "11", "november": "11", "dec": "12", "december": "12",
 }
 
-_FORBIDDEN_WORDS = (
-    "Sleeve", "E21", "E32", "E33", "Tier-1", "Regime", "arbitration",
-    "测算口径", "公式解释", "公式说明", "逻辑解释", "联动说明", "方法论说明", "待补", "待刷新", "N/A",
-)
-
-
-def _scrub_text(text: str) -> str:
-    out = str(text or "")
-    for term in _FORBIDDEN_WORDS:
-        out = re.sub(re.escape(term), "", out, flags=re.IGNORECASE)
-    return re.sub(r"\s{2,}", " ", out).strip()
-
-
-def _parse_iso_dt(raw: Any) -> datetime | None:
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        norm = s[:-1] + "+00:00" if s.endswith("Z") else s
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}", norm):
-            norm = norm.replace(" ", "T") + ":00+08:00"
-        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", norm):
-            norm = norm.replace(" ", "T") + "+08:00"
-        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", norm):
-            norm = norm + "T00:00:00+08:00"
-        dt = datetime.fromisoformat(norm)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=BJT)
-        return dt.astimezone(BJT)
-    except ValueError:
-        return None
-
-
 def _fmt_bjt(dt: datetime | None) -> str:
     if dt is None:
         return ""
@@ -269,7 +239,7 @@ def _classify_event(item: dict[str, Any]) -> dict[str, Any]:
     text = f"{title} {summary}"
     low = text.lower()
 
-    if source == "美股盘面" or _ROUNDUP_RE.search(title) or _OPINION_OR_DIGEST_RE.search(title):
+    if source == "美股盘面" or ROUNDUP_RE.search(title) or _OPINION_OR_DIGEST_RE.search(title):
         return {
             "is_roundup": True,
             "event_type": "roundup",
@@ -309,9 +279,9 @@ def _classify_event(item: dict[str, Any]) -> dict[str, Any]:
                 entities.add(cap.upper())
 
     concepts = {name for name, pat in _CONCEPT_SLOTS if pat.search(text)}
-    iso_keys = _extract_isolation_keys(item)
+    iso_keys = extract_isolation_keys(item)
     macro_periods = _extract_macro_periods(text) if event_type == "macro_release" else set()
-    num_anchors = _extract_numeric_anchors(text)
+    num_anchors = extract_numeric_anchors(text)
 
     return {
         "is_roundup": False,
@@ -504,7 +474,7 @@ def _match_score(ev: dict[str, Any], item: dict[str, Any], meta: dict[str, Any],
         return 0.0, True
 
     ev_iso = {k: set(v) for k, v in (ev.get("iso_keys") or {}).items()}
-    if _isolation_conflict(meta.get("iso_keys") or {}, ev_iso):
+    if isolation_conflict(meta.get("iso_keys") or {}, ev_iso):
         return 0.0, True
 
     # Time separation guard
@@ -825,7 +795,7 @@ def _build_initial_event(item: dict[str, Any], meta: dict[str, Any], ev_record: 
     title_clean = _scrub_text(str(item.get("title") or ""))
     zh_brief = _scrub_text(str(item.get("zh_brief") or ""))
     if not zh_brief and is_primarily_english(title_clean):
-        zh_brief = _scrub_text(_deterministic_zh_brief(title_clean, str(item.get("summary") or "")))
+        zh_brief = _scrub_text(deterministic_zh_brief(title_clean, str(item.get("summary") or "")))
 
     first_summary = _scrub_text(title_clean)
     if facts:
@@ -946,10 +916,6 @@ def _is_valid_ledger_event_schema(ev: Any) -> bool:
     return True
 
 
-def _reject_nonfinite_json(_const: str) -> Any:
-    raise ValueError("non-finite JSON")
-
-
 def _try_load_ledger(path: Path) -> tuple[dict[str, Any], str]:
     """Load ledger and report explicit status: 'ok', 'missing', or 'error'."""
     try:
@@ -957,7 +923,7 @@ def _try_load_ledger(path: Path) -> tuple[dict[str, Any], str]:
             return {"version": LEDGER_VERSION, "events": {}}, "missing"
         if path.stat().st_size > 32 * 1024 * 1024:
             return {"version": LEDGER_VERSION, "events": {}}, "error"
-        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_nonfinite_json)
+        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_json_constant)
         if (
             isinstance(raw, dict)
             and type(raw.get("version")) is int
@@ -969,11 +935,6 @@ def _try_load_ledger(path: Path) -> tuple[dict[str, Any], str]:
         return {"version": LEDGER_VERSION, "events": {}}, "error"
     except (OSError, ValueError, OverflowError):
         return {"version": LEDGER_VERSION, "events": {}}, "error"
-
-
-def _load_ledger(path: Path) -> dict[str, Any]:
-    ledger, _status = _try_load_ledger(path)
-    return ledger
 
 
 def _trim_evidence_items(ev: dict[str, Any], max_items: int = 16) -> None:
@@ -1081,7 +1042,7 @@ def ingest_events_into_ledger(
         facts = _extract_facts(raw, meta)
         zh_brief = _scrub_text(str(raw.get("zh_brief") or ""))
         if not zh_brief and is_primarily_english(title):
-            zh_brief = _scrub_text(_deterministic_zh_brief(title, str(raw.get("summary") or "")))
+            zh_brief = _scrub_text(deterministic_zh_brief(title, str(raw.get("summary") or "")))
 
         summary_clean = _scrub_text(str(raw.get("summary") or ""))[:160]
         eff_val = _extract_effective_at(f"{title} {raw.get('summary') or ''}")
@@ -1362,8 +1323,6 @@ def _safe_int(val: Any, default: int = 0) -> int:
 
 def project_event_card(card: Any) -> dict[str, Any] | None:
     """Strictly allowlist public-safe fields for an event card; drop private data."""
-    from backend.public_snapshot import has_private_article_text
-
     if not isinstance(card, dict):
         return None
     eid = str(card.get("event_id") or card.get("id") or "").strip()
@@ -1571,10 +1530,6 @@ def try_load_public_event_cards_from_ledger(data_dir: Path | str = DATA_DIR) -> 
         return project_event_cards(_rank_ledger_cards(events))
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
-
-
-def load_public_event_cards_from_ledger(data_dir: Path | str = DATA_DIR) -> list[dict[str, Any]]:
-    return try_load_public_event_cards_from_ledger(data_dir) or []
 
 
 def evaluate_event_notifications(

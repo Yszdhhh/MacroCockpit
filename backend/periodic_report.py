@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,69 +16,30 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR
-from backend.kol_intel_engine import (
-    FORBIDDEN_TERMS,
-    MIN_VERIFIED_SAMPLE,
-    extract_tickers,
-    scrub_forbidden,
+from backend.article_store import (
+    DEFAULT_ARTICLES_DIR,
+    STATE_OUTPUT_PATH as DEFAULT_STATE_PATH,
+    build_yaml_frontmatter,
+    ingest_deep_research_markdown,
+    periodic_article_dict,
+    split_frontmatter,
 )
-from backend.public_snapshot import (
-    _atomic_write_text,
+from backend.guardrails import (
     has_private_article_content,
     safe_article_filename,
+    scrub_markdown,
 )
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    DEFAULT_GEMINI_API_EXE,
+    atomic_write_text as _atomic_write_text,
+    resolve_bjt_datetime as _resolve_bjt_datetime,
+)
+from backend.kol_intel_engine import MIN_VERIFIED_SAMPLE
+from backend.signal_text import extract_tickers
 
-BJT = timezone(timedelta(hours=8))
-DEFAULT_ARTICLES_DIR = COCKPIT_ROOT / "articles"
-DEFAULT_STATE_PATH = DATA_DIR / "cockpit_state.json"
-DEFAULT_GEMINI_API_EXE = Path.home() / ".local" / "bin" / "gemini-api.EXE"
-PERIODIC_SOURCE_LABEL = "周月度深研"
 GEMINI_DR_AGENT = "deep-research-preview-04-2026"
-
-_EXTRA_SCRUB_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bTier-?S\b", re.IGNORECASE), "高优"),
-    (re.compile(r"\bTier-?A\b", re.IGNORECASE), "重点"),
-    (re.compile(r"E21|E32|E33", re.IGNORECASE), "波动结构"),
-    (re.compile(r"Tier-?1", re.IGNORECASE), "核心"),
-    (re.compile(r"Sleeves?", re.IGNORECASE), "仓位"),
-    (re.compile(r"Regimes?", re.IGNORECASE), "市场阶段"),
-    (re.compile(r"arbitration", re.IGNORECASE), "风险平衡"),
-    (re.compile(r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明"), "参考摘要"),
-    (re.compile(r"待补充|待补|待刷新"), "—"),
-    (re.compile(r"N/A", re.IGNORECASE), "—"),
-)
-
-_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|$)", re.MULTILINE | re.DOTALL)
-
-
-def _scrub_forbidden(text: Any) -> str:
-    """Scrub all forbidden jargon and placeholders while preserving markdown line breaks."""
-    raw = str(text or "").replace("\r\n", "\n")
-    s = scrub_forbidden(raw)
-    for rx, rep in _EXTRA_SCRUB_PATTERNS:
-        s = rx.sub(rep, s)
-    lines = [re.sub(r"[ \t]{2,}", " ", ln).rstrip() for ln in s.splitlines()]
-    return "\n".join(lines).strip()
-
-
-def _yaml_quote(value: str) -> str:
-    escaped = str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").strip()
-    return f'"{escaped}"'
-
-
-def _resolve_bjt_datetime(as_of: datetime | date | str | None = None) -> datetime:
-    if as_of is None:
-        return datetime.now(BJT)
-    if isinstance(as_of, datetime):
-        return as_of.astimezone(BJT) if as_of.tzinfo is not None else as_of.replace(tzinfo=BJT)
-    if isinstance(as_of, date):
-        return datetime(as_of.year, as_of.month, as_of.day, 9, 0, tzinfo=BJT)
-    raw = str(as_of).strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    parsed = datetime.fromisoformat(raw)
-    return parsed.astimezone(BJT) if parsed.tzinfo is not None else parsed.replace(tzinfo=BJT)
 
 
 def _fred_lookup(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -138,94 +98,9 @@ def _fmt_price(val: Any, prefix: str = "$") -> str:
     return f"{prefix}{num:.4f}"
 
 
-def _build_yaml_frontmatter(
-    *,
-    title: str,
-    summary: str,
-    publisher: str,
-    author_role: str,
-    report_kind: str,
-    score: int,
-    tickers: list[str],
-    url: str = "",
-    related_period: str = "",
-) -> str:
-    lines = [
-        "---",
-        f"title: {_yaml_quote(title)}",
-        f"summary: {_yaml_quote(summary)}",
-        f"publisher: {_yaml_quote(publisher)}",
-        f"author_role: {_yaml_quote(author_role)}",
-        f"report_kind: {_yaml_quote(report_kind)}",
-        f"score: {int(score)}",
-    ]
-    if tickers:
-        tickers_yaml = ", ".join(_yaml_quote(t) for t in tickers[:8])
-        lines.append(f"tickers: [{tickers_yaml}]")
-    else:
-        lines.append("tickers: []")
-    if url and url.startswith(("http://", "https://")):
-        lines.append(f"url: {_yaml_quote(url)}")
-    if related_period:
-        lines.append(f"related_period: {_yaml_quote(related_period)}")
-    lines.append("---")
-    return "\n".join(lines)
-
-
-def _strip_frontmatter(raw_markdown: str) -> tuple[dict[str, Any], str]:
-    text = str(raw_markdown or "").replace("\r\n", "\n").lstrip("\ufeff")
-    match = _FRONTMATTER_RE.match(text)
-    if not match:
-        return {}, text.strip()
-    fm_raw = match.group(1)
-    body = text[match.end() :].strip()
-    meta: dict[str, Any] = {}
-    try:
-        import yaml
-
-        parsed = yaml.safe_load(fm_raw)
-        if isinstance(parsed, dict):
-            meta = parsed
-    except Exception:
-        meta = {}
-    return meta, body
-
-
-def _parse_article_dict(
-    *,
-    filename: str,
-    title: str,
-    summary: str,
-    publisher: str,
-    author_role: str,
-    report_kind: str,
-    score: int,
-    tickers: list[str],
-    body_md: str,
-    mtime_str: str,
-    url: str = "",
-) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "filename": filename,
-        "title": _scrub_forbidden(title),
-        "source": PERIODIC_SOURCE_LABEL,
-        "mtime": mtime_str,
-        "excerpt": _scrub_forbidden(summary or title)[:180],
-        "body_md": _scrub_forbidden(body_md),
-        "publisher": _scrub_forbidden(publisher),
-        "author_role": _scrub_forbidden(author_role),
-        "report_kind": report_kind,
-        "score": int(score),
-        "tickers": list(tickers[:8]),
-    }
-    if url and url.startswith(("http://", "https://")):
-        out["url"] = url
-    return out
-
-
 def _read_existing_periodic_article(path: Path, report_kind: str, default_publisher: str) -> dict[str, Any]:
     raw = path.read_text(encoding="utf-8", errors="replace")
-    meta, body = _strip_frontmatter(raw)
+    meta, body = split_frontmatter(raw)
     title = str(meta.get("title") or "").strip()
     if not title:
         for ln in body.splitlines():
@@ -245,12 +120,12 @@ def _read_existing_periodic_article(path: Path, report_kind: str, default_publis
     tickers = (
         [str(t).strip().upper() for t in raw_tickers if str(t).strip()][:8]
         if isinstance(raw_tickers, list)
-        else extract_tickers(f"{title}\n{body}")
+        else extract_tickers(f"{title}\n{body}", source="kol")
     )
     score_val = meta.get("score")
     score = int(round(float(score_val))) if isinstance(score_val, (int, float)) and not isinstance(score_val, bool) else 92
     mtime_str = datetime.fromtimestamp(path.stat().st_mtime, tz=BJT).strftime("%Y-%m-%d %H:%M")
-    return _parse_article_dict(
+    return periodic_article_dict(
         filename=path.name,
         title=title,
         summary=summary,
@@ -333,7 +208,7 @@ def _summarize_kol_consensus(state: dict[str, Any]) -> tuple[list[dict[str, Any]
 def _format_kol_line(item: dict[str, Any]) -> str:
     handle = str(item.get("handle") or "").strip().lstrip("@")
     group = str(item.get("group") or "市场观点").strip()
-    headline = _scrub_forbidden(item.get("takeaway") or item.get("headline") or "").strip()
+    headline = scrub_markdown(item.get("takeaway") or item.get("headline") or "").strip()
     headline = re.sub(r"^\[[^\]]+\]\s*", "", headline)
     if len(headline) > 110:
         headline = headline[:107].rstrip() + "..."
@@ -558,11 +433,11 @@ def generate_periodic_decision_report(
     corr_pairs = [c for c in ((state.get("correlations") or {}).get("pairs") or []) if isinstance(c, dict)]
 
     top_tickers = _collect_top_tickers(state)
-    risk_label = _scrub_forbidden(risk_gate.get("label") or "稳健观察")
+    risk_label = scrub_markdown(risk_gate.get("label") or "稳健观察")
     long_cap_raw = risk_gate.get("long_risk_cap")
     long_cap_pct = f"{float(long_cap_raw) * 100:.0f}%" if isinstance(long_cap_raw, (int, float)) else "—"
-    exposure_summary = _scrub_forbidden(risk_gate.get("summary_exposure") or "按趋势确认与风控灯号动态调整")
-    headline_verdict = _scrub_forbidden(market_analysis.get("headline_verdict") or "")
+    exposure_summary = scrub_markdown(risk_gate.get("summary_exposure") or "按趋势确认与风控灯号动态调整")
+    headline_verdict = scrub_markdown(market_analysis.get("headline_verdict") or "")
 
     # ── Section 1: 本期定调与仓位风控结论 ──
     sec1: list[str] = [
@@ -596,17 +471,17 @@ def generate_periodic_decision_report(
         ]
     )
     for reason in (risk_gate.get("reasons") or [])[:4]:
-        sec1.append(f"- **风控触发依据**：{_scrub_forbidden(reason)}")
+        sec1.append(f"- **风控触发依据**：{scrub_markdown(reason)}")
     if positions:
         sec1.append("")
         sec1.append("| 策略模块 | 当前状态 | 基准比例 | 建议比例 | 执行纪律摘要 |")
         sec1.append("|---|---|---:|---:|---|")
         for pos in positions:
-            pname = _scrub_forbidden(pos.get("name") or pos.get("id") or "策略模块")
-            pstate = _scrub_forbidden(pos.get("state") or "跟踪")
+            pname = scrub_markdown(pos.get("name") or pos.get("id") or "策略模块")
+            pstate = scrub_markdown(pos.get("state") or "跟踪")
             bpct = f"{float(pos.get('baseline_pct') or 0):.1f}%"
             rpct = f"{float(pos.get('recommended_pct') or 0):.1f}%"
-            pnote = _scrub_forbidden(pos.get("note") or "按规则执行").replace("|", "｜")
+            pnote = scrub_markdown(pos.get("note") or "按规则执行").replace("|", "｜")
             if len(pnote) > 72:
                 pnote = pnote[:69].rstrip() + "..."
             sec1.append(f"| {pname} | {pstate} | {bpct} | {rpct} | {pnote} |")
@@ -623,12 +498,12 @@ def generate_periodic_decision_report(
         sec2.append("|---|---|---:|---:|---:|---|---|")
         for card in verified_kols:
             handle = str(card.get("handle") or "").lstrip("@")
-            role_lbl = _scrub_forbidden(card.get("role_label") or card.get("category_label") or "市场研究")
+            role_lbl = scrub_markdown(card.get("role_label") or card.get("category_label") or "市场研究")
             vc = int(card.get("verified_calls") or 0)
             wr5 = f"{float(card['win_rate_5d']):.1f}%" if isinstance(card.get("win_rate_5d"), (int, float)) else "—"
             wr20 = f"{float(card['win_rate_20d']):.1f}%" if isinstance(card.get("win_rate_20d"), (int, float)) else "—"
             bt = ", ".join(str(x) for x in (card.get("best_tickers") or [])[:3]) or "综合"
-            stance = _scrub_forbidden(card.get("latest_stance") or "中性")
+            stance = scrub_markdown(card.get("latest_stance") or "中性")
             sec2.append(f"| @{handle} | {role_lbl} | {vc} | {wr5} | {wr20} | {bt} | {stance} |")
     else:
         sec2.append("- 本期暂无达到 5 次历史核验门槛的作者样本，所有胜率评估保持「样本积累」定性跟踪。")
@@ -658,13 +533,13 @@ def generate_periodic_decision_report(
     sec2.extend(["", "### 全网舆论温度对照（专业层 vs 散户社区）"])
     if forum_sentiment:
         temp = forum_sentiment.get("overall_crowd_temp")
-        olbl = _scrub_forbidden(forum_sentiment.get("overall_label") or "情绪平稳")
+        olbl = scrub_markdown(forum_sentiment.get("overall_label") or "情绪平稳")
         temp_str = f"{temp}/100" if isinstance(temp, (int, float)) else "—"
         sec2.append(f"- **全网散户综合温度**：**{temp_str}（{olbl}）**。")
         channels = [c for c in (forum_sentiment.get("channels_status") or []) if isinstance(c, dict)]
         if channels:
             ch_parts = [
-                f"{_scrub_forbidden(c.get('name') or c.get('id'))}·{_scrub_forbidden(c.get('status'))}({int(c.get('count') or 0)}条)"
+                f"{scrub_markdown(c.get('name') or c.get('id'))}·{scrub_markdown(c.get('status'))}({int(c.get('count') or 0)}条)"
                 for c in channels[:6]
             ]
             sec2.append(f"- **平台覆盖状态**：{' ｜ '.join(ch_parts)}")
@@ -691,10 +566,10 @@ def generate_periodic_decision_report(
             sec2.append("| 核心赛道 | 专业层评分/倾向 | 散户层评分/热度 | 背离标签 | 应对提示 |")
             sec2.append("|---|---|---|---:|---|")
             for dv in divs[:6]:
-                topic = _scrub_forbidden(dv.get("topic") or "")
+                topic = scrub_markdown(dv.get("topic") or "")
                 d_cnt = dv.get("desk_count")
                 d_suffix = f"·{int(d_cnt)}条" if isinstance(d_cnt, int) and d_cnt > 0 else ""
-                d_info = f"{dv.get('desk_score', 0)}（{_scrub_forbidden(dv.get('desk_bias') or '中性')}{d_suffix}）"
+                d_info = f"{dv.get('desk_score', 0)}（{scrub_markdown(dv.get('desk_bias') or '中性')}{d_suffix}）"
                 s_cnt = dv.get("street_count")
                 s_suffix = f"·{int(s_cnt)}条" if isinstance(s_cnt, int) and s_cnt > 0 else ""
                 s_info = (
@@ -702,8 +577,8 @@ def generate_periodic_decision_report(
                     if dv.get("street_score") is not None and dv.get("street_heat") is not None
                     else "暂无样本"
                 )
-                dtag = _scrub_forbidden(dv.get("divergence_tag") or "情绪平稳")
-                hint = _scrub_forbidden(dv.get("action_hint") or "").replace("|", "｜")
+                dtag = scrub_markdown(dv.get("divergence_tag") or "情绪平稳")
+                hint = scrub_markdown(dv.get("action_hint") or "").replace("|", "｜")
                 sec2.append(f"| {topic} | {d_info} | {s_info} | {dtag} | {hint} |")
             # Highlight top street samples
             sample_lines: list[str] = []
@@ -711,7 +586,7 @@ def generate_periodic_decision_report(
                 for ss in (dv.get("street_samples") or [])[:1]:
                     if isinstance(ss, dict) and ss.get("title"):
                         sample_lines.append(
-                            f"- [{_scrub_forbidden(ss.get('platform') or '社区')}] {_scrub_forbidden(ss.get('title'))}"
+                            f"- [{scrub_markdown(ss.get('platform') or '社区')}] {scrub_markdown(ss.get('title'))}"
                         )
             if sample_lines:
                 sec2.append("")
@@ -726,7 +601,7 @@ def generate_periodic_decision_report(
         "",
         "### 核心股指、科技权重与加密资产复盘",
     ]
-    eq_summary = _scrub_forbidden((state.get("us_equities") or {}).get("summary") or "")
+    eq_summary = scrub_markdown((state.get("us_equities") or {}).get("summary") or "")
     if eq_summary:
         sec3.append(f"- **美股盘面综述**：{eq_summary}")
     idx_items = []
@@ -759,8 +634,8 @@ def generate_periodic_decision_report(
         for p in corr_pairs[:4]:
             if p.get("corr_30d") is None:
                 continue
-            cname = _scrub_forbidden(p.get("pair") or p.get("label") or p.get("id"))
-            csig = _scrub_forbidden(p.get("divergence") or p.get("signal") or "").strip()
+            cname = scrub_markdown(p.get("pair") or p.get("label") or p.get("id"))
+            csig = scrub_markdown(p.get("divergence") or p.get("signal") or "").strip()
             corr_parts.append(f"{cname} {p.get('corr_30d')}" + (f"（{csig}）" if csig else ""))
         if corr_parts:
             sec3.append(f"- **跨资产 30 日相关性**：{' ｜ '.join(corr_parts)}")
@@ -769,8 +644,8 @@ def generate_periodic_decision_report(
         sec3.extend(["", "### 跨源共振与主线传导"])
         for link in links[:5]:
             t_str = ", ".join(str(t) for t in (link.get("tickers") or [])[:5])
-            trigger = _scrub_forbidden(link.get("watch_trigger") or link.get("action_trigger") or "").strip()
-            mcheck = _scrub_forbidden(link.get("market_check") or "").strip()
+            trigger = scrub_markdown(link.get("watch_trigger") or link.get("action_trigger") or "").strip()
+            mcheck = scrub_markdown(link.get("market_check") or "").strip()
             extra_parts = []
             if mcheck:
                 extra_parts.append(f"盘面校验：{mcheck}")
@@ -778,8 +653,8 @@ def generate_periodic_decision_report(
                 extra_parts.append(f"关键观察：{trigger}")
             extra_str = (" " + "；".join(extra_parts)) if extra_parts else ""
             sec3.append(
-                f"- **{_scrub_forbidden(link.get('focus'))}**（{t_str} · {_scrub_forbidden(link.get('pattern'))} · 可信度 {link.get('confidence', 0)}%）："
-                f"{_scrub_forbidden(link.get('conclusion') or '')}{extra_str}"
+                f"- **{scrub_markdown(link.get('focus'))}**（{t_str} · {scrub_markdown(link.get('pattern'))} · 可信度 {link.get('confidence', 0)}%）："
+                f"{scrub_markdown(link.get('conclusion') or '')}{extra_str}"
             )
 
     sec3.extend(["", "### 中美算力与宏观产业链映射"])
@@ -791,14 +666,14 @@ def generate_periodic_decision_report(
             bridges = [b for b in (cat.get("supply_chain_bridges") or []) if isinstance(b, dict)]
             for b in bridges[:3]:
                 a_shares = [
-                    f"{_scrub_forbidden(a.get('name'))}({a.get('symbol')}/{_scrub_forbidden(a.get('sector'))})"
+                    f"{scrub_markdown(a.get('name'))}({a.get('symbol')}/{scrub_markdown(a.get('sector'))})"
                     for a in (b.get("a_shares") or [])[:3]
                     if isinstance(a, dict) and a.get("name")
                 ]
                 if a_shares:
                     mapped_lines.append(
-                        f"- **{_scrub_forbidden(cat.get('name'))} · {b.get('us_leader')}（{_scrub_forbidden(b.get('us_name'))}）**："
-                        f"{_scrub_forbidden(b.get('focus') or '')} → A股映射：{'、'.join(a_shares)}"
+                        f"- **{scrub_markdown(cat.get('name'))} · {b.get('us_leader')}（{scrub_markdown(b.get('us_name'))}）**："
+                        f"{scrub_markdown(b.get('focus') or '')} → A股映射：{'、'.join(a_shares)}"
                     )
         if mapped_lines:
             sec3.extend(mapped_lines[:8])
@@ -813,9 +688,9 @@ def generate_periodic_decision_report(
     sec3.extend(["", "### 大佬深度长文核心摘录"])
     if featured_articles:
         for art in featured_articles:
-            pub = _scrub_forbidden(art.get("publisher") or art.get("source") or "深度长文")
-            atitle = _scrub_forbidden(art.get("title") or art.get("filename") or "")
-            aexc = _scrub_forbidden(art.get("excerpt") or "").strip()
+            pub = scrub_markdown(art.get("publisher") or art.get("source") or "深度长文")
+            atitle = scrub_markdown(art.get("title") or art.get("filename") or "")
+            aexc = scrub_markdown(art.get("excerpt") or "").strip()
             if len(aexc) > 130:
                 aexc = aexc[:127].rstrip() + "..."
             t_list = [str(t) for t in (art.get("tickers") or [])[:4]]
@@ -838,9 +713,9 @@ def generate_periodic_decision_report(
     ]
     if cal_events:
         for ev in cal_events[:6]:
-            ev_date = _scrub_forbidden(ev.get("time_bjt") or ev.get("date_local") or ev.get("date") or ev.get("time") or "").strip()
-            ev_title = _scrub_forbidden(ev.get("title") or ev.get("event") or "").strip()
-            ev_imp = _scrub_forbidden(ev.get("impact") or ev.get("category_cn") or ev.get("category") or "重要节点").strip()
+            ev_date = scrub_markdown(ev.get("time_bjt") or ev.get("date_local") or ev.get("date") or ev.get("time") or "").strip()
+            ev_title = scrub_markdown(ev.get("title") or ev.get("event") or "").strip()
+            ev_imp = scrub_markdown(ev.get("impact") or ev.get("category_cn") or ev.get("category") or "重要节点").strip()
             if ev_title:
                 date_prefix = f"**{ev_date}**｜" if ev_date else ""
                 sec4.append(f"- {date_prefix}[{ev_imp}] {ev_title}")
@@ -874,20 +749,20 @@ def generate_periodic_decision_report(
         sec5.append(f"### {idx}. {heading}")
         sec5.append("")
         sec5.append("```text")
-        sec5.append(_scrub_forbidden(prompt_body))
+        sec5.append(scrub_markdown(prompt_body))
         sec5.append("```")
         sec5.append("")
 
-    body_md = _scrub_forbidden("\n".join([f"# {title}", ""] + sec1 + [""] + sec2 + [""] + sec3 + [""] + sec4 + [""] + sec5))
-    summary = _scrub_forbidden(
+    body_md = scrub_markdown("\n".join([f"# {title}", ""] + sec1 + [""] + sec2 + [""] + sec3 + [""] + sec4 + [""] + sec5))
+    summary = scrub_markdown(
         f"{period_label}决策{ '周报' if norm_period == 'weekly' else '月报' }：当前风控「{risk_label}」（多头上限 {long_cap_pct}），"
         f"10Y美债 {_fmt_fred_item(fmap, 'us_10y')}、VIX {_fmt_fred_item(fmap, 'vix')}，汇集 {len(verified_kols)} 位高胜率 KOL 与跨市场产业链观察，含 {len(prompts)} 组 Deep Research 一键提问词。"
     )
     if len(summary) > 180:
         summary = summary[:177].rstrip() + "..."
 
-    frontmatter = _build_yaml_frontmatter(
-        title=_scrub_forbidden(title),
+    frontmatter = build_yaml_frontmatter(
+        title=scrub_markdown(title),
         summary=summary,
         publisher=publisher,
         author_role="周期辅助决策",
@@ -897,7 +772,7 @@ def generate_periodic_decision_report(
     )
     full_doc = f"{frontmatter}\n\n{body_md}\n"
 
-    article_dict = _parse_article_dict(
+    article_dict = periodic_article_dict(
         filename=filename,
         title=title,
         summary=summary,
@@ -914,159 +789,6 @@ def generate_periodic_decision_report(
 
     _atomic_write_text(dest, full_doc)
     return article_dict
-
-
-def _normalize_tickers_input(tickers: list[str] | tuple[str, ...] | str | None, text_for_extract: str) -> list[str]:
-    out: list[str] = []
-    if isinstance(tickers, str):
-        raw_items = re.split(r"[,，\s]+", tickers.strip())
-    elif isinstance(tickers, (list, tuple, set)):
-        raw_items = [str(x).strip() for x in tickers]
-    else:
-        raw_items = []
-    for item in raw_items:
-        sym = item.strip().lstrip("$").upper()
-        if sym and sym not in out:
-            out.append(sym)
-    for inferred in extract_tickers(text_for_extract):
-        if inferred not in out:
-            out.append(inferred)
-    return out[:8]
-
-
-def _resolve_ingest_title(explicit_title: str, fm_meta: dict[str, Any], body: str) -> str:
-    if explicit_title and explicit_title.strip():
-        return explicit_title.strip()
-    for ln in body.splitlines():
-        s = ln.strip()
-        if s.startswith("# "):
-            heading = s[2:].strip()
-            if heading:
-                return heading
-    fm_title = str(fm_meta.get("title") or "").strip()
-    if fm_title:
-        return fm_title
-    plain = re.sub(r"[#>*`\[\]()\-]+", " ", body)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    if plain:
-        return plain[:20]
-    return "外部深研补充"
-
-
-def ingest_deep_research_markdown(
-    raw_markdown: str,
-    *,
-    title: str = "",
-    tickers: list[str] | tuple[str, ...] | str | None = None,
-    related_period: str = "",
-    articles_dir: Path | str | None = None,
-    url: str = "",
-    publisher: str = "Deep Research 深度补充",
-    author_role: str = "外部深研闭环",
-) -> dict[str, Any]:
-    """Sanitize, privacy-check, persist, and return an external Deep Research markdown article."""
-    raw_text = str(raw_markdown or "").strip()
-    if not raw_text:
-        raise ValueError("外部深研 Markdown 正文不能为空")
-
-    fm_meta, stripped_body = _strip_frontmatter(raw_text)
-    if not stripped_body:
-        raise ValueError("剥离头部元信息后正文为空")
-
-    resolved_title = _resolve_ingest_title(title, fm_meta, stripped_body)
-    resolved_url = str(url or fm_meta.get("url") or "").strip()
-    if not resolved_url.startswith(("http://", "https://")):
-        resolved_url = ""
-
-    # Privacy & credential redline BEFORE any persistence
-    if has_private_article_content(
-        {
-            "filename": "dr_ingest_check.md",
-            "title": resolved_title,
-            "body_md": raw_text,
-            "content": raw_text,
-        }
-    ):
-        raise ValueError("内容包含敏感私人持仓或密钥信息，已拦截入库")
-
-    clean_title = _scrub_forbidden(resolved_title)
-    clean_body = _scrub_forbidden(stripped_body)
-    clean_period = _scrub_forbidden(related_period).strip()
-
-    if clean_period and f"关联周期" not in clean_body[:160]:
-        lines = clean_body.splitlines()
-        quote_line = f"> 关联周期研报：{clean_period}"
-        if lines and lines[0].strip().startswith("# "):
-            clean_body = "\n".join([lines[0], "", quote_line, ""] + lines[1:]).strip()
-        else:
-            clean_body = f"# {clean_title}\n\n{quote_line}\n\n{clean_body}".strip()
-
-    fm_tickers = fm_meta.get("tickers") if isinstance(fm_meta.get("tickers"), (list, str)) else None
-    norm_tickers = _normalize_tickers_input(tickers if tickers is not None else fm_tickers, f"{clean_title}\n{clean_body}")
-
-    # Extract concise summary
-    summary = _scrub_forbidden(fm_meta.get("summary") or "")
-    if not summary:
-        for ln in clean_body.splitlines():
-            s = ln.strip()
-            if s and not s.startswith(("#", "-", "*", ">", "```", "|")) and len(s) >= 12:
-                summary = s
-                break
-    if not summary:
-        summary = clean_title
-    if len(summary) > 180:
-        summary = summary[:177].rstrip() + "..."
-
-    # Double-check scrubbed text against privacy redline
-    if has_private_article_content(
-        {
-            "filename": "dr_ingest_clean.md",
-            "title": clean_title,
-            "summary": summary,
-            "body_md": clean_body,
-            "content": clean_body,
-        }
-    ):
-        raise ValueError("内容包含敏感私人持仓或密钥信息，已拦截入库")
-
-    now_bjt = datetime.now(BJT)
-    digest8 = hashlib.sha256(f"{clean_title}\n{clean_body}".encode("utf-8")).hexdigest()[:8]
-    filename = f"dr_{now_bjt.strftime('%Y%m%d')}_{digest8}.md"
-    if not safe_article_filename(filename):
-        raise ValueError(f"非法文件名: {filename}")
-
-    clean_pub = _scrub_forbidden(publisher) or "Deep Research 深度补充"
-    clean_role = _scrub_forbidden(author_role) or "外部深研闭环"
-    frontmatter = _build_yaml_frontmatter(
-        title=clean_title,
-        summary=summary,
-        publisher=clean_pub,
-        author_role=clean_role,
-        report_kind="deep_research",
-        score=90,
-        tickers=norm_tickers,
-        url=resolved_url,
-        related_period=clean_period,
-    )
-    full_doc = f"{frontmatter}\n\n{clean_body}\n"
-
-    target_dir = Path(articles_dir) if articles_dir is not None else DEFAULT_ARTICLES_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(target_dir / filename, full_doc)
-
-    return _parse_article_dict(
-        filename=filename,
-        title=clean_title,
-        summary=summary,
-        publisher=clean_pub,
-        author_role=clean_role,
-        report_kind="deep_research",
-        score=90,
-        tickers=norm_tickers,
-        body_md=clean_body,
-        mtime_str=now_bjt.strftime("%Y-%m-%d %H:%M"),
-        url=resolved_url,
-    )
 
 
 def check_deep_research_capabilities() -> dict[str, Any]:
@@ -1216,10 +938,10 @@ def run_gemini_deep_research(
         "returncode": proc.returncode,
         "run_id": run_id,
         "status": status or ("submitted" if proc.returncode == 0 else "error"),
-        "output_preview": _scrub_forbidden(text_out[:300]) if text_out else "",
+        "output_preview": scrub_markdown(text_out[:300]) if text_out else "",
     }
     if proc.returncode != 0 and proc.stderr:
-        result["error"] = _scrub_forbidden(proc.stderr.strip()[:300])
+        result["error"] = scrub_markdown(proc.stderr.strip()[:300])
     if ingest and text_out and proc.returncode == 0:
         article = ingest_deep_research_markdown(
             text_out,

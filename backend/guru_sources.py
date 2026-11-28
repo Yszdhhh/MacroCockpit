@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
+import socket
 import sys
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -22,231 +22,36 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import DATA_DIR, atomic_write_json
-from backend.kazike_engine import cluster_and_dedup, score_five_axes
-from backend.public_snapshot import (
-    file_lock,
+from backend.guardrails import (
     has_private_article_content,
+    is_safe_public_url,
+    neutralize_private_triggers,
     safe_article_filename,
+    safe_fetch_public_url,
 )
-from backend.rss_sources import (
-    ARTICLES_DIR,
-    BJT,
-    UTC,
-    _HEADERS,
-    _clean_text,
-    _infer_direction,
-    _is_safe_public_url,
-    _parse_rss_datetime,
-    _scrub_forbidden,
-    _yaml_quote,
+from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json, file_lock
+from backend.kazike_engine import cluster_and_dedup, score_five_axes
+from backend.rss_sources import ARTICLES_DIR, GURU_ARTICLE_FEEDS as GURU_ARTICLE_FEEDS, DEFAULT_HEADERS
+from backend.signal_text import (
+    clean_feed_text,
+    decode_http_text,
     extract_subtopics,
     extract_tickers,
     html_to_clean_markdown,
+    infer_signal_direction,
+    parse_rss_datetime,
+    strip_xml_ns,
+    yaml_quote,
 )
 
 GURU_CACHE_PATH = DATA_DIR / "guru_articles_cache.json"
 GURU_CACHE_TTL = 1800  # 30 minutes
 GURU_SCHEMA_TAG = "guru_v1_fulltext"
 
-GURU_ARTICLE_FEEDS: tuple[dict[str, str], ...] = (
-    {
-        "id": "awealthofcs",
-        "publisher": "Ben Carlson · 常识财富",
-        "author": "Ben Carlson",
-        "author_role": "资产配置与行为金融",
-        "url": "https://awealthofcommonsense.com/feed/",
-        "html_url": "https://awealthofcommonsense.com/",
-        "category": "equities",
-        "tier": "T1_5",
-        "max_age_days": "30",
-        "background": "Ritholtz 财富管理机构董事总经理 Ben Carlson 专栏，专注美股估值周期、长期资产配置与投资者行为偏差分析。",
-    },
-    {
-        "id": "pragcap",
-        "publisher": "Cullen Roche · 宏观货币",
-        "author": "Cullen Roche",
-        "author_role": "宏观货币与资产配置",
-        "url": "https://www.pragcap.com/feed/",
-        "html_url": "https://www.pragcap.com/",
-        "category": "macro",
-        "tier": "T1_5",
-        "max_age_days": "30",
-        "background": "Discipline Funds 创始人 Cullen Roche 主笔，擅长从货币银行机制、国债供给与美联储资产负债表拆解宏观流动性。",
-    },
-    {
-        "id": "kylascanlon",
-        "publisher": "Kyla Scanlon · 宏观叙事",
-        "author": "Kyla Scanlon",
-        "author_role": "宏观叙事与市场情绪",
-        "url": "https://kylascanlon.substack.com/feed",
-        "html_url": "https://kylascanlon.substack.com/",
-        "category": "macro",
-        "tier": "T1_5",
-        "max_age_days": "45",
-        "background": "知名财经作者 Kyla Scanlon 专栏，聚焦美国通胀体感、劳动力市场与零售/机构情绪叙事转向。",
-    },
-    {
-        "id": "cryptohayes",
-        "publisher": "Arthur Hayes · 加密宏观",
-        "author": "Arthur Hayes",
-        "author_role": "加密宏观与美元流动性",
-        "url": "https://cryptohayes.substack.com/feed",
-        "html_url": "https://cryptohayes.substack.com/",
-        "category": "crypto",
-        "tier": "T1",
-        "max_age_days": "60",
-        "background": "BitMEX 联合创始人 Arthur Hayes 长文专栏，核心围绕美元财政赤字、美债流动性投放与比特币周期定价。",
-    },
-    {
-        "id": "semianalysis",
-        "publisher": "SemiAnalysis · 半导体深研",
-        "author": "Dylan Patel / SemiAnalysis",
-        "author_role": "AI算力与半导体供应链",
-        "url": "https://www.semianalysis.com/feed",
-        "html_url": "https://www.semianalysis.com/",
-        "category": "ai",
-        "tier": "T1",
-        "max_age_days": "45",
-        "background": "全球顶级半导体与 AI 数据中心产业研究机构，深度追踪英伟达、台积电、HBM 存储与云厂商算力资本开支。",
-    },
-    {
-        "id": "fabricated",
-        "publisher": "Fabricated Knowledge · 芯片投研",
-        "author": "Doug O'Laughlin",
-        "author_role": "半导体与晶圆制造投研",
-        "url": "https://www.fabricatedknowledge.com/feed",
-        "html_url": "https://www.fabricatedknowledge.com/",
-        "category": "ai",
-        "tier": "T1_5",
-        "max_age_days": "60",
-        "background": "半导体买方背景研究员 Doug O'Laughlin 专栏，专注晶圆代工、先进封装、光刻设备与芯片周期供需。",
-    },
-    {
-        "id": "stratechery",
-        "publisher": "Ben Thompson · Stratechery",
-        "author": "Ben Thompson",
-        "author_role": "科技战略与平台商业",
-        "url": "https://stratechery.com/feed/",
-        "html_url": "https://stratechery.com/",
-        "category": "equities",
-        "tier": "T1",
-        "max_age_days": "30",
-        "background": "硅谷最具影响力的科技战略分析师 Ben Thompson 主笔，拆解美股七巨头商业模式、AI 分发壁垒与反垄断格局。",
-    },
-    {
-        "id": "dwarkesh",
-        "publisher": "Dwarkesh Patel · 深度访谈",
-        "author": "Dwarkesh Patel",
-        "author_role": "AI前沿与深度访谈",
-        "url": "https://www.dwarkeshpatel.com/feed",
-        "html_url": "https://www.dwarkeshpatel.com/",
-        "category": "ai",
-        "tier": "T1_5",
-        "max_age_days": "90",
-        "background": "顶级技术播客与长文作者 Dwarkesh Patel 专栏，长期对话一线大模型实验室掌舵人，追踪 Scaling Law 与算力边界。",
-    },
-    {
-        "id": "notboring",
-        "publisher": "Packy McCormick · Not Boring",
-        "author": "Packy McCormick",
-        "author_role": "科技趋势与产业商业",
-        "url": "https://www.notboring.co/feed",
-        "html_url": "https://www.notboring.co/",
-        "category": "equities",
-        "tier": "T1_5",
-        "max_age_days": "45",
-        "background": "Not Boring 主理人 Packy McCormick 深度商业长文，覆盖前沿软件、国防科技、能源基建与美股成长叙事。",
-    },
-    {
-        "id": "doomberg",
-        "publisher": "Doomberg · 能源与大宗",
-        "author": "Doomberg",
-        "author_role": "全球能源与大宗商品",
-        "url": "https://doomberg.substack.com/feed",
-        "html_url": "https://doomberg.substack.com/",
-        "category": "macro",
-        "tier": "T1_5",
-        "max_age_days": "45",
-        "background": "高人气能源与大宗商品评论团队 Doomberg，聚焦原油、天然气、核电与 AI 数据中心电力瓶颈。",
-    },
-    {
-        "id": "vitalik",
-        "publisher": "Vitalik Buterin · 以太坊研究",
-        "author": "Vitalik Buterin",
-        "author_role": "以太坊协议与链上架构",
-        "url": "https://vitalik.eth.limo/feed.xml",
-        "html_url": "https://vitalik.eth.limo/",
-        "category": "crypto",
-        "tier": "T1",
-        "max_age_days": "120",
-        "background": "以太坊联合创始人 Vitalik Buterin 官方研究博客，发布底层扩容、ZK 证明、链上治理与加密安全一线路线图。",
-    },
-    {
-        "id": "paulgraham",
-        "publisher": "Paul Graham · 商业随笔",
-        "author": "Paul Graham",
-        "author_role": "科技创业与商业随笔",
-        "url": "http://www.aaronsw.com/2002/feeds/pgessays.rss",
-        "html_url": "https://paulgraham.com/articles.html",
-        "category": "ai",
-        "tier": "T1_5",
-        "max_age_days": "180",
-        "background": "Y Combinator 联合创始人 Paul Graham 经典随笔，揭示硅谷技术代际切换、创业组织与长期复利逻辑。",
-    },
-)
-
 _ALLOWED_SIGNAL_CATEGORIES: frozenset[str] = frozenset({"macro", "equities", "ashare", "crypto", "ai"})
 
-_EXTRA_FORBIDDEN_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
-    (r"\bTier-1\b", "核心"),
-    (r"\bTier-S\b", "高优"),
-    (r"\bTier-A\b", "重点"),
-    (r"\bSleeves?\b", "仓位"),
-    (r"\bRegimes?\b", "市场周期"),
-    (r"\barbitration\b", "风险评估"),
-    (r"\bN/A\b", "—"),
-    (r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明", "规则摘要"),
-    (r"待刷新|待补充|待补", "—"),
-)
-
-_PRIVATE_TRIGGER_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"占\s*(?:总\s*)?净值|净值\s*占比|portfolio_exposure|(?:现货|合约|实际|私人)持仓明细", "市场参考"),
-    (r"(?<![A-Z0-9_-])(?:sk-[A-Za-z0-9_-]*|Bearer\s+[A-Za-z0-9._-]+|gh[pousr]_[A-Za-z0-9]+)", "[凭证脱敏]"),
-    (
-        r"(?<![A-Z0-9])(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|secret)\s*([\"\']?)\s*[:=]",
-        r"\1\2（字段）",
-    ),
-)
-
-
 def _sanitize_guru_text(text: str) -> str:
-    """Scrub forbidden jargon and neutralize any accidental private-content regex triggers."""
-    s = _scrub_forbidden(str(text or ""))
-    for pat, rep in _EXTRA_FORBIDDEN_PATTERNS:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    for pat, rep in _PRIVATE_TRIGGER_PATTERNS:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    return s
-
-
-def _strip_ns(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1].lower() if "}" in tag else tag.lower()
-
-
-def _decode_full_response(resp: Any) -> str:
-    """Decode full HTTP response body bytes without truncation (preserves long Substack CDATA)."""
-    raw_bytes = getattr(resp, "content", b"") or b""
-    if not raw_bytes:
-        return str(getattr(resp, "text", "") or "")
-    enc = str(getattr(resp, "encoding", "") or "").strip()
-    if enc and enc.lower() not in ("iso-8859-1", "latin-1", "latin1"):
-        try:
-            return raw_bytes.decode(enc, errors="replace")
-        except LookupError:
-            pass
-    return raw_bytes.decode("utf-8", errors="replace")
+    return neutralize_private_triggers(text)
 
 
 def _escape_bare_ampersands_outside_cdata(xml_text: str) -> str:
@@ -288,7 +93,7 @@ def _parse_guru_xml_entries(
             return []
 
     entries_out: list[dict[str, Any]] = []
-    nodes = [elem for elem in root.iter() if _strip_ns(elem.tag) in ("item", "entry")]
+    nodes = [elem for elem in root.iter() if strip_xml_ns(elem.tag) in ("item", "entry")]
     for entry in nodes:
         title = ""
         link = ""
@@ -296,7 +101,7 @@ def _parse_guru_xml_entries(
         author = ""
         bodies: dict[str, str] = {}
         for child in entry:
-            name = _strip_ns(child.tag)
+            name = strip_xml_ns(child.tag)
             if name == "title" and not title:
                 title = child.text or "".join(child.itertext())
             elif name in ("encoded", "content", "description", "summary"):
@@ -312,7 +117,7 @@ def _parse_guru_xml_entries(
             elif name in ("creator", "author") and not author:
                 author = (child.text or "".join(child.itertext())).strip()
 
-        dt = _parse_rss_datetime(pub_raw) or now
+        dt = parse_rss_datetime(pub_raw) or now
         if dt < cutoff:
             continue
 
@@ -332,7 +137,7 @@ def _parse_guru_xml_entries(
             ),
             key=len,
         )
-        safe_link = link if _is_safe_public_url(link) else ""
+        safe_link = link if is_safe_public_url(link, socket_mod=socket) else ""
         entries_out.append(
             {
                 "title": title,
@@ -374,7 +179,7 @@ def _build_cn_takeaways(
     for ln in body_md.splitlines():
         s = ln.strip()
         if s.startswith(("# ", "## ", "### ")):
-            h_txt = _clean_text(s.lstrip("# ").strip(), max_len=90)
+            h_txt = clean_feed_text(s.lstrip("# ").strip(), max_len=90)
             if h_txt and h_txt != title and h_txt not in headings:
                 headings.append(h_txt)
         if len(headings) >= 3:
@@ -456,24 +261,24 @@ def parse_guru_feed_xml(
     for ent in raw_entries:
         if len(items_out) >= max_items:
             break
-        title = _sanitize_guru_text(_clean_text(ent.get("title") or "", max_len=150))
+        title = _sanitize_guru_text(clean_feed_text(ent.get("title") or "", max_len=150))
         if not title:
             continue
 
         full_md = html_to_clean_markdown(str(ent.get("long_raw") or ent.get("short_raw") or ""), max_chars=24000)
         full_md = _sanitize_guru_text(full_md)
-        summary_clean = _sanitize_guru_text(_clean_text(ent.get("short_raw") or "", max_len=220))
+        summary_clean = _sanitize_guru_text(clean_feed_text(ent.get("short_raw") or "", max_len=220))
         if not summary_clean or len(summary_clean) < 18:
             first_para = next(
                 (ln.strip() for ln in full_md.splitlines() if ln.strip() and not ln.strip().startswith("#")),
                 title,
             )
-            summary_clean = _sanitize_guru_text(_clean_text(first_para, max_len=220)) or title
+            summary_clean = _sanitize_guru_text(clean_feed_text(first_para, max_len=220)) or title
         if len(full_md) < 40:
             full_md = summary_clean
 
         url = str(ent.get("link") or spec.get("html_url") or "").strip()
-        if url and not _is_safe_public_url(url):
+        if url and not is_safe_public_url(url, socket_mod=socket):
             url = ""
         dt_utc = ent.get("dt_utc") or (now_utc or datetime.now(UTC))
         time_bjt = dt_utc.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
@@ -481,7 +286,7 @@ def parse_guru_feed_xml(
         combined_meta = f"{title} {summary_clean} {full_md[:1800]}"
         tickers = extract_tickers(combined_meta)
         topics = extract_subtopics(combined_meta, category)
-        direction = _infer_direction(f"{title} {summary_clean} {full_md[:1200]}")
+        direction = infer_signal_direction(f"{title} {summary_clean} {full_md[:1200]}")
 
         takeaways = _build_cn_takeaways(
             title=title,
@@ -572,21 +377,25 @@ def _fetch_one_guru_feed(
     feed_url = str(spec.get("url") or "").strip()
     if requests is None:
         return (fid, [], "requests_unavailable")
-    if not _is_safe_public_url(feed_url):
+    if not is_safe_public_url(feed_url, socket_mod=socket):
         return (fid, [], "blocked_url")
 
     headers = {
-        **_HEADERS,
+        **DEFAULT_HEADERS,
         "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5",
     }
     try:
-        resp = requests.get(feed_url, headers=headers, timeout=timeout)
+        resp = safe_fetch_public_url(
+            feed_url, headers=headers, timeout=timeout, requests_mod=requests, socket_mod=socket,
+        )
+        if resp is None:
+            return (fid, [], "blocked_redirect")
         final_url = str(getattr(resp, "url", "") or feed_url)
-        if final_url and not _is_safe_public_url(final_url):
+        if final_url and not is_safe_public_url(final_url, socket_mod=socket):
             return (fid, [], "blocked_redirect")
         if int(getattr(resp, "status_code", 0) or 0) != 200 or not getattr(resp, "content", b""):
             return (fid, [], f"http_{getattr(resp, 'status_code', 0)}")
-        xml_text = _decode_full_response(resp)
+        xml_text = decode_http_text(resp)
         parsed = parse_guru_feed_xml(xml_text, spec, now_utc=now_utc, max_items=4)
         return (fid, parsed, "ok" if parsed else "empty")
     except Exception as exc:
@@ -614,17 +423,17 @@ def _write_guru_article_files(articles: list[dict[str, Any]], articles_dir: Path
         url = str(art.get("url") or "").strip()
         score = int(art.get("score") or 0)
         tickers = [str(t).strip().upper() for t in (art.get("tickers") or []) if str(t).strip()]
-        tickers_yaml = "[" + ", ".join(_yaml_quote(t) for t in tickers) + "]"
+        tickers_yaml = "[" + ", ".join(yaml_quote(t) for t in tickers) + "]"
         body_md = _sanitize_guru_text(str(art.get("body_md") or summary)).strip()
 
         content = (
             "---\n"
-            f"title: {_yaml_quote(title)}\n"
-            f"summary: {_yaml_quote(summary)}\n"
-            f"publisher: {_yaml_quote(publisher)}\n"
-            f"author_role: {_yaml_quote(author_role)}\n"
+            f"title: {yaml_quote(title)}\n"
+            f"summary: {yaml_quote(summary)}\n"
+            f"publisher: {yaml_quote(publisher)}\n"
+            f"author_role: {yaml_quote(author_role)}\n"
             f"tickers: {tickers_yaml}\n"
-            f"url: {_yaml_quote(url)}\n"
+            f"url: {yaml_quote(url)}\n"
             f"score: {score}\n"
             "---\n\n"
             f"{body_md}\n"
@@ -811,7 +620,7 @@ def collect_guru_signals(
 
         direction = str(art.get("direction") or "").strip().lower()
         if direction not in ("bullish", "bearish", "neutral"):
-            direction = _infer_direction(f"{title} {summary}")
+            direction = infer_signal_direction(f"{title} {summary}")
 
         tickers = [str(t).strip().upper() for t in (art.get("tickers") or []) if str(t).strip()]
         if not tickers:
@@ -824,7 +633,7 @@ def collect_guru_signals(
         score = int(art.get("score") or 60)
         importance = "高" if (score >= 68 or (len(tickers) >= 1 and score >= 58)) else "中"
         url = str(art.get("url") or "").strip()
-        if url and not _is_safe_public_url(url):
+        if url and not is_safe_public_url(url, socket_mod=socket):
             url = ""
 
         sig_id = str(art.get("id") or "")
@@ -836,7 +645,7 @@ def collect_guru_signals(
         )
         short_pub = publisher.split("·", 1)[0].strip()
         sig_title = title if short_pub.lower() in title.lower() else f"{short_pub}：{title}"
-        sig_title = _sanitize_guru_text(_clean_text(sig_title, max_len=140))
+        sig_title = _sanitize_guru_text(clean_feed_text(sig_title, max_len=140))
 
         sig = {
             "id": sig_id,
@@ -847,7 +656,7 @@ def collect_guru_signals(
             "importance": importance,
             "time_bjt": str(art.get("time_bjt") or datetime.now(BJT).strftime("%Y-%m-%d %H:%M")),
             "title": sig_title,
-            "summary": _clean_text(summary, max_len=240),
+            "summary": clean_feed_text(summary, max_len=240),
             "why_it_matters": why,
             "tickers": tickers[:6],
             "topics": topics[:4],

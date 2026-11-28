@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Any
 
 try:
@@ -18,10 +16,11 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
-from backend.fred_and_market import DATA_DIR, _infer_us_session, atomic_write_json
-from backend.sec_edgar import SEC_CIK_MAP, fetch_sec_filings_map
+from backend.guardrails import scrub_forbidden
+from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json, safe_float as _finite
+from backend.fred_and_market import infer_us_session
+from backend.sec_edgar import SEC_CIK_MAP, SEC_CN_NAMES, fetch_sec_filings_map
 
-BJT = timezone(timedelta(hours=8))
 CACHE_PATH = DATA_DIR / "stock_profiles_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600
 ON_DEMAND_TTL_SECONDS = 600
@@ -39,7 +38,7 @@ _HEADERS = {
 CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     (
         "AAPL",
-        "苹果",
+        SEC_CN_NAMES["AAPL"],
         "NASDAQ",
         "科技 · 消费电子",
         "核心平台巨头",
@@ -47,7 +46,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "NVDA",
-        "英伟达",
+        SEC_CN_NAMES["NVDA"],
         "NASDAQ",
         "科技 · AI 算力",
         "AI 芯片与算力",
@@ -55,7 +54,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "MSFT",
-        "微软",
+        SEC_CN_NAMES["MSFT"],
         "NASDAQ",
         "科技 · 云与企业软件",
         "核心平台巨头",
@@ -63,7 +62,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "GOOG",
-        "谷歌",
+        SEC_CN_NAMES["GOOG"],
         "NASDAQ",
         "科技 · 搜索与云计算",
         "核心平台巨头",
@@ -71,7 +70,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "META",
-        "Meta",
+        SEC_CN_NAMES["META"],
         "NASDAQ",
         "科技 · 社交与开源 AI",
         "核心平台巨头",
@@ -79,7 +78,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "AMZN",
-        "亚马逊",
+        SEC_CN_NAMES["AMZN"],
         "NASDAQ",
         "科技 · 电商与云计算",
         "核心平台巨头",
@@ -87,7 +86,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "TSLA",
-        "特斯拉",
+        SEC_CN_NAMES["TSLA"],
         "NASDAQ",
         "可选消费 · 智能电车与机器人",
         "硬科技与高弹性成长",
@@ -95,7 +94,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "AMD",
-        "超威半导体",
+        SEC_CN_NAMES["AMD"],
         "NASDAQ",
         "科技 · AI 芯片与 CPU",
         "AI 芯片与算力",
@@ -103,7 +102,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "AVGO",
-        "博通",
+        SEC_CN_NAMES["AVGO"],
         "NASDAQ",
         "科技 · 定制 AI 芯片与网络",
         "AI 芯片与算力",
@@ -111,7 +110,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "TSM",
-        "台积电",
+        SEC_CN_NAMES["TSM"],
         "NYSE",
         "科技 · 先进制程晶圆代工",
         "半导体制造与存储",
@@ -119,7 +118,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "MU",
-        "美光科技",
+        SEC_CN_NAMES["MU"],
         "NASDAQ",
         "科技 · HBM 与存储芯片",
         "半导体制造与存储",
@@ -127,7 +126,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "INTC",
-        "英特尔",
+        SEC_CN_NAMES["INTC"],
         "NASDAQ",
         "科技 · x86 与芯片代工",
         "半导体制造与存储",
@@ -135,7 +134,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "QCOM",
-        "高通",
+        SEC_CN_NAMES["QCOM"],
         "NASDAQ",
         "科技 · 端侧 AI 芯片",
         "AI 芯片与算力",
@@ -143,7 +142,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "PLTR",
-        "Palantir",
+        SEC_CN_NAMES["PLTR"],
         "NASDAQ",
         "科技 · 企业 AI 决策软件",
         "软件与新经济平台",
@@ -151,7 +150,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "ORCL",
-        "甲骨文",
+        SEC_CN_NAMES["ORCL"],
         "NYSE",
         "科技 · 云基础设施与数据库",
         "软件与新经济平台",
@@ -159,7 +158,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "NFLX",
-        "奈飞",
+        SEC_CN_NAMES["NFLX"],
         "NASDAQ",
         "通信服务 · 全球流媒体",
         "核心平台巨头",
@@ -167,7 +166,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "ARM",
-        "Arm",
+        SEC_CN_NAMES["ARM"],
         "NASDAQ",
         "科技 · 处理器指令集架构",
         "AI 芯片与算力",
@@ -175,7 +174,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "SMCI",
-        "超微电脑",
+        SEC_CN_NAMES["SMCI"],
         "NASDAQ",
         "科技 · AI 液冷服务器",
         "硬科技与高弹性成长",
@@ -183,7 +182,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "COIN",
-        "Coinbase",
+        SEC_CN_NAMES["COIN"],
         "NASDAQ",
         "金融 · 合规加密交易与托管",
         "数字资产关联股",
@@ -191,7 +190,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "MSTR",
-        "MicroStrategy",
+        SEC_CN_NAMES["MSTR"],
         "NASDAQ",
         "科技 · 比特币财库平台",
         "数字资产关联股",
@@ -437,36 +436,8 @@ _RESEARCH_ALIASES: dict[str, tuple[str, str]] = {
 for _sym, _meta in MULTI_MARKET_META_MAP.items():
     _RESEARCH_ALIASES.setdefault(_meta["name_cn"].upper(), (_sym, _meta["market"]))
 
-_FORBIDDEN_SCRUB = (
-    (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
-    (r"\bTier-1\b", "核心"),
-    (r"\bTier-S\b", "高优"),
-    (r"\bTier-A\b", "重点"),
-    (r"\bSleeves?\b", "仓位"),
-    (r"\bRegimes?\b", "市场周期"),
-    (r"\barbitration\b", "风险评估"),
-    (r"\bN/A\b", "—"),
-)
-
-
 def _scrub(text: Any) -> str:
-    s = str(text or "").strip()
-    if not s:
-        return ""
-    for pat, rep in _FORBIDDEN_SCRUB:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    s = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", s)
-    return re.sub(r"\s{2,}", " ", s).strip()
-
-
-def _finite(val: Any) -> float | None:
-    if val is None or isinstance(val, bool):
-        return None
-    try:
-        num = float(val)
-        return num if math.isfinite(num) else None
-    except (TypeError, ValueError):
-        return None
+    return scrub_forbidden(text, collapse_cjk_spaces=True)
 
 
 def _fmt_money_compact(val: Any, *, currency: str = "$") -> str:
@@ -788,7 +759,7 @@ def fetch_gtimg_batch(symbols: list[str], timeout: int = 6) -> dict[str, dict[st
                 "market_at": f"{ts_raw} 美东" if ts_raw else received_at,
                 "received_at": received_at,
                 "source": "tencent_gtimg",
-                "session": _infer_us_session(ts_raw),
+                "session": infer_us_session(ts_raw),
                 "volume": _finite(parts[36]),
                 "turnover": _finite(parts[37]),
                 "pe_ttm": _finite(parts[39]),
@@ -1202,7 +1173,7 @@ def _fetch_us_f10(symbol: str, timeout: int = 4) -> dict[str, Any]:
     }
 
 
-def _create_yahoo_session(timeout: int = 7) -> tuple[Any, str] | tuple[None, str]:
+def create_yahoo_session(timeout: int = 7) -> tuple[Any, str] | tuple[None, str]:
     if requests is None:
         return (None, "")
     sess = requests.Session()
@@ -1235,7 +1206,7 @@ def _compute_return(closes: list[float], trading_days: int) -> float | None:
     return round((last - base) / base * 100.0, 2)
 
 
-def _fetch_yahoo_one(symbol: str, sess: Any, crumb: str, timeout: int = 8) -> dict[str, Any] | None:
+def fetch_yahoo_one(symbol: str, sess: Any, crumb: str, timeout: int = 8) -> dict[str, Any] | None:
     sym_u = symbol.strip().upper()
     if sess is None:
         return None
@@ -1276,7 +1247,7 @@ def _fetch_yahoo_one(symbol: str, sess: Any, crumb: str, timeout: int = 8) -> di
                 for ts, c in zip(ts_list, raw_closes):
                     cf = _finite(c)
                     if cf is not None and cf > 0:
-                        dates.append(datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d"))
+                        dates.append(datetime.fromtimestamp(int(ts), tz=UTC).strftime("%Y-%m-%d"))
                         closes.append(round(cf, 2))
     except Exception:
         pass
@@ -2000,7 +1971,7 @@ def build_quick_thesis(
     }
 
 
-def _assemble_profile(
+def assemble_profile(
     symbol: str,
     yahoo: dict[str, Any],
     gtimg: dict[str, Any],
@@ -2270,7 +2241,7 @@ def _fetch_crypto_profile(
                 cl = _finite(row[4])
                 if ts_ms is None or cl is None or cl <= 0:
                     continue
-                dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+                dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).strftime("%Y-%m-%d")
                 hi = _finite(row[2]) or cl
                 lo = _finite(row[3]) or cl
                 qv = _finite(row[7]) or 0.0
@@ -2324,7 +2295,7 @@ def _fetch_crypto_profile(
                         cl = _finite(row[2])
                         if ts_s is None or cl is None or cl <= 0:
                             continue
-                        dt = datetime.fromtimestamp(ts_s, tz=timezone.utc).strftime("%Y-%m-%d")
+                        dt = datetime.fromtimestamp(ts_s, tz=UTC).strftime("%Y-%m-%d")
                         hi = _finite(row[3]) or cl
                         lo = _finite(row[4]) or cl
                         qv = _finite(row[1]) or 0.0
@@ -2564,7 +2535,7 @@ def _fetch_cn_equity_profile(
     m_code = re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol)
     exch_cn = {"SH": "上交所", "SZ": "深交所", "BJ": "北交所"}.get(m_code.group(1) if m_code else "", "A股")
     quote.setdefault("exchange", exch_cn)
-    return _assemble_profile(
+    return assemble_profile(
         symbol,
         f10,
         quote,
@@ -2601,7 +2572,7 @@ def _fetch_hk_equity_profile(
             f10 = {}
     f10["chart"] = chart
     quote.setdefault("exchange", "港交所")
-    return _assemble_profile(
+    return assemble_profile(
         symbol,
         f10,
         quote,
@@ -2613,7 +2584,7 @@ def _fetch_hk_equity_profile(
     )
 
 
-def _merge_us_fallbacks(
+def merge_us_fallbacks(
     sym: str,
     yahoo: dict[str, Any],
     gtimg: dict[str, Any],
@@ -2713,10 +2684,10 @@ def build_stock_profiles(
     ]
 
     if need_yahoo:
-        sess, crumb = _create_yahoo_session()
+        sess, crumb = create_yahoo_session()
         if sess is not None:
             with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {pool.submit(_fetch_yahoo_one, sym, sess, crumb): sym for sym in need_yahoo}
+                futures = {pool.submit(fetch_yahoo_one, sym, sess, crumb): sym for sym in need_yahoo}
                 for fut in as_completed(futures):
                     sym = futures[fut]
                     try:
@@ -2741,8 +2712,8 @@ def build_stock_profiles(
         yahoo_item = yahoo_cache.get(sym) or {}
         gtimg_item = gtimg_map.get(sym) or {}
         if not (yahoo_item.get("chart") or {}).get("closes"):
-            yahoo_item = _merge_us_fallbacks(sym, yahoo_item, gtimg_item, timeout=4)
-        prof = _assemble_profile(
+            yahoo_item = merge_us_fallbacks(sym, yahoo_item, gtimg_item, timeout=4)
+        prof = assemble_profile(
             sym,
             yahoo_item,
             gtimg_item,
@@ -2792,8 +2763,8 @@ def fetch_single_stock_profile(
             cache = _read_cache()
             yahoo = cache.get(canon_sym) or {}
             if not yahoo or (now - float(yahoo.get("yahoo_fetched_at") or 0.0)) > CACHE_TTL_SECONDS:
-                sess, crumb = _create_yahoo_session(timeout=2)
-                fresh = _fetch_yahoo_one(canon_sym, sess, crumb, timeout=3) if sess is not None else None
+                sess, crumb = create_yahoo_session(timeout=2)
+                fresh = fetch_yahoo_one(canon_sym, sess, crumb, timeout=3) if sess is not None else None
                 if fresh:
                     yahoo = fresh
                     cache[canon_sym] = fresh
@@ -2801,14 +2772,14 @@ def fetch_single_stock_profile(
                         atomic_write_json(CACHE_PATH, cache)
                     except Exception:
                         pass
-            yahoo = _merge_us_fallbacks(canon_sym, yahoo, gtimg, timeout=4)
+            yahoo = merge_us_fallbacks(canon_sym, yahoo, gtimg, timeout=4)
             sec_filings: list[dict[str, str]] = []
             if canon_sym in SEC_CIK_MAP:
                 try:
                     sec_filings = fetch_sec_filings_map([canon_sym], force_refresh=False, timeout=2).get(canon_sym, [])
                 except Exception:
                     sec_filings = []
-            prof = _assemble_profile(
+            prof = assemble_profile(
                 canon_sym,
                 yahoo,
                 gtimg,
@@ -2829,6 +2800,9 @@ def fetch_single_stock_profile(
                 _ON_DEMAND_CACHE.pop(oldest_key, None)
             _ON_DEMAND_CACHE[canon_sym] = (now, dict(prof))
     return prof
+
+
+_assemble_profile = assemble_profile
 
 
 if __name__ == "__main__":

@@ -13,7 +13,6 @@ import threading
 import time
 import uuid
 from concurrent.futures import ALL_COMPLETED, Future, ThreadPoolExecutor, wait
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,19 +20,19 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
-from backend.periodic_report import (
-    DEFAULT_ARTICLES_DIR,
+from backend import agy_runtime
+from backend.guardrails import has_private_article_text as _has_sensitive_dr_text, scrub_markdown
+from backend.runtime import (
+    COCKPIT_ROOT,
+    DATA_DIR,
     DEFAULT_GEMINI_API_EXE,
-    _scrub_forbidden,
-    ingest_deep_research_markdown,
+    atomic_write_json,
+    now_bjt_iso as _now_bjt_iso,
+    resolve_user_home,
 )
-from backend.public_snapshot import (
-    has_private_article_text,
-    project_public_state,
-)
+from backend.article_store import DEFAULT_ARTICLES_DIR, ingest_deep_research_markdown
+from backend.public_snapshot import project_public_state
 
-BJT = timezone(timedelta(hours=8))
 JOBS_FILENAME = "deep_research_jobs.json"
 MAX_JOBS_HISTORY = 20
 DEMOLAB_SKILL_PATH = COCKPIT_ROOT / ".agents" / "skills" / "deep-research" / "SKILL.md"
@@ -46,16 +45,6 @@ _STAGE_LABELS: dict[str, str] = {
     "completed": "已完成",
     "failed": "失败",
 }
-
-_EXTRA_PRIVATE_DR_RE = re.compile(
-    r"(?:我的|本人|个人|实际|我在[\u4e00-\u9fffA-Za-z0-9]{0,16}的)\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)"
-    r"|(?:我|本人|个人|咱们)\s*(?:目前|当前|现在|手里|手头|账户里?)?\s*(?:持有|买了|买入|建仓|加仓|重仓|满仓|做多|做空|套牢)\s*[^\n。；;]{0,28}?(?:\d[\d,.]*\s*(?:万|千|亿)?\s*(?:美元|美金|人民币|港元|港币|元|股|手|张|枚|份|USDT|USD|CNY|RMB|HKD)|股票|仓位|多单|空单)"
-    r"|\bI\s+(?:currently\s+)?(?:hold|own|bought|shorted)\s+\$?\d[\d,.]*\b"
-    r"|(?:账户\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)|持仓金额|持仓市值|仓位金额|账户金额|保证金金额)\s*(?:为|是|有|约|达|[:：=])?\s*\d"
-    r"|(?<![A-Z0-9_-])(?:sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{16,}|gh[pousr]_[A-Z0-9]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"
-    r"|(?<![A-Z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
-    re.IGNORECASE,
-)
 
 _WIN_PATH_RE = re.compile(
     r'(?:"[A-Za-z]:[/\\][^"\r\n]+"|\'[A-Za-z]:[/\\][^\'\r\n]+\'|[A-Za-z]:[/\\][^\r\n"\'`,;)\]]+)'
@@ -70,24 +59,6 @@ class BusyError(RuntimeError):
     """Raised when a Deep Research run is already in progress."""
 
 
-def _now_bjt_iso() -> str:
-    return datetime.now(BJT).isoformat(timespec="seconds")
-
-
-def _safe_home() -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return COCKPIT_ROOT
-
-
-def _has_sensitive_dr_text(text: Any) -> bool:
-    s = str(text or "")
-    if not s:
-        return False
-    return has_private_article_text(s) or bool(_EXTRA_PRIVATE_DR_RE.search(s))
-
-
 def _sanitize_diag_text(text: Any, *, max_len: int = 120) -> str:
     s = str(text or "").strip()
     if not s:
@@ -97,16 +68,14 @@ def _sanitize_diag_text(text: Any, *, max_len: int = 120) -> str:
     s = _ENV_ASSIGN_RE.sub("[环境配置]", s)
     if _has_sensitive_dr_text(s):
         return "[内容已脱敏]"
-    s = _scrub_forbidden(s)
+    s = scrub_markdown(s)
     s = re.sub(r"\s+", " ", s).strip()
     return s[:max_len] or "执行未成功"
 
 
 def _resolve_agy_bin() -> Path | None:
     try:
-        from desktop.acp_bridge import resolve_agy_executable
-
-        return resolve_agy_executable()
+        return agy_runtime.resolve_agy_executable()
     except Exception:
         found = shutil.which("agy") or shutil.which("agy.exe")
         return Path(found) if found else None
@@ -116,7 +85,7 @@ def _resolve_staff_hub_script() -> tuple[str | None, Path | None]:
     node_exe = shutil.which("node")
     env_hub = (os.environ.get("MACROCOCKPIT_STAFF_HUB") or "").strip()
     candidates = [Path(env_hub)] if env_hub else []
-    candidates.append(_safe_home() / ".claude" / "staff-hub" / "companion" / "agy-companion.mjs")
+    candidates.append(resolve_user_home() / ".claude" / "staff-hub" / "companion" / "agy-companion.mjs")
     script = next((p for p in candidates if p.is_file()), None)
     return node_exe, script
 
@@ -198,10 +167,8 @@ def _default_worker_runner(
     if agy_bin is not None:
         acp_err = ""
         try:
-            from desktop.acp_bridge import ask_agy
-
             rem = max(0.5, deadline - time.monotonic())
-            res = ask_agy(clean, transport="acp", timeout=rem, cancel_event=cancel_event)
+            res = agy_runtime.ask_agy(clean, transport="acp", timeout=rem, cancel_event=cancel_event)
             if res.get("ok") and str(res.get("reply") or "").strip():
                 return {"ok": True, "runner": "agy_acp", "text": str(res["reply"]).strip()}
             acp_err = str(res.get("error") or "agy_empty_reply")
@@ -220,9 +187,7 @@ def _default_worker_runner(
             return {"ok": False, "runner": "agy_acp", "text": "", "error": acp_err or "timeout"}
 
         try:
-            from desktop.acp_bridge import ask_agy
-
-            res_cli = ask_agy(
+            res_cli = agy_runtime.ask_agy(
                 clean,
                 transport="cli",
                 timeout=min(rem_after, 45.0),
@@ -344,7 +309,7 @@ def _extract_public_context(state: dict[str, Any] | None) -> str:
         lines.append(f"- 盘面基准时间：{gen_at}")
     rg = pub.get("risk_gate") or {}
     if isinstance(rg, dict) and rg.get("label"):
-        lbl = _scrub_forbidden(rg.get("label"))
+        lbl = scrub_markdown(rg.get("label"))
         if lbl and not _has_sensitive_dr_text(lbl):
             lines.append(f"- 宏观风控状态：{lbl}")
 
@@ -383,7 +348,7 @@ def _extract_public_context(state: dict[str, Any] | None) -> str:
             lines.append(seg)
 
     safe_lines = [ln for ln in lines if ln and not _has_sensitive_dr_text(ln)]
-    return _scrub_forbidden("\n".join(safe_lines)) or "（公开市场快照背景）"
+    return scrub_markdown("\n".join(safe_lines)) or "（公开市场快照背景）"
 
 
 def _build_parallel_tracks(clean_prompt: str, public_context: str, *, symbol: str = "") -> list[dict[str, str]]:
@@ -441,7 +406,7 @@ def _synthesize_fallback_markdown(
     gaps: list[str],
 ) -> str:
     """Deterministic fallback report assembling verified track findings and explicit gaps."""
-    resolved_title = _scrub_forbidden(title) or _scrub_forbidden(clean_prompt.splitlines()[0][:36])
+    resolved_title = scrub_markdown(title) or scrub_markdown(clean_prompt.splitlines()[0][:36])
     sec_lines = [
         f"# {resolved_title}",
         "",
@@ -453,13 +418,13 @@ def _synthesize_fallback_markdown(
     for idx, item in enumerate(completed, 1):
         sec_lines.append(f"### 1.{idx} {item['label']}")
         sec_lines.append("")
-        sec_lines.append(_scrub_forbidden(item["text"]))
+        sec_lines.append(scrub_markdown(item["text"]))
         sec_lines.append("")
     sec_lines.append("## 2. 待核实与分歧项")
     sec_lines.append("")
     if gaps:
         for g in gaps:
-            sec_lines.append(f"- {_scrub_forbidden(g)}")
+            sec_lines.append(f"- {scrub_markdown(g)}")
     else:
         sec_lines.append("- 三路子课题均已收回，重点核对报告中具体触发阈值与最新一手公告日期。")
     return "\n".join(sec_lines).strip()
@@ -671,9 +636,9 @@ def run_demolab_deep_research(
             gaps=gaps,
         )
     elif gaps and "待核实" not in synth_md and "分歧" not in synth_md:
-        synth_md = synth_md.rstrip() + "\n\n## 待核实与分歧项\n\n" + "\n".join(f"- {_scrub_forbidden(g)}" for g in gaps)
+        synth_md = synth_md.rstrip() + "\n\n## 待核实与分歧项\n\n" + "\n".join(f"- {scrub_markdown(g)}" for g in gaps)
 
-    clean_md = _scrub_forbidden(synth_md)
+    clean_md = scrub_markdown(synth_md)
     res_out: dict[str, Any] = {
         "executed": True,
         "status": "completed",
@@ -817,9 +782,9 @@ class DeepResearchJobManager:
             "job_id": job_id,
             "status": "queued",
             "stage_label": _STAGE_LABELS["queued"],
-            "title": _scrub_forbidden(clean_title) or _scrub_forbidden(clean_prompt.splitlines()[0][:40]),
+            "title": scrub_markdown(clean_title) or scrub_markdown(clean_prompt.splitlines()[0][:40]),
             "tickers": tickers if isinstance(tickers, list) else ([t.strip().upper() for t in str(tickers or "").split(",") if t.strip()] if tickers else []),
-            "related_period": _scrub_forbidden(related_period),
+            "related_period": scrub_markdown(related_period),
             "created_at": now_iso,
             "updated_at": now_iso,
             "tracks_total": 3,

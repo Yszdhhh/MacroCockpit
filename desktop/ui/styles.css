@@ -1,67 +1,5 @@
 /* MacroCockpit Pro 桌面专业研判台样式
-   严格复用 DESIGN.md 报刊纸感 × 精密交易台色板、字体与数字规范 */
-
-:root {
-  color-scheme: light;
-  --bg: #FAFAF9;
-  --surface: #FFFFFF;
-  --surface-2: #F4F3F0;
-  --paper-read: #FBFAF7;
-  --ink: #16140F;
-  --ink-2: #3A3733;
-  --sub: #6E675B;
-  --faint: #9A9284;
-  --rule: #E9E5DC;
-  --rule-strong: #D8D2C6;
-  --accent: #0E6E6E;
-  --accent-ink: #FFFFFF;
-  --accent-soft: rgba(14, 110, 110, 0.09);
-  --bull: #1F9D55;
-  --bull-soft: #E7F4EC;
-  --bear: #D6453D;
-  --bear-soft: #FBEAE8;
-  --warn: #B8873A;
-  --warn-soft: #FEF3C7;
-  --neutral: #6B6459;
-  --neutral-soft: #F0EEE9;
-
-  --serif: "Instrument Serif", "LXGW WenKai", "Source Serif 4", "Noto Serif SC", Georgia, "Songti SC", serif;
-  --sans: "DM Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif;
-  --mono: "JetBrains Mono", "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
-
-  --maxw: 1380px;
-  --radius: 10px;
-  --radius-sm: 7px;
-  --shadow-card: 0 1px 2px rgba(22, 20, 15, 0.04);
-  --mast-bg: rgba(250, 250, 249, 0.92);
-}
-
-[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #100F09;
-  --surface: #1A1915;
-  --surface-2: #22211B;
-  --paper-read: #171611;
-  --ink: #F5F4EF;
-  --ink-2: #DCDAD0;
-  --sub: #A39B8B;
-  --faint: #757268;
-  --rule: rgba(255, 255, 255, 0.09);
-  --rule-strong: rgba(255, 255, 255, 0.18);
-  --accent: #12CCD8;
-  --accent-ink: #071416;
-  --accent-soft: rgba(18, 204, 216, 0.12);
-  --bull: #34D399;
-  --bull-soft: rgba(52, 211, 153, 0.14);
-  --bear: #F87171;
-  --bear-soft: rgba(248, 113, 113, 0.14);
-  --warn: #FBBF24;
-  --warn-soft: rgba(251, 191, 36, 0.14);
-  --neutral: #A8A59B;
-  --neutral-soft: rgba(168, 165, 155, 0.14);
-  --shadow-card: none;
-  --mast-bg: rgba(16, 15, 9, 0.90);
-}
+   共享令牌位于 web/tokens.css（此处仅保留桌面端布局与组件样式） */
 
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -84,11 +22,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .num-plain { font-variant-numeric: tabular-nums; }
 .num-cell { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 
 input, select, textarea, button { font: inherit; color: inherit; }
-input[type="text"], input[type="search"], select, textarea {
+input[type="text"], input[type="search"], input[type="number"], select, textarea {
   padding: 7px 11px;
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius-sm);
@@ -97,6 +37,7 @@ input[type="text"], input[type="search"], select, textarea {
 }
 input[type="number"] {
   text-align: right;
+  font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   -moz-appearance: textfield;
   appearance: textfield;
@@ -294,7 +235,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .seg-btn[aria-pressed="true"] {
   background: var(--surface);
   color: var(--ink);
-  box-shadow: 0 1px 2px rgba(22, 20, 15, 0.12);
+  box-shadow: var(--shadow-control);
 }
 
 .badge {
@@ -588,6 +529,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   font-variant-numeric: tabular-nums;
   font-size: 20px;
   font-weight: 700;
+  text-align: right;
 }
 .sync-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 
@@ -606,8 +548,8 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   font-weight: 600;
   max-width: min(420px, calc(100vw - 32px));
 }
-.toast.is-error { background: var(--bear); border-color: var(--bear); color: #fff; }
-.toast.is-ok { background: var(--bull); border-color: var(--bull); color: #fff; }
+.toast.is-error { background: var(--bear); border-color: var(--bear); color: var(--on-bear); }
+.toast.is-ok { background: var(--bull); border-color: var(--bull); color: var(--on-bull); }
 
 @media (max-width: 1040px) {
   .debate-layout { grid-template-columns: minmax(0, 1fr); }

@@ -6,41 +6,34 @@ import json
 import os
 import re
 import threading
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from backend.guardrails import has_private_debate_text
+from backend.valuation import bucket_leverage
+from backend.runtime import (
+    COCKPIT_ROOT,
+    DATA_DIR,
+    now_bjt_iso as _now_iso,
+    read_json_safe as _read_json,
+    resolve_data_dir,
+    resolve_user_home,
+)
 
 try:
     import requests
 except ImportError:
     requests = None  # type: ignore[assignment]
 
-from backend.public_snapshot import has_private_debate_text
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-DATA_DIR = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (COCKPIT_ROOT / "data"))
 STATE_PATH = DATA_DIR / "cockpit_state.json"
 DEBATES_PATH = DATA_DIR / "desktop_debates.json"
 
 OPENBB_API_BASE = os.environ.get("OPENBB_API_URL", "http://127.0.0.1:6900/api/v1").rstrip("/")
-OPENBB_SETTINGS_PATH = Path.home() / ".openbb_platform" / "user_settings.json"
+OPENBB_SETTINGS_PATH = resolve_user_home() / ".openbb_platform" / "user_settings.json"
 
-_BJT = timezone(timedelta(hours=8))
 _SDK_LOCK = threading.Lock()
 _OBB_INSTANCE: Any = None
-
-
-def _now_iso() -> str:
-    return datetime.now(_BJT).isoformat(timespec="seconds")
-
-
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
 
 
 def _configured_credential_names() -> list[str]:
@@ -451,24 +444,6 @@ def _band_pct_10(value: Any) -> str:
     return f"-({band})" if (neg and mag > 0) else band
 
 
-def _band_leverage(value: Any) -> str:
-    if value is None or str(value).strip() == "":
-        return "无法估算"
-    try:
-        val = abs(float(value))
-    except (TypeError, ValueError):
-        return "无法估算"
-    if val < 0.5:
-        return "0x-0.5x"
-    if val < 1.0:
-        return "0.5x-1x"
-    if val < 2.0:
-        return "1x-2x"
-    if val < 3.0:
-        return "2x-3x"
-    return ">=3x"
-
-
 def get_obb_widget_data(
     widget_name: str,
     params: dict[str, str] | None = None,
@@ -478,7 +453,7 @@ def get_obb_widget_data(
 ) -> Any:
     """Return strictly sanitized widget data for /obb/* routes (never exposes private amounts)."""
     root = Path(base_dir) if base_dir else COCKPIT_ROOT
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     state = _read_json(data_dir / "cockpit_state.json", {}) or {}
     q = params or {}
 
@@ -551,7 +526,7 @@ def get_obb_widget_data(
         rows.append(
             {
                 "metric": "有效杠杆区间",
-                "band": _band_leverage(summary.get("effective_leverage")),
+                "band": bucket_leverage(summary.get("effective_leverage")),
                 "detail": "多空名义和 / 净值",
             }
         )

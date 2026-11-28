@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import hmac
-import inspect
 import json
+import logging
 import mimetypes
 import os
-import re
 import secrets
 import socket
 import sys
@@ -22,8 +20,19 @@ _REPO_ROOT = _DESKTOP_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from backend.http_security import (
+    LOOPBACK_HOSTS,
+    ROLE_PORTFOLIO_RW,
+    const_eq,
+    is_loopback_client_ip,
+    is_loopback_host_header,
+    is_loopback_origin,
+    openbb_cors_origin,
+)
+from backend.runtime import COCKPIT_ROOT, resolve_data_dir
 from backend.portfolio_store import PortfolioStore
 from desktop.acp_bridge import ask_agy, probe_agy
+from desktop.mcp_extensions import build_desktop_mcp_handlers
 from desktop.multi_agent_debate import get_debate, list_debates, run_multi_agent_debate
 from desktop.openbb_bridge import (
     build_openbb_apps_manifest,
@@ -33,45 +42,9 @@ from desktop.openbb_bridge import (
     query_openbb,
 )
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or _REPO_ROOT)
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+logger = logging.getLogger(__name__)
+
 MAX_JSON_BYTES = 2_000_000
-
-
-def _const_eq(a: str, b: str) -> bool:
-    return hmac.compare_digest(str(a or "").encode("utf-8"), str(b or "").encode("utf-8"))
-
-
-def _is_loopback_host_header(host_header: str) -> bool:
-    return bool(re.fullmatch(r"(?:127\.0\.0\.1|localhost|\[::1\])(?::[0-9]{1,5})?", host_header, re.IGNORECASE))
-
-
-def _openbb_cors_origin(origin_header: str) -> str | None:
-    raw = str(origin_header or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(raw)
-    except ValueError:
-        return None
-    scheme = (parsed.scheme or "").lower()
-    host = (parsed.hostname or "").lower()
-    if scheme == "https" and host == "pro.openbb.co":
-        return f"{scheme}://{parsed.netloc}"
-    if scheme in ("http", "https") and host in LOOPBACK_HOSTS:
-        return f"{scheme}://{parsed.netloc}"
-    return None
-
-
-def _is_loopback_origin(origin_header: str) -> bool:
-    raw = str(origin_header or "").strip()
-    if not raw:
-        return True
-    try:
-        parsed = urllib.parse.urlparse(raw)
-    except ValueError:
-        return False
-    return (parsed.scheme or "").lower() in ("http", "https") and (parsed.hostname or "").lower() in LOOPBACK_HOSTS
 
 
 class DesktopProHandler(BaseHTTPRequestHandler):
@@ -135,17 +108,17 @@ class DesktopProHandler(BaseHTTPRequestHandler):
 
     def _check_loopback_request(self) -> bool:
         hosts = self.headers.get_all("Host", [])
-        if len(hosts) != 1 or not _is_loopback_host_header(hosts[0]):
+        if len(hosts) != 1 or not is_loopback_host_header(hosts[0]):
             self._send_json(403, {"error": "forbidden Host header"})
             return False
-        if self.client_address[0] not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        if not is_loopback_client_ip(self.client_address[0]):
             self._send_json(403, {"error": "forbidden TCP peer"})
             return False
         return True
 
     def _check_desktop_token(self) -> bool:
         origin_hdr = self.headers.get("Origin") or ""
-        if origin_hdr and not _is_loopback_origin(origin_hdr):
+        if origin_hdr and not is_loopback_origin(origin_hdr):
             self._send_json(403, {"error": "forbidden cross-origin request"})
             return False
 
@@ -154,7 +127,7 @@ class DesktopProHandler(BaseHTTPRequestHandler):
             auth = (self.headers.get("Authorization") or "").strip()
             if auth.startswith("Bearer "):
                 tok = auth[7:].strip()
-        if not _const_eq(tok, self.server.desktop_token):  # type: ignore[attr-defined]
+        if not const_eq(tok, self.server.desktop_token):  # type: ignore[attr-defined]
             self._send_json(401, {"error": "invalid or missing desktop token"})
             return False
         return True
@@ -163,7 +136,7 @@ class DesktopProHandler(BaseHTTPRequestHandler):
         origin_hdr = self.headers.get("Origin") or ""
         if not origin_hdr:
             return (True, {})
-        allowed = _openbb_cors_origin(origin_hdr)
+        allowed = openbb_cors_origin(origin_hdr)
         if allowed is None:
             return (False, {})
         return (
@@ -195,6 +168,14 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                 self.server.desktop_token,  # type: ignore[attr-defined]
             )
             self._send_bytes(200, html_txt.encode("utf-8"), "text/html; charset=utf-8")
+            return
+
+        if clean == "tokens.css":
+            tokens_file = (_REPO_ROOT / "web" / "tokens.css").resolve()
+            if not tokens_file.is_file():
+                self._send_json(404, {"error": "not found"})
+                return
+            self._send_bytes(200, tokens_file.read_bytes(), "text/css; charset=utf-8")
             return
 
         target = (ui_root / clean).resolve()
@@ -287,6 +268,7 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                     try:
                         state = json.loads(state_path.read_text(encoding="utf-8"))
                     except Exception:
+                        logger.warning("Desktop overview state read failed", exc_info=True)
                         state = {}
                 debates = list_debates(base_dir)
                 obb = probe_openbb_status()
@@ -299,6 +281,7 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                     base_defs = getattr(mcp_server, "TOOL_DEFINITIONS", [])
                     tool_names = [str(t.get("name")) for t in list(base_defs) + list(tools_def or []) if isinstance(t, dict)]
                 except Exception:
+                    logger.warning("Desktop overview MCP tool lookup failed", exc_info=True)
                     tool_names = []
 
                 public_url = os.environ.get("MACROCOCKPIT_PUBLIC_URL", "https://news.shuashuabao.xyz")
@@ -325,6 +308,7 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                             if s not in quick_syms:
                                 quick_syms.append(s)
                 except Exception:
+                    logger.warning("Desktop overview workspace lookup failed", exc_info=True)
                     quick_syms = []
 
                 self._send_json(
@@ -362,6 +346,9 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                     self._send_json(200, res)
                 except ValueError as exc:
                     self._send_json(400, {"error": str(exc)})
+                except Exception:
+                    logger.warning("Desktop OpenBB query failed", exc_info=True)
+                    self._send_json(500, {"ok": False, "error": "internal_server_error"})
                 return
 
             if path == "/api/desktop/debates":
@@ -396,21 +383,25 @@ class DesktopProHandler(BaseHTTPRequestHandler):
             try:
                 from backend import mcp_server
 
-                sig = inspect.signature(mcp_server.create_mcp_dispatcher)
-                kwargs: dict[str, Any] = {
-                    "store": self.server.store,  # type: ignore[attr-defined]
-                    "base_dir": self.server.base_dir,  # type: ignore[attr-defined]
-                    "public_url": os.environ.get("MACROCOCKPIT_PUBLIC_URL", "https://news.shuashuabao.xyz"),
-                }
-                if "desktop_pro" in sig.parameters:
-                    kwargs["desktop_pro"] = True
-                dispatcher = mcp_server.create_mcp_dispatcher(**kwargs)
-                status, resp_obj = dispatcher.dispatch_jsonrpc(payload, role="PORTFOLIO_RW", actor_id="desktop:pro")
+                version = (self.headers.get("MCP-Protocol-Version") or "").strip()
+                headers = {"MCP-Protocol-Version": mcp_server.MCP_PROTOCOL_VERSION}
+                if version and version not in mcp_server.SUPPORTED_MCP_VERSIONS:
+                    self._send_json(400, {"error": f"Unsupported MCP-Protocol-Version: {version}"}, headers)
+                    return
+                dispatcher = mcp_server.create_mcp_dispatcher(
+                    store=self.server.store,  # type: ignore[attr-defined]
+                    base_dir=self.server.base_dir,  # type: ignore[attr-defined]
+                    public_url=os.environ.get("MACROCOCKPIT_PUBLIC_URL", "https://news.shuashuabao.xyz"),
+                    desktop_pro=True,
+                    desktop_handlers=build_desktop_mcp_handlers(self.server.base_dir),  # type: ignore[attr-defined]
+                )
+                status, resp_obj = dispatcher.dispatch_jsonrpc(payload, role=ROLE_PORTFOLIO_RW, actor_id="desktop:pro")
                 if status == 202 or resp_obj is None:
-                    self._send_bytes(202, b"", "application/json; charset=utf-8", {"MCP-Protocol-Version": getattr(mcp_server, "MCP_PROTOCOL_VERSION", "2025-11-25")})
+                    self._send_bytes(202, b"", "application/json; charset=utf-8", headers)
                 else:
-                    self._send_json(status, resp_obj, {"MCP-Protocol-Version": getattr(mcp_server, "MCP_PROTOCOL_VERSION", "2025-11-25")})
+                    self._send_json(status, resp_obj, headers)
             except Exception as exc:
+                logger.warning("Desktop MCP request failed", exc_info=True)
                 self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
             return
 
@@ -442,6 +433,9 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "debate": doc})
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
+            except Exception:
+                logger.warning("Desktop debate failed", exc_info=True)
+                self._send_json(500, {"ok": False, "error": "internal_server_error"})
             return
 
         if path == "/api/desktop/agy/ask":
@@ -478,6 +472,7 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                 ok, detail = vps_sync.publish_via_http(payload)
                 self._send_json(200 if ok else 502, {"ok": ok, "stats": stats, **detail})
             except Exception as exc:
+                logger.warning("Desktop sync failed", exc_info=True)
                 self._send_json(500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
             return
 
@@ -507,8 +502,9 @@ def create_desktop_server(
     if not tok:
         tok = secrets.token_urlsafe(32)
 
-    resolved_state = Path(state_path) if state_path else (root / "data" / "cockpit_state.json")
-    resolved_db = Path(db_path) if db_path else (root / "data" / "user_journal.db")
+    data_dir = resolve_data_dir(root)
+    resolved_state = Path(state_path) if state_path else (data_dir / "cockpit_state.json")
+    resolved_db = Path(db_path) if db_path else (data_dir / "user_journal.db")
     resolved_ui = Path(ui_dir) if ui_dir else (root / "desktop" / "ui")
 
     server_cls = _IPv6ThreadingHTTPServer if host == "::1" else ThreadingHTTPServer

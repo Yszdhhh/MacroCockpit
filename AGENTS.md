@@ -67,3 +67,15 @@
 - **运行单元测试**（避开系统临时目录权限锁）：`python -m pytest tests/ --basetemp=.pytest_tmp -v`
 - **检查前端 JS 语法**：`node --check web/app.js`
 - **查询归档历史记忆**（严格只读离线库）：`python "%USERPROFILE%\.gemini\config\plugins\linus-ops-kit\skills\hermes-history-search\scripts\search_history.py" "<关键词>"`
+
+---
+
+## 6. 核心基座单一真相源与架构门禁（已核实）
+
+- **L0 零内部依赖底座**：
+  - [`backend/runtime.py`](backend/runtime.py)：统一提供 `UTC`/`BJT` 时区、路径解析（`resolve_cockpit_root`、`resolve_data_dir`、`resolve_user_home`、`resolve_kol_dir`）、可重入文件锁 `file_lock` 与原子写盘 `atomic_write_json`/`atomic_write_text`。
+  - [`backend/guardrails.py`](backend/guardrails.py)：`FORBIDDEN_TERMS` 清洗（`scrub_forbidden`、`scrub_quant_thesis`）、隐私文章/正则拦截及 SSRF 安全抓取 `safe_fetch_public_url` 的唯一权威来源。
+  - [`backend/http_security.py`](backend/http_security.py)：统一 `const_eq`、五角色/Bearer 解析 `resolve_bearer_auth`、回环/Origin/CORS 校验及有界 gzip 解压 `decompress_gzip_bounded`。
+- **双端共用设计令牌**：[`web/tokens.css`](web/tokens.css) 为 Web 与 Desktop Pro 唯一的亮/暗主题令牌定义（离线静态包由 `backend.server.build_static_bundle()` 自动内联，桌面端由 `desktop/pro_server.py` `/tokens.css` 路由直出）。
+- **自动化防回归门禁**：[`tests/test_architecture_governance.py`](tests/test_architecture_governance.py) 与 [`.github/workflows/ci_governance.yml`](.github/workflows/ci_governance.yml) 强制校验：全仓 0 循环依赖、0 `backend -> desktop` 静态导入、0 生产跨模块私有 `_foo` 导入、SSOT 唯一归属、UI 零违禁词、Ruff `F821,F401,F811,F541` 清零及全部 10 个 CLI `--help` 烟雾通过。
+- **架构治理命令**：`python -m pytest tests/test_architecture_governance.py --basetemp=.pytest_tmp -v`

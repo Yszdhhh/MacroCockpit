@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_BJT = timezone(timedelta(hours=8))
+from backend.runtime import BJT as _BJT, require_finite_float as _finite_float
+
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _LATEST_SCHEMA_VERSION = 3
 
@@ -45,15 +45,6 @@ class RevisionConflictError(Exception):
         self.actual_rev = actual_rev
         self.entity = entity
         self.entity_id = entity_id
-
-
-def _finite_float(value: Any, default: float = 0.0) -> float:
-    if isinstance(value, bool):
-        raise ValueError("number cannot be boolean")
-    num = float(default if value in (None, "") else value)
-    if not math.isfinite(num):
-        raise ValueError("number must be finite")
-    return num
 
 
 def _split_sql_statements(sql_text: str) -> list[str]:
@@ -232,9 +223,6 @@ class JournalStore:
                     seeded_rows = True
             db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)", ("seeded_v1", "1"))
             return seeded_rows
-
-    def _seed(self, state: dict[str, Any] | None) -> bool:
-        return self.seed_if_empty(state)
 
     @staticmethod
     def _row(row: sqlite3.Row, json_fields: tuple[str, ...] = ()) -> dict[str, Any]:

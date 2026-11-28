@@ -10,32 +10,26 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from backend.mobile_push import COCKPIT_ROOT, load_push_env
-from backend.public_snapshot import (
-    has_private_article_content,
-    private_article_filenames,
-    project_public_state,
-    safe_article_filename,
-)
-from backend.signal_aggregator import get_allowed_article_dirs, parse_markdown_article, read_article_markdown
+from backend.guardrails import has_private_article_content, private_article_filenames, safe_article_filename
+from backend.runtime import BJT as _BJT, DATA_DIR, file_lock, resolve_data_dir
+from backend.mobile_push import load_push_env
+from backend.public_snapshot import project_public_state
+from backend.article_store import get_allowed_article_dirs, parse_markdown_article, read_article_markdown
 
-STATE_PATH = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or COCKPIT_ROOT / "data") / "cockpit_state.json"
-DEFAULT_JOURNAL_DB_PATH = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or COCKPIT_ROOT / "data") / "user_journal.db"
+STATE_PATH = DATA_DIR / "cockpit_state.json"
+DEFAULT_JOURNAL_DB_PATH = DATA_DIR / "user_journal.db"
 MAX_ARTICLE_BYTES = 256 * 1024
-_BJT = timezone(timedelta(hours=8))
 _MANAGED_SETTING_KEYS: tuple[str, ...] = ("watchlist", "currency", "default_account_id", "alert_prefs")
 
 
-def _safe_article_name(value: Any) -> str | None:
-    """Preserve strict basename-only markdown article validation."""
-    return safe_article_filename(value)
+_safe_article_name = safe_article_filename
 
 
 def collect_payload(
@@ -50,11 +44,11 @@ def collect_payload(
     blocked = private_article_filenames(raw_state.get("articles") or [])
     names: list[str] = []
     for article in raw_state.get("articles") or []:
-        name = _safe_article_name(article.get("filename")) if isinstance(article, dict) else None
+        name = safe_article_filename(article.get("filename")) if isinstance(article, dict) else None
         if name and name not in names:
             names.append(name)
     for kol in raw_state.get("kol_digest") or []:
-        name = _safe_article_name(kol.get("article_file")) if isinstance(kol, dict) else None
+        name = safe_article_filename(kol.get("article_file")) if isinstance(kol, dict) else None
         if name and name not in names:
             names.append(name)
 
@@ -63,7 +57,7 @@ def collect_payload(
         name
         for article in raw_state.get("articles") or []
         if isinstance(article, dict) and article.get("source") == "本地知识库"
-        and (name := _safe_article_name(article.get("filename")))
+        and (name := safe_article_filename(article.get("filename")))
     }
     allowed_dirs = [(state_path.parent.parent / "articles", "同步深度长文"), *get_allowed_article_dirs()]
     refreshed_inbox = {}
@@ -93,7 +87,7 @@ def collect_payload(
 
     if refreshed_inbox:
         raw_state["articles"] = [
-            refreshed_inbox.get(_safe_article_name(article.get("filename")), article)
+            refreshed_inbox.get(safe_article_filename(article.get("filename")), article)
             if isinstance(article, dict) else article
             for article in raw_state.get("articles") or []
         ]
@@ -654,8 +648,6 @@ def _read_sync_checkpoint(state_file: Path, base_url: str) -> dict[str, Any] | N
 
 
 def _write_sync_checkpoint(state_file: Path, base_url: str, entry: dict[str, Any]) -> None:
-    from backend.public_snapshot import file_lock
-
     state_file.parent.mkdir(parents=True, exist_ok=True)
     with file_lock(state_file):
         raw: dict[str, Any] = {}
@@ -994,7 +986,7 @@ def _public_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "state": pub_state,
         "articles": [
             a for a in articles if not has_private_article_content(a)
-            and (not isinstance(a, dict) or _safe_article_name(a.get("filename")) not in blocked)
+            and (not isinstance(a, dict) or safe_article_filename(a.get("filename")) not in blocked)
         ],
     }
 
@@ -1098,7 +1090,7 @@ def main() -> None:
 
     if not args.dry_run:
         load_push_env(include_sync_token=True, include_rw_token=bool(args.sync_portfolio))
-    data_dir = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or COCKPIT_ROOT / "data")
+    data_dir = resolve_data_dir()
     state_path = data_dir / "cockpit_state.json"
     journal_db = args.journal_db or (data_dir / "user_journal.db")
     if args.refresh_state:

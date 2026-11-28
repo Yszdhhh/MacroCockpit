@@ -4,11 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
 import sys
 from bisect import bisect_left
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -16,26 +16,27 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, FRED_CACHE_PATH, atomic_write_json
-from backend.public_snapshot import has_private_article_content, safe_article_filename
-
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
-
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
-
-
-_USER_HOME = _safe_home(COCKPIT_ROOT)
-_HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (_USER_HOME / "AppData" / "Local" / "hermes"))
-
-DEFAULT_KOL_DIR = Path(
-    os.environ.get("MACROCOCKPIT_KOL_DIR")
-    or (_HERMES_HOME / "scripts" / "news" / "x-kol-notes")
+from backend.guardrails import (
+    FORBIDDEN_TERMS as FORBIDDEN_TERMS,
+    has_private_article_content,
+    safe_article_filename,
+    sanitize_public_value,
+    scrub_forbidden,
 )
+from backend.runtime import (
+    BJT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json,
+    read_json_safe as _read_json,
+    resolve_kol_dir,
+)
+from backend.fred_and_market import FRED_CACHE_PATH
+from backend.signal_text import AI_TOKEN_CONTEXT_RE, CRYPTO_EXPLICIT_RE, classify_kol_topic, extract_tickers as _extract_tickers
+
+extract_tickers = partial(_extract_tickers, source="kol")
+
+DEFAULT_KOL_DIR = resolve_kol_dir()
 DEFAULT_STOCK_PROFILES_CACHE_PATH = DATA_DIR / "stock_profiles_cache.json"
 DEFAULT_FRED_CACHE_PATH = FRED_CACHE_PATH
 DEFAULT_SCORECARD_CACHE_PATH = DATA_DIR / "kol_scorecard_cache.json"
@@ -44,36 +45,6 @@ MIN_VERIFIED_SAMPLE = 5
 CONSOLIDATION_DAYS = 5
 LOOKAHEAD_DAYS_5 = 5
 LOOKAHEAD_DAYS_20 = 20
-
-FORBIDDEN_TERMS: tuple[str, ...] = (
-    "Sleeve",
-    "E21",
-    "E32",
-    "E33",
-    "Tier-1",
-    "Regime",
-    "arbitration",
-    "测算口径",
-    "公式解释",
-    "公式说明",
-    "逻辑解释",
-    "联动说明",
-    "方法论说明",
-    "待补",
-    "待刷新",
-    "N/A",
-)
-
-_FORBIDDEN_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?<![A-Za-z0-9])E(?:21|32|33)(?![A-Za-z0-9])", re.IGNORECASE), "波动结构"),
-    (re.compile(r"(?<![A-Za-z0-9])Tier-?[1SA](?![A-Za-z0-9])", re.IGNORECASE), "核心"),
-    (re.compile(r"(?<![A-Za-z0-9])Sleeves?(?![A-Za-z0-9])", re.IGNORECASE), "仓位"),
-    (re.compile(r"(?<![A-Za-z0-9])Regimes?(?![A-Za-z0-9])", re.IGNORECASE), "市场阶段"),
-    (re.compile(r"(?<![A-Za-z0-9])arbitration(?![A-Za-z0-9])", re.IGNORECASE), "风险平衡"),
-    (re.compile(r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明"), "参考摘要"),
-    (re.compile(r"待补充|待补|待刷新"), "—"),
-    (re.compile(r"N/A", re.IGNORECASE), "—"),
-)
 
 # Pure news wires / spam accounts to exclude from KOL evaluation & article digests
 MEDIA_WIRE_HANDLES: frozenset[str] = frozenset(
@@ -121,40 +92,6 @@ OFFICIAL_AI_RESEARCH_HANDLES: frozenset[str] = frozenset(
         "demishassabis",
         "ylecun",
     }
-)
-
-# Case-sensitive bare ticker patterns (avoid matching English words like "arm" or "mu")
-# plus case-insensitive company / asset names.
-_TICKER_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\$NVDA\b|(?<![A-Z0-9$])NVDA(?![A-Z0-9])|(?i:\bNvidia\b|英伟达|黄仁勋|Blackwell|Rubin|CUDA)"), "NVDA"),
-    (re.compile(r"\$AAPL\b|(?<![A-Z0-9$])AAPL(?![A-Z0-9])|(?i:\bApple\b|苹果|iPhone|iPad|MacBook)"), "AAPL"),
-    (re.compile(r"\$MSFT\b|(?<![A-Z0-9$])MSFT(?![A-Z0-9])|(?i:\bMicrosoft\b|微软|Azure)"), "MSFT"),
-    (re.compile(r"\$GOOGL?\b|(?<![A-Z0-9$])GOOGL?(?![A-Z0-9])|(?i:\bAlphabet\b|\bGoogle\b|谷歌|DeepMind|Gemini)"), "GOOG"),
-    (re.compile(r"\$META\b|(?<![A-Z0-9$])META(?![A-Z0-9])|(?i:\bMeta\s+Platforms\b|\bLlama\s*[34]|\bZuckerberg\b|扎克伯格)"), "META"),
-    (re.compile(r"\$AMZN\b|(?<![A-Z0-9$])AMZN(?![A-Z0-9])|(?i:\bAmazon\b|\bAWS\b|亚马逊)"), "AMZN"),
-    (re.compile(r"\$AVGO\b|(?<![A-Z0-9$])AVGO(?![A-Z0-9])|(?i:\bBroadcom\b|博通)"), "AVGO"),
-    (re.compile(r"\$TSLA\b|(?<![A-Z0-9$])TSLA(?![A-Z0-9])|(?i:\bTesla\b|特斯拉|\bFSD\b|\bRobotaxi\b)"), "TSLA"),
-    (re.compile(r"\$AMD\b|(?<![A-Z0-9$])AMD(?![A-Z0-9])|(?i:超威半导体|苏姿丰)"), "AMD"),
-    (re.compile(r"\$TSMC?\b|(?<![A-Z0-9$])TSMC?(?![A-Z0-9])|(?i:台积电|\bCoWoS\b)"), "TSM"),
-    (re.compile(r"\$INTC\b|(?<![A-Z0-9$])INTC(?![A-Z0-9])|(?i:\bIntel\b|英特尔)"), "INTC"),
-    (re.compile(r"\$QCOM\b|(?<![A-Z0-9$])QCOM(?![A-Z0-9])|(?i:\bQualcomm\b|高通)"), "QCOM"),
-    (re.compile(r"\$MU\b|(?<![A-Z0-9$])MU(?![A-Z0-9])|(?i:\bMicron\b|美光|\bHBM[34]?\b|\bDRAM\b|\bNAND\b)"), "MU"),
-    (re.compile(r"\$NFLX\b|(?<![A-Z0-9$])NFLX(?![A-Z0-9])|(?i:\bNetflix\b|奈飞)"), "NFLX"),
-    (re.compile(r"\$ARM\b|(?<![A-Z0-9$])ARM(?![A-Z0-9])|(?i:\bArm\s+Holdings\b)"), "ARM"),
-    (re.compile(r"\$PLTR\b|(?<![A-Z0-9$])PLTR(?![A-Z0-9])|(?i:\bPalantir\b)"), "PLTR"),
-    (re.compile(r"\$ORCL\b|(?<![A-Z0-9$])ORCL(?![A-Z0-9])|(?i:\bOracle\b|甲骨文)"), "ORCL"),
-    (re.compile(r"\$SMCI\b|(?<![A-Z0-9$])SMCI(?![A-Z0-9])|(?i:\bSuper\s*Micro\b|超微电脑)"), "SMCI"),
-    (re.compile(r"\$COIN\b|(?<![A-Z0-9$])COIN(?![A-Z0-9])|(?i:\bCoinbase\b)"), "COIN"),
-    (re.compile(r"\$MSTR\b|(?<![A-Z0-9$])MSTR(?![A-Z0-9])|(?i:\bMicroStrategy\b|\bStrategy\s+Inc\b)"), "MSTR"),
-    (re.compile(r"\$BABA\b|(?<![A-Z0-9$])BABA(?![A-Z0-9])|(?i:\bAlibaba\b|阿里巴巴|阿里)"), "BABA"),
-    (re.compile(r"\$BTC\b|(?<![A-Z0-9$])BTC(?![A-Z0-9])|(?i:\bBitcoin\b|比特币)"), "BTC"),
-    (re.compile(r"\$ETH\b|(?<![A-Z0-9$])ETH(?![A-Z0-9])|(?i:\bEthereum\b|以太坊)"), "ETH"),
-    (re.compile(r"\$SOL\b|(?<![A-Z0-9$])SOL(?![A-Z0-9])|(?i:\bSolana\b)"), "SOL"),
-    (re.compile(r"\$SPY\b|\$SPX\b|(?<![A-Z0-9$])(?:SPY|SPX|SP500)(?![A-Z0-9])|(?i:S&P\s*500|标普\s*500|标普)"), "SP500"),
-    (re.compile(r"\$QQQ\b|\$NDX\b|(?<![A-Z0-9$])(?:QQQ|NDX)(?![A-Z0-9])|(?i:\bNasdaq\b|纳斯达克|纳指)"), "QQQ"),
-    (re.compile(r"\$GLD\b|\$XAU\b|(?<![A-Z0-9$])(?:GLD|XAU|XAUUSD)(?![A-Z0-9])|(?i:黄金|金价|\bgold\s+(?:price|rally|bull|bear|etf|futures|reserve|miners?))"), "GOLD"),
-    (re.compile(r"\$WTI\b|\$USO\b|(?<![A-Z0-9$])WTI(?![A-Z0-9])|(?i:\bBrent\b|\bcrude\s+oil\b|原油|油价)"), "WTI"),
-    (re.compile(r"\$DXY\b|(?<![A-Z0-9$])DXY(?![A-Z0-9])|(?i:\bdollar\s+index\b|美元指数|美元流动性)"), "DOLLAR"),
 )
 
 # Backtest symbol mapping (to real price series keys)
@@ -209,14 +146,6 @@ _FINANCE_ENTITY_RE = re.compile(
     r"芯片|存储|链上|巨鲸|鲸鱼|交易所|稳定币|比特币|以太坊|加密货币|黄金|原油|美元|汇率|股市|股票|股价|市场|宏观|经济|关税)"
 )
 
-_AI_TOKEN_CONTEXT_RE = re.compile(
-    r"(?i)\b(?:llm|llms|model|models|context|claude|gpt|gemini|inference|anthropic|openai|"
-    r"prompt|embedding|attention|transformer|weights|neuron|interpretability|sandbox|agent|agents)\b"
-)
-_CRYPTO_EXPLICIT_RE = re.compile(
-    r"(?i)\b(?:bitcoin|btc|eth|ethereum|sol|solana|crypto|cryptocurrency|stablecoin|usdc|usdt|"
-    r"on-?chain|defi|perp|airdrop|memecoin|altcoin|halving)\b|比特币|以太坊|稳定币|链上|巨鲸|加密"
-)
 _OPTIONS_EXPLICIT_RE = re.compile(
     r"(?i)\b(?:options?|option\s+(?:calls?|puts?)|(?:calls?|puts?)\s+(?:sweep|sweeps|flow|volume|oi|open\s+interest)|"
     r"(?:call|put)\s+option|call/put|put/call|gamma|dark\s+pool|strike\s+price)\b|期权|看涨期权|看跌期权"
@@ -272,66 +201,15 @@ _TRANSLATION_TOPICS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(?:sp500|nasdaq|qqq|spy|correction|breadth|drawdown)\b|s&p\s*500|回调|市场宽度|均线"), "美股指数与市场宽度"),
     (_OPTIONS_EXPLICIT_RE, "期权资金流与波动"),
     (re.compile(r"(?i)\b(?:whale|on-?chain|inflow|outflow)\b|鲸鱼|链上|交易所|转入|转出"), "链上巨鲸与筹码流向"),
-    (_CRYPTO_EXPLICIT_RE, "加密资金面与周期"),
+    (CRYPTO_EXPLICIT_RE, "加密资金面与周期"),
     (re.compile(r"(?i)\b(?:gold|silver|oil|wti|brent|commodity)\b|黄金|原油|大宗"), "大宗商品与避险资产"),
     (re.compile(r"(?i)\b(?:tariff|sanction|geopolit\w*)\b|export\s+control|关税|制裁|出口管制|地缘"), "地缘政策与贸易冲击"),
     (re.compile(r"(?i)\b(?:valuation|multiple|bubble|overvalued|undervalued)\b|估值|泡沫|低估"), "估值性价比与风险溢价"),
 )
 
 
-def scrub_forbidden(text: str) -> str:
-    """Replace forbidden terms with plain Chinese business wording."""
-    s = str(text or "")
-    for rx, rep in _FORBIDDEN_REPLACEMENTS:
-        s = rx.sub(rep, s)
-    return re.sub(r"[ \t]{2,}", " ", s).strip()
-
-
 def sanitize_output(obj: Any) -> Any:
-    """Recursively scrub forbidden terms across nested dicts/lists."""
-    if isinstance(obj, str):
-        return scrub_forbidden(obj)
-    if isinstance(obj, list):
-        return [sanitize_output(x) for x in obj]
-    if isinstance(obj, tuple):
-        return [sanitize_output(x) for x in obj]
-    if isinstance(obj, dict):
-        return {scrub_forbidden(str(k)): sanitize_output(v) for k, v in obj.items()}
-    return obj
-
-
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-
-def extract_tickers(text: str) -> list[str]:
-    """Extract canonical US/crypto/macro tickers from mixed English & Chinese copy."""
-    if not text:
-        return []
-    alias_norm = {
-        "GOOGL": "GOOG",
-        "TSMC": "TSM",
-        "SPY": "SP500",
-        "SPX": "SP500",
-        "GLD": "GOLD",
-        "XAU": "GOLD",
-        "DXY": "DOLLAR",
-        "USO": "WTI",
-    }
-    out: list[str] = []
-    for m in re.findall(r"\$([A-Z]{2,5})\b", text):
-        sym = alias_norm.get(m, m)
-        if sym not in out:
-            out.append(sym)
-    for rx, sym in _TICKER_RULES:
-        if rx.search(text) and sym not in out:
-            out.append(sym)
-    return out[:6]
+    return sanitize_public_value(obj, scrub_keys=True, skip_keys=frozenset())
 
 
 def _is_media_wire(handle: str, acct_info: dict[str, Any] | None = None, *, allow_official_ai: bool = False) -> bool:
@@ -940,7 +818,7 @@ def distill_chinese_view(
 
         # Topic summary in plain Chinese without template fluff
         topic_phrase = _distill_zh_topic_phrase(raw_clean, category)
-        if _AI_TOKEN_CONTEXT_RE.search(raw_clean) and not _CRYPTO_EXPLICIT_RE.search(raw_clean):
+        if AI_TOKEN_CONTEXT_RE.search(raw_clean) and not CRYPTO_EXPLICIT_RE.search(raw_clean):
             topic_phrase = "AI模型架构与安全研究"
         num_hint = _extract_key_numbers_snippet(raw_clean)
         quote_excerpt = raw_clean[:160].rstrip() + ("..." if len(raw_clean) > 160 else "")
@@ -1042,21 +920,6 @@ def _scan_corpus(
         "stats": stats,
     }
     return (acct_map, tweets_by_handle, article_counts, meta_ctx)
-
-
-def _classify_kol_topic(headline: str, takeaway: str, category: str) -> str:
-    txt = f"{headline} {takeaway}"
-    if re.search(r"(?i)\b(?:nvda|tsm|amd|avgo|intc|mu|hbm4?|cowos|gpu|anthropic|openai|claude|llm)\b|算力|芯片|半导体|存储|大模型", txt):
-        return "AI算力与半导体"
-    if re.search(r"(?i)\b(?:fed|fomc|cpi|pce|treasury|yields?|rates?)\b|美联储|美债|利率|流动性|降息|通胀|财政|赤字", txt):
-        return "美联储流动性与宏观"
-    if category == "crypto" or (_CRYPTO_EXPLICIT_RE.search(txt) and not _AI_TOKEN_CONTEXT_RE.search(txt)):
-        return "加密周期与链上"
-    if re.search(r"(?i)\b(?:tariff|sanction|sec)\b|关税|制裁|监管|地缘", txt):
-        return "地缘与政策监管"
-    if category == "quant":
-        return "量化因子与风控"
-    return "美股策略与估值"
 
 
 def build_kol_scorecards(
@@ -1350,7 +1213,7 @@ def build_kol_digest(
 
         art_file, art_url = latest_article.get(h_low, ("", ""))
         url = best_tw["url"] or art_url or f"https://x.com/{canonical_handle}"
-        topic = _classify_kol_topic(headline, takeaway, category)
+        topic = classify_kol_topic(headline, takeaway, category)
 
         card = {
             # Legacy keys
@@ -1700,7 +1563,7 @@ def select_quality_kol_articles(
                 "tickers": tickers,
                 "mtime": mtime_str,
                 "excerpt": excerpt,
-                "body_md": scrub_forbidden(raw),
+                "body_md": scrub_forbidden(raw, preserve_newlines=True),
                 "url": url or f"https://x.com/{handle}",
                 "score": rel_score,
             }

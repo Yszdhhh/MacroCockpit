@@ -323,8 +323,26 @@ def test_noise_filtering_english_distillation_and_forbidden_scrub(tmp_path: Path
 def test_real_local_kol_root_smoke(tmp_path: Path) -> None:
     if not engine.DEFAULT_KOL_DIR.exists():
         pytest.skip("Local x-kol-notes corpus not present")
+    sp_override: Path | None = None
+    if not engine.DEFAULT_STOCK_PROFILES_CACHE_PATH.is_file() and not engine.DEFAULT_FRED_CACHE_PATH.is_file():
+        today_bjt = datetime.now(BJT).date()
+        dates = [(today_bjt - timedelta(days=180 - idx)).isoformat() for idx in range(181)]
+        closes = [100.0 + idx * 0.4 for idx in range(181)]
+        fallback_sp = tmp_path / "fallback_stock_profiles.json"
+        fallback_sp.write_text(
+            json.dumps(
+                {
+                    sym: {"chart": {"dates": dates, "closes": closes}}
+                    for sym in ("NVDA", "BTC", "ETH", "SOL", "SPY", "QQQ", "TSLA", "AAPL", "MSFT", "META", "AMZN", "GOOGL", "AMD", "TSM")
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        sp_override = fallback_sp
     bundle = engine.generate_kol_intel(
         kol_dir=engine.DEFAULT_KOL_DIR,
+        stock_profiles_path=sp_override,
         cache_path=tmp_path / "kol_scorecard_cache.json",
     )
     stats = bundle["stats"]

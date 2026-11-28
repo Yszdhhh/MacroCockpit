@@ -1,13 +1,10 @@
 """Live & cached FX (USD/CNH & USD/CNY) and OKX crypto spot/perp quotes."""
 from __future__ import annotations
 
-import json
 import math
-import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal, localcontext
-from pathlib import Path
 from typing import Any
 
 try:
@@ -15,10 +12,16 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
+from backend.runtime import (
+    BJT as _BJT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json as _atomic_write_json,
+    now_bjt_iso as _now_iso,
+    read_json_safe as _read_json,
+)
 from backend.valuation import decimal_str, parse_decimal_str
 
-_COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-DATA_DIR = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (_COCKPIT_ROOT / "data"))
 
 FX_CACHE_TTL_SECONDS = 60
 CRYPTO_CACHE_TTL_SECONDS = 60
@@ -75,11 +78,6 @@ _HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     )
 }
-_BJT = timezone(timedelta(hours=8))
-
-
-def _now_iso() -> str:
-    return datetime.now(_BJT).isoformat(timespec="seconds")
 
 
 def _epoch_to_iso(raw_ts: Any, *, milliseconds: bool = False) -> str:
@@ -89,26 +87,9 @@ def _epoch_to_iso(raw_ts: Any, *, milliseconds: bool = False) -> str:
             val /= 1000.0
         if val <= 0:
             return _now_iso()
-        return datetime.fromtimestamp(val, tz=timezone.utc).astimezone(_BJT).isoformat(timespec="seconds")
+        return datetime.fromtimestamp(val, tz=UTC).astimezone(_BJT).isoformat(timespec="seconds")
     except (TypeError, ValueError, OverflowError, OSError):
         return _now_iso()
-
-
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
 
 
 def _cache_is_fresh(cached: dict[str, Any], now: float, ttl: int) -> bool:
@@ -189,6 +170,8 @@ def fetch_fx_snapshot(
     """Fetch USD/CNH (EastMoney) with Frankfurter USD/CNY fallback and 60s disk cache."""
     cache_path = DATA_DIR / "fx_cache.json"
     cached = _read_json(cache_path)
+    if not isinstance(cached, dict):
+        cached = None
     now_epoch = time.time()
 
     if (
@@ -304,6 +287,8 @@ def fetch_crypto_quotes(
     """Fetch OKX public spot and perpetual mark-price + funding-rate quotes with graceful cache fallback."""
     cache_path = DATA_DIR / "crypto_quotes_cache.json"
     cached = _read_json(cache_path)
+    if not isinstance(cached, dict):
+        cached = None
     now_epoch = time.time()
     spot_targets, swap_targets = _normalize_crypto_targets(symbols)
 
@@ -580,6 +565,8 @@ def fetch_hybrid_perp_quotes(
 
     cache_path = DATA_DIR / "hybrid_perp_cache.json"
     cached = _read_json(cache_path)
+    if not isinstance(cached, dict):
+        cached = None
     now_epoch = time.time()
     if (
         not force_refresh

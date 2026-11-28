@@ -7,9 +7,19 @@ import json
 import math
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json,
+    is_finite as _is_finite,
+    resolve_hermes_home,
+)
 
 try:
     import pandas as pd
@@ -24,18 +34,9 @@ try:
 except ImportError:
     yaml = None  # type: ignore[assignment]
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-DATA_DIR = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (COCKPIT_ROOT / "data"))
 FRED_CACHE_PATH = DATA_DIR / "fred_cache.json"
 
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
-
-
-_HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (_safe_home(COCKPIT_ROOT) / "AppData" / "Local" / "hermes"))
+_HERMES_HOME = resolve_hermes_home()
 PARQUET_MACRO_DIR = Path(
     os.environ.get("MACROCOCKPIT_PARQUET_MACRO_DIR") or (DATA_DIR / "parquet_macro")
 )
@@ -104,7 +105,6 @@ US_SECTORS: list[tuple[str, str]] = [
     ("XLU", "公用事业"),
 ]
 
-BJT = timezone(timedelta(hours=8))
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -113,23 +113,7 @@ _HEADERS = {
 }
 
 
-def atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-    os.replace(tmp, path)
-
-
-def _is_finite(val: Any) -> bool:
-    if val is None or isinstance(val, bool):
-        return False
-    try:
-        return math.isfinite(float(val))
-    except (TypeError, ValueError):
-        return False
-
-
-def _load_fred_api_key() -> str | None:
+def load_fred_api_key() -> str | None:
     env_key = (os.environ.get("FRED_API_KEY") or "").strip()
     if env_key:
         return env_key
@@ -278,7 +262,7 @@ def _merge_series(
     return sorted(merged.items(), key=lambda x: x[0])
 
 
-def _fetch_gold_tail() -> list[tuple[str, float]]:
+def fetch_gold_tail() -> list[tuple[str, float]]:
     """Fetch recent daily COMEX Gold (GC=F) closes via Yahoo Finance chart API or yfinance."""
     if requests is not None:
         try:
@@ -296,7 +280,7 @@ def _fetch_gold_tail() -> list[tuple[str, float]]:
                     by_day: dict[str, float] = {}
                     for ts, val in zip(ts_list, closes):
                         if _is_finite(val) and float(val) > 0:
-                            day = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+                            day = datetime.fromtimestamp(int(ts), tz=UTC).strftime("%Y-%m-%d")
                             by_day[day] = round(float(val), 2)
                     if len(by_day) >= 5:
                         return sorted(by_day.items(), key=lambda x: x[0])
@@ -324,7 +308,7 @@ def _fetch_gold_tail() -> list[tuple[str, float]]:
 
 def refresh_fred_cache(include_gold: bool = True) -> dict[str, list[tuple[str, float]]]:
     """Refresh FRED series + Net Liquidity components into local data/fred_cache.json."""
-    api_key = _load_fred_api_key()
+    api_key = load_fred_api_key()
     cache_raw = _load_fred_cache()
     updated: dict[str, list[tuple[str, float]]] = {}
 
@@ -337,7 +321,7 @@ def refresh_fred_cache(include_gold: bool = True) -> dict[str, list[tuple[str, f
             updated[key] = merged
 
     if include_gold:
-        gold_obs = _fetch_gold_tail()
+        gold_obs = fetch_gold_tail()
         existing_gold = cache_raw.get("GOLD", [])
         merged_gold = _merge_series([(str(x[0]), float(x[1])) for x in existing_gold], gold_obs)
         if merged_gold:
@@ -360,7 +344,7 @@ def _load_macro_series_bundle(refresh_fred: bool = False) -> dict[str, list[tupl
 
     # Always attempt best-effort Net Liquidity cache seed if absent locally
     if not all(k in cache_data and cache_data[k] for k in ("WALCL", "RRPONTSYD", "WTREGEN")):
-        api_key = _load_fred_api_key()
+        api_key = load_fred_api_key()
         seeded = False
         for liq_key in ("WALCL", "RRPONTSYD", "WTREGEN"):
             if not cache_data.get(liq_key):
@@ -410,7 +394,7 @@ def _load_macro_series_bundle(refresh_fred: bool = False) -> dict[str, list[tupl
     return bundle
 
 
-def _infer_us_session(ts_str: str) -> str:
+def infer_us_session(ts_str: str) -> str:
     """Infer US equity trading session from a YYYY-MM-DD HH:MM:SS US/Eastern timestamp."""
     m = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})", str(ts_str or ""))
     if not m:
@@ -901,7 +885,7 @@ def _fetch_tencent_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]]
                 "market_at": market_at,
                 "received_at": received_at,
                 "source": "tencent_gtimg",
-                "session": _infer_us_session(ts_str),
+                "session": infer_us_session(ts_str),
             }
     return (parsed, quote_as_of)
 

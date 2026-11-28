@@ -9,7 +9,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,18 +22,31 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.article_store import parse_markdown_article, read_article_markdown, sort_and_balance_articles
+from backend.guardrails import (
+    has_private_article_content,
+    safe_article_filename,
+    scrub_forbidden as _scrub_forbidden,
+)
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    atomic_write_json,
+    file_lock,
+    now_bjt_iso as _now_bjt_iso,
+    read_json_safe as _read_json,
+    resolve_data_dir,
+)
 from backend.calendar_events import build_calendar_events, filter_calendar_events
 from backend.correlation_engine import (
-    _save_series_to_fred_cache,
+    save_series_to_fred_cache,
     compute_cross_asset_correlations,
     fetch_btc_binance_daily,
 )
 from backend.fred_and_market import (
-    COCKPIT_ROOT,
     FRED_SERIES_MAP,
-    _fetch_gold_tail,
-    _load_fred_api_key,
-    atomic_write_json,
+    fetch_gold_tail,
+    load_fred_api_key,
     build_macro_fred,
     fetch_fred_observations,
     fetch_us_equities,
@@ -43,23 +56,19 @@ from backend.event_feed import update_event_feed
 from backend.market_quotes import fetch_crypto_quotes, fetch_fx_snapshot
 from backend.mobile_push import get_push_channels_status, load_push_env
 from backend.public_snapshot import (
-    file_lock,
-    has_private_article_content,
     load_published_generation,
     publish_generation,
-    safe_article_filename,
 )
 from backend.rss_sources import (
     CURATED_ARTICLE_FEEDS,
     CURATED_RSS_FEEDS,
-    _fetch_aihot_hot_articles,
-    _fetch_article_candidates_from_feed,
-    _fetch_cls_depth_candidates,
-    _fetch_one_feed,
-    _fetch_wscn_hot_articles,
-    _scrub_forbidden,
-    _select_balanced_articles,
-    _write_curated_article_files,
+    fetch_aihot_hot_articles,
+    fetch_article_candidates_from_feed,
+    fetch_cls_depth_candidates,
+    fetch_one_feed,
+    fetch_wscn_hot_articles,
+    select_balanced_articles,
+    write_curated_article_files,
     build_opml_export,
     collect_cn_finance_wires,
     collect_equation_news_with_meta,
@@ -67,73 +76,50 @@ from backend.rss_sources import (
 from backend.sec_edgar import collect_recent_sec_signals, fetch_sec_filings_map
 from backend.signal_aggregator import (
     KOL_ROOT,
-    _build_positions_and_risk_gate,
-    _build_strategy_targets,
-    _collect_aihot_signals,
-    _collect_equity_signals,
-    _ensure_signal_topics,
-    _read_json,
-    _sanitize_state_value,
-    _sort_and_balance_articles,
-    parse_markdown_article,
-    read_article_markdown,
+    build_positions_and_risk_gate,
+    build_strategy_targets,
+    collect_aihot_signals,
+    collect_equity_signals,
+    ensure_signal_topics,
+    sanitize_state_value,
 )
 
-try:
-    from backend.guru_sources import collect_guru_articles, collect_guru_signals
-except ImportError:
-    collect_guru_articles = None  # type: ignore[assignment]
-    collect_guru_signals = None  # type: ignore[assignment]
+from backend.guru_sources import collect_guru_articles, collect_guru_signals
 
-try:
-    from backend.kol_intel_engine import (
-        build_kol_actionable_signals,
-        build_kol_digest,
-        build_kol_scorecards,
-        select_quality_kol_articles,
-    )
-except ImportError:
-    build_kol_actionable_signals = None  # type: ignore[assignment]
-    build_kol_digest = None  # type: ignore[assignment]
-    build_kol_scorecards = None  # type: ignore[assignment]
-    select_quality_kol_articles = None  # type: ignore[assignment]
+from backend.kol_intel_engine import (
+    build_kol_actionable_signals,
+    build_kol_digest,
+    build_kol_scorecards,
+    select_quality_kol_articles,
+)
 
-try:
-    from backend.market_synthesis import build_market_synthesis
-except ImportError:
-    build_market_synthesis = None  # type: ignore[assignment]
+from backend.market_synthesis import build_market_synthesis
 
-try:
-    from backend.forum_sentiment import (
-        build_sentiment_divergence, collect_public_discussion_trends, trim_forum_sentiment,
-    )
-except ImportError:
-    build_sentiment_divergence = None  # type: ignore[assignment]
-    collect_public_discussion_trends = None  # type: ignore[assignment]
-    trim_forum_sentiment = None  # type: ignore[assignment]
+from backend.forum_sentiment import (
+    build_sentiment_divergence, collect_public_discussion_trends, trim_forum_sentiment,
+)
 
-try:
-    from backend.source_matrix import build_asset_source_matrix
-except ImportError:
-    build_asset_source_matrix = None  # type: ignore[assignment]
+from backend.source_matrix import build_asset_source_matrix
 
-try:
-    from backend.signal_advisor import update_signal_advisor
-except ImportError:
-    update_signal_advisor = None  # type: ignore[assignment]
+from backend.signal_advisor import update_signal_advisor
 from backend.stock_research import (
     CACHE_TTL_SECONDS as STOCK_CACHE_TTL_SECONDS,
     CORE_RESEARCH_STOCKS,
-    _assemble_profile,
-    _create_yahoo_session,
-    _fetch_yahoo_one,
-    _merge_us_fallbacks,
+    assemble_profile,
+    create_yahoo_session,
+    fetch_yahoo_one,
+    merge_us_fallbacks,
     build_non_us_preset_profiles,
     build_quick_thesis,
     fetch_gtimg_batch,
 )
 
-BJT = timezone(timedelta(hours=8))
+_fetch_one_feed = fetch_one_feed
+_fetch_article_candidates_from_feed = fetch_article_candidates_from_feed
+_fetch_cls_depth_candidates = fetch_cls_depth_candidates
+_fetch_wscn_hot_articles = fetch_wscn_hot_articles
+_fetch_aihot_hot_articles = fetch_aihot_hot_articles
+_collect_aihot_signals = collect_aihot_signals
 
 # Verified live against tencent-vps: these 8 signal feeds + 1 article feed fail/timeout from CN datacenter.
 INTL_ONLY_RSS_IDS: frozenset[str] = frozenset(
@@ -157,10 +143,6 @@ _BROWSER_UA = (
 _MAX_INTL_STALE_SECONDS = 7200
 
 
-def _now_bjt_iso() -> str:
-    return datetime.now(BJT).isoformat(timespec="seconds")
-
-
 def _strip_private_items(items: list[Any]) -> list[dict[str, Any]]:
     clean: list[dict[str, Any]] = []
     for it in items or []:
@@ -179,7 +161,7 @@ def _strip_private_items(items: list[Any]) -> list[dict[str, Any]]:
 
 
 def _fetch_intl_fred_series() -> dict[str, list[list[Any]]]:
-    api_key = _load_fred_api_key()
+    api_key = load_fred_api_key()
     out: dict[str, list[list[Any]]] = {}
 
     def _pull_one(key: str, sid: str) -> tuple[str, list[tuple[str, float]]]:
@@ -188,7 +170,7 @@ def _fetch_intl_fred_series() -> dict[str, list[list[Any]]]:
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         futs = [pool.submit(_pull_one, k, sid) for k, sid in FRED_SERIES_MAP.items()]
-        gold_fut = pool.submit(_fetch_gold_tail)
+        gold_fut = pool.submit(fetch_gold_tail)
         btc_fut = pool.submit(fetch_btc_binance_daily, 120)
         for fut in as_completed(futs):
             try:
@@ -230,10 +212,10 @@ def _fetch_intl_yahoo_profiles(cache_path: Path, *, refresh_yahoo: bool) -> dict
         )
     ]
     if need:
-        sess, crumb = _create_yahoo_session(timeout=8)
+        sess, crumb = create_yahoo_session(timeout=8)
         if sess is not None:
             with ThreadPoolExecutor(max_workers=4) as pool:
-                futs = {pool.submit(_fetch_yahoo_one, sym, sess, crumb, 10): sym for sym in need}
+                futs = {pool.submit(fetch_yahoo_one, sym, sess, crumb, 10): sym for sym in need}
                 for fut in as_completed(futs):
                     sym = futs[fut]
                     try:
@@ -258,7 +240,7 @@ def collect_intl_bundle(
 ) -> dict[str, Any]:
     """Collect sources blocked or rate-limited in mainland China without touching private ledgers."""
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     intl_rss_specs = [sp for sp in CURATED_RSS_FEEDS if sp["id"] in INTL_ONLY_RSS_IDS]
     intl_art_specs = [sp for sp in CURATED_ARTICLE_FEEDS if sp["id"] in INTL_ONLY_ARTICLE_IDS]
 
@@ -371,7 +353,7 @@ def ingest_intl_bundle(base_dir: Path | str, payload: dict[str, Any]) -> dict[st
     if not isinstance(payload, dict):
         raise ValueError("intl_payload_must_be_object")
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     raw_signals = _strip_private_items(list(payload.get("raw_signals") or []))
@@ -417,7 +399,7 @@ def ingest_intl_bundle(base_dir: Path | str, payload: dict[str, Any]) -> dict[st
     if fred_updates:
         fred_cache_path = data_dir / "fred_cache.json"
         with file_lock(fred_cache_path):
-            _save_series_to_fred_cache(fred_updates, cache_path=fred_cache_path)
+            save_series_to_fred_cache(fred_updates, cache_path=fred_cache_path)
 
     # Merge OKX crypto spot/swap quotes into data/crypto_quotes_cache.json
     if (crypto_quotes.get("spot") or {}) or (crypto_quotes.get("swap") or {}):
@@ -464,8 +446,8 @@ def _load_cn_stock_profiles(
         y_item = sp_cache.get(sym) or {}
         g_item = gtimg_map.get(sym) or {}
         if not (y_item.get("chart") or {}).get("closes"):
-            y_item = _merge_us_fallbacks(sym, y_item, g_item, timeout=4)
-        prof = _assemble_profile(
+            y_item = merge_us_fallbacks(sym, y_item, g_item, timeout=4)
+        prof = assemble_profile(
             sym,
             y_item,
             g_item,
@@ -480,25 +462,6 @@ def _load_cn_stock_profiles(
     for sym, prof in build_non_us_preset_profiles(risk_gate=risk_gate, timeout=5).items():
         profiles[sym] = prof
     return profiles
-
-
-def _bump_producer_generation(root: Path, data_dir: Path) -> int:
-    counter_path = data_dir / "producer_generation.json"
-    with file_lock(counter_path):
-        prev_gen = 0
-        if counter_path.is_file():
-            try:
-                prev_gen = int((_read_json(counter_path, {}) or {}).get("generation") or 0)
-            except (TypeError, ValueError):
-                prev_gen = 0
-        cur_pub_gen = 0
-        try:
-            cur_pub_gen = int((load_published_generation(root) or {}).get("generation") or 0)
-        except Exception:
-            cur_pub_gen = 0
-        next_gen = max(prev_gen, cur_pub_gen) + 1
-        atomic_write_json(counter_path, {"generation": next_gen})
-        return next_gen
 
 
 def _has_usable_quote_price(entry: Any) -> int:
@@ -581,7 +544,7 @@ def run_cn_merge_and_publish(
 ) -> dict[str, Any]:
     """Run domestic CN direct collection, merge intl relay bundle, dedup globally, and atomically publish generation."""
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     articles_dir = root / "articles"
     data_dir.mkdir(parents=True, exist_ok=True)
     articles_dir.mkdir(parents=True, exist_ok=True)
@@ -701,7 +664,7 @@ def run_cn_merge_and_publish(
                 pass
 
         sec_signals = collect_recent_sec_signals(filings_map)
-        eq_signals = _collect_equity_signals(us_equities)
+        eq_signals = collect_equity_signals(us_equities)
         guru_signals: list[dict[str, Any]] = []
         if collect_guru_signals is not None:
             try:
@@ -818,13 +781,13 @@ def run_cn_merge_and_publish(
         # Read macro_fred (from merged fred_cache.json) + pure-numpy correlations
         macro_fred = build_macro_fred({}, refresh_fred=False)
         correlations = compute_cross_asset_correlations(fred_cache_path=data_dir / "fred_cache.json")
-        risk_gate, positions = _build_positions_and_risk_gate({}, {}, macro_fred=macro_fred, us_equities=us_equities)
-        strategy_targets = _build_strategy_targets(positions, risk_gate, {}, {})
+        risk_gate, positions = build_positions_and_risk_gate({}, {}, macro_fred=macro_fred, us_equities=us_equities)
+        strategy_targets = build_strategy_targets(positions, risk_gate, {}, {})
 
         # Unified Kazike pipeline: deduplicate & score CN + INTL + KOL + Guru signals together
         raw_signals = _strip_private_items(
             [
-                _ensure_signal_topics(s)
+                ensure_signal_topics(s)
                 for s in (
                     cn_rss_signals
                     + cn_wires
@@ -867,7 +830,7 @@ def run_cn_merge_and_publish(
 
         if scored_arts:
             deduped_arts = cluster_and_dedup(scored_arts)
-            balanced_arts = _select_balanced_articles(deduped_arts, limit=16, max_per_publisher=4)
+            balanced_arts = select_balanced_articles(deduped_arts, limit=16, max_per_publisher=4)
             top_arts = [
                 {
                     "filename": "",
@@ -877,11 +840,11 @@ def run_cn_merge_and_publish(
                     "url": str(it.get("url") or ""),
                     "score": int(it.get("attention_score") or 0),
                     "time_bjt": str(it.get("time_bjt") or ""),
-                    "body_md": _scrub_forbidden(str(it.get("body_md") or "")),
+                    "body_md": _scrub_forbidden(str(it.get("body_md") or ""), preserve_newlines=True),
                 }
                 for it in balanced_arts
             ]
-            _write_curated_article_files(top_arts, articles_dir=articles_dir)
+            write_curated_article_files(top_arts, articles_dir=articles_dir)
 
         collected_articles: list[dict[str, Any]] = []
         content_by_name: dict[str, str] = {}
@@ -951,7 +914,7 @@ def run_cn_merge_and_publish(
                 collected_articles.append(kart)
                 content_by_name[fname] = body
 
-            collected_articles = _sort_and_balance_articles(collected_articles)[:max_articles]
+            collected_articles = sort_and_balance_articles(collected_articles)[:max_articles]
             articles_payload = [
                 {"filename": a["filename"], "content": content_by_name[a["filename"]]}
                 for a in collected_articles
@@ -1133,7 +1096,7 @@ def run_cn_merge_and_publish(
                 "periodic_reports_count": periodic_reports_count,
             }
 
-            state = _sanitize_state_value(
+            state = sanitize_state_value(
                 {
                     "schema_version": 2,
                     "generation": next_gen,
@@ -1201,7 +1164,7 @@ def run_eqn_fast_sync(
 ) -> dict[str, Any]:
     """Fast incremental EquationNews REST+ETag sync: skip publish on 304, merge & publish on 200 changes."""
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     eqn_signals, meta = collect_equation_news_with_meta(
@@ -1272,7 +1235,7 @@ def run_eqn_fast_sync(
                 s for s in existing_pool if not (isinstance(s, dict) and str(s.get("id") or "") in fresh_ids)
             ]
             merged_raw = _strip_private_items(
-                [_ensure_signal_topics(s) for s in (eqn_signals + kept_existing)]
+                [ensure_signal_topics(s) for s in (eqn_signals + kept_existing)]
             )
             all_signals, kazike_stats = process_financial_signals(
                 merged_raw,
