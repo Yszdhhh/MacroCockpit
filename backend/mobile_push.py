@@ -571,7 +571,7 @@ def build_mobile_digest_payload(
     today_url = f"{base_url}/#today"
     portfolio_url = f"{base_url}/#portfolio"
 
-    title = f"宏观驾驶舱 · {mode_short} | {label} (多头上限 {cap:.1f}x)"
+    title = f"观澜 · {mode_short} | {label} (多头上限 {cap:.1f}x)"
 
     # Plain-text digest (keeps 【辅助仓位】 header for contract compatibility; masked unless include_amounts=True)
     text_lines: list[str] = [
@@ -691,7 +691,7 @@ def build_mobile_digest_payload(
             },
         },
         "header": {
-            "title": {"tag": "plain_text", "content": f"宏观驾驶舱 · {mode_label}"},
+            "title": {"tag": "plain_text", "content": f"观澜 · {mode_label}"},
             "subtitle": {"tag": "plain_text", "content": f"{gen_bjt} · {label}"},
             "template": palette["template"],
             "icon": {"tag": "standard_icon", "token": palette["icon_token"], "color": palette["icon_color"]},
@@ -873,8 +873,8 @@ def build_mobile_digest_payload(
         wecom_horiz.append({"keyname": "宏观核心", "value": " · ".join(kpi_parts[:2])[:40]})
     wecom_card = {
         "card_type": "text_notice",
-        "source": {"desc": f"MacroCockpit · {mode_short}", "desc_color": 0},
-        "main_title": {"title": f"宏观驾驶舱 · {mode_label}", "desc": gen_bjt},
+        "source": {"desc": f"观澜 Meridian · {mode_short}", "desc_color": 0},
+        "main_title": {"title": f"观澜 · {mode_label}", "desc": gen_bjt},
         "emphasis_content": {"title": metrics["net_exp_display"], "desc": "净方向性敞口"},
         "quote_area": {
             "type": 1,
@@ -893,7 +893,7 @@ def build_mobile_digest_payload(
 
     # Personal WeChat Markdown
     wechat_parts = [
-        f"### 宏观驾驶舱 · {mode_label}",
+        f"### 观澜 · {mode_label}",
         f"> {gen_bjt} · 门控：**{label}**（多头上限 `{cap:.1f}x`）",
         "",
         f"- **净方向性敞口**：`{metrics['net_exp_display']}`",
@@ -1256,7 +1256,7 @@ def _send_bark(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "detail": "BARK_URL 未配置"}
     resp = requests.post(
         url,
-        json={"title": payload["title"], "body": payload["text"], "group": "宏观驾驶舱"},
+        json={"title": payload["title"], "body": payload["text"], "group": "观澜"},
         timeout=12,
     )
     ok = 200 <= resp.status_code < 300

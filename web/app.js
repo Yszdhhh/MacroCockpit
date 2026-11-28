@@ -1,4 +1,4 @@
-/* 宏观决策情报站 · Wave 1 四入口前端渲染与交互 */
+/* 观澜 · Meridian — 四入口前端渲染与交互 */
 (function () {
   "use strict";
 
@@ -5659,7 +5659,7 @@
   function buildMuseMarkdown(st) {
     const s = st || {};
     const risk = s.risk_gate || {};
-    const lines = ["# MacroCockpit 市场简报", "", "更新时间：" + (s.generated_at_bjt || "—"), "## 风险门控：" + (risk.label || "—"), String(risk.summary_exposure || "")];
+    const lines = ["# 观澜 · Meridian 市场简报", "", "更新时间：" + (s.generated_at_bjt || "—"), "## 风险门控：" + (risk.label || "—"), String(risk.summary_exposure || "")];
     const reasons = gateReasons(risk);
     if (reasons.length) lines.push("", "依据：" + reasons.slice(0, 3).join("；"));
     const positions = arr(s.positions);

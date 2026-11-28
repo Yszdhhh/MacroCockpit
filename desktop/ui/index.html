@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" id="metaThemeColor" content="#FAFAF9">
   <meta name="desktop-token" content="__DESKTOP_TOKEN__">
-  <title>MacroCockpit Pro · 桌面专业研判台</title>
+  <title>观澜 Pro · Meridian 桌面专业研判台</title>
   <script>
     (function () {
       var t = null;
@@ -16,7 +16,7 @@
       document.documentElement.setAttribute("data-theme", t);
     })();
   </script>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2316140F'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='20' font-family='serif' fill='%23FAFAF9'%3EM%3C/text%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='2' y='2' width='60' height='60' rx='14' fill='%2316140F' stroke='%232C2922' stroke-width='1.8'/%3E%3Cg transform='translate(8 8) scale(0.75)'%3E%3Cg fill='none' stroke='%23FAFAF9' stroke-linecap='round'%3E%3Ccircle cx='32' cy='32' r='24' stroke-width='3.6'/%3E%3Cpath d='M41.57 9.99 A9 24 23.5 0 1 22.43 54.01' stroke-width='2.9'/%3E%3Cpath d='M9.99 22.43 A24 7 23.5 0 0 54.01 41.57' stroke-width='2.6'/%3E%3C/g%3E%3Ccircle cx='41.57' cy='9.99' r='3.6' fill='%2312CCD8'/%3E%3C/g%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
@@ -27,9 +27,19 @@
   <header class="masthead">
     <div class="shell mast-row">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true">M</span>
+        <svg class="brand-mark" viewBox="0 0 64 64" width="30" height="30" aria-hidden="true">
+          <g class="bm-orbit">
+            <circle cx="32" cy="32" r="24" stroke-width="3"/>
+            <path d="M41.57 9.99 A9 24 23.5 0 1 22.43 54.01" stroke-width="2.4"/>
+            <path d="M9.99 22.43 A24 7 23.5 0 0 54.01 41.57" stroke-width="2.2"/>
+          </g>
+          <circle class="bm-beacon" cx="41.57" cy="9.99" r="3.2"/>
+        </svg>
         <div class="brand-copy">
-          <strong class="brand-title">MacroCockpit Pro</strong>
+          <div class="brand-title-row">
+            <strong class="brand-title">观澜 Pro</strong>
+            <span class="brand-en" aria-hidden="true">MERIDIAN</span>
+          </div>
           <span class="brand-sub">本地多智能体深研 · OpenBB · AGY 协同台</span>
         </div>
       </div>
@@ -47,7 +57,7 @@
 
       <div class="mast-actions">
         <button type="button" class="btn btn-sm" id="themeToggleBtn" aria-label="切换浅色或深色模式">深色</button>
-        <a class="btn btn-sm btn-accent" id="backToWebBtn" href="http://127.0.0.1:8788/" target="_blank" rel="noopener noreferrer">返回网页驾驶舱 ↗</a>
+        <a class="btn btn-sm btn-accent" id="backToWebBtn" href="http://127.0.0.1:8788/" target="_blank" rel="noopener noreferrer">返回观澜主站 ↗</a>
       </div>
     </div>
 
@@ -200,7 +210,7 @@
         </div>
 
         <div class="chip-group" id="agyQuickPrompts" style="margin-bottom:10px">
-          <button type="button" class="chip" data-agy-prompt="结合当前 MacroCockpit 风险灯号与最新快讯，给出今天最需要关注的 3 个宏观或科技催化及对应纪律边界。">汇总今日重点催化</button>
+          <button type="button" class="chip" data-agy-prompt="结合当前观澜风险灯号与最新快讯，给出今天最需要关注的 3 个宏观或科技催化及对应纪律边界。">汇总今日重点催化</button>
           <button type="button" class="chip" data-agy-prompt="对照当前策略仓位比例与 MA20 乖离状态，检查多头方向是否存在追高或敞口集中风险。">巡检仓位与追高纪律</button>
           <button type="button" class="chip" data-agy-prompt="对比 NVDA 与 AAPL 当前估值、成长增速及站内情绪面，给出更稳健的配置优先级。">对比 NVDA 与 AAPL 优先级</button>
         </div>

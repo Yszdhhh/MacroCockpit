@@ -868,14 +868,17 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             page = (
                 '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
                 '<meta name="viewport" content="width=device-width,initial-scale=1">'
-                '<title>登录 · 宏观决策情报站</title>'
+                '<title>登录 · 观澜 Meridian</title>'
+                '<link rel="icon" href="/icon.svg" type="image/svg+xml">'
                 '<style>'
                 ':root{--bg:#FAFAF9;--surface:#FFFFFF;--ink:#16140F;--sub:#6E675B;--rule:#E9E5DC;--accent:#0E6E6E;--bear:#D6453D}'
                 '@media (prefers-color-scheme:dark){:root{--bg:#100F09;--surface:#1A1915;--ink:#F5F4EF;--sub:#A39B8B;--rule:rgba(255,255,255,.12);--accent:#12CCD8;--bear:#F87171}}'
                 'body{min-height:100vh;display:grid;place-items:center;margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}'
                 '.card{width:min(390px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--rule);border-radius:14px;padding:30px 28px;box-sizing:border-box}'
-                '.eyebrow{font-size:12px;color:var(--accent);font-weight:600;letter-spacing:.06em;margin-bottom:6px}'
-                'h1{margin:0 0 6px;font-size:22px;font-family:Georgia,"Noto Serif SC",serif}'
+                '.brand-row{display:flex;align-items:center;gap:10px;margin:0 0 8px}'
+                '.brand-mark{display:block;flex:0 0 auto;width:30px;height:30px}'
+                'h1{margin:0;display:flex;align-items:baseline;gap:7px;font-size:22px;line-height:1.15;font-family:Georgia,"Noto Serif SC",serif}'
+                'h1 .en{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:10.5px;font-weight:600;letter-spacing:.14em;color:var(--sub);text-transform:uppercase}'
                 'p{margin:0 0 20px;color:var(--sub);font-size:13.5px}'
                 'label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}'
                 'input{width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid var(--rule);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;outline:none}'
@@ -884,11 +887,19 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 '@media (prefers-color-scheme:dark){button{color:#0b1718}}'
                 '.err{margin-top:12px;color:var(--bear);font-size:13px;min-height:1.2em}'
                 '</style></head><body><main class="card">'
-                '<div class="eyebrow">NEWS.SHUASHUABAO.XYZ</div>'
-                '<h1>宏观决策情报站</h1><p>输入访问密码以查看日报、相关性、KOL 树与私人复盘库</p>'
+                '<div class="brand-row">'
+                '<svg class="brand-mark" viewBox="0 0 64 64" width="30" height="30" aria-hidden="true">'
+                '<g fill="none" stroke="var(--ink)" stroke-linecap="round">'
+                '<circle cx="32" cy="32" r="24" stroke-width="3"/>'
+                '<path d="M41.57 9.99 A9 24 23.5 0 1 22.43 54.01" stroke-width="2.4"/>'
+                '<path d="M9.99 22.43 A24 7 23.5 0 0 54.01 41.57" stroke-width="2.2"/>'
+                '</g><circle cx="41.57" cy="9.99" r="3.2" fill="var(--accent)"/></svg>'
+                '<h1>观澜 <span class="en" aria-hidden="true">MERIDIAN</span></h1>'
+                '</div>'
+                '<p>输入访问密码，进入今日快讯、跨市场投研与私人持仓台账</p>'
                 '<form method="post" action="/api/login"><label for="pw">访问密码</label>'
                 '<input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>'
-                '<button type="submit">进入情报站</button></form>'
+                '<button type="submit">进入观澜</button></form>'
                 '<div class="err" id="err"></div></main>'
                 '<script>const qs=new URLSearchParams(location.search);if(qs.get("error")==="rate")document.getElementById("err").textContent="尝试过于频繁，请 5 分钟后再试。";else if(qs.get("error")==="1")document.getElementById("err").textContent="访问密码不正确，请重试。"</script>'
                 '</body></html>'
@@ -1351,7 +1362,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 gen = _xml_safe(st.get("generated_at_bjt") or "")
                 root = ET.Element("rss", version="2.0")
                 ch = ET.SubElement(root, "channel")
-                ET.SubElement(ch, "title").text = "MacroCockpit 每日简报"
+                ET.SubElement(ch, "title").text = "观澜 · Meridian 每日简报"
                 ET.SubElement(ch, "link").text = self.server.public_url
                 ET.SubElement(ch, "description").text = _xml_safe(
                     (st.get("risk_gate") or {}).get("label") or "宏观与市场简报"

@@ -1,4 +1,4 @@
-/* MacroCockpit Pro 桌面专业研判台交互逻辑 */
+/* 观澜 Pro · Meridian 桌面专业研判台交互逻辑 */
 (function () {
   "use strict";
 

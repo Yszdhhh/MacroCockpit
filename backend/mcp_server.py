@@ -1243,7 +1243,7 @@ class McpDispatcher:
                         "protocolVersion": negotiated,
                         "capabilities": {"tools": {"listChanged": False}},
                         "serverInfo": {"name": "macrocockpit-mcp", "version": "2.0.0"},
-                        "instructions": "宏观决策情报站 MCP 服务：仅暴露与令牌角色匹配的只读或组合读写工具。",
+                        "instructions": "观澜 · Meridian MCP 服务：仅暴露与令牌角色匹配的只读或组合读写工具。",
                     },
                 ),
             )

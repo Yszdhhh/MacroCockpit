@@ -1,4 +1,4 @@
-# DESIGN.md — MacroCockpit (宏观决策情报站) 视觉与交互设计规范
+# DESIGN.md — 观澜 · Meridian (MacroCockpit) 视觉与交互设计规范
 
 > 本文件作为 **Caffeine V3 Design Agent** 与本地 `web/` 静态前端的共享设计契约：任何新建或迭代的卡片、图表、抽屉或伴侣页，均须严格遵循下列色板、字体、间距、四入口及子页层次与极简中文业务规范。
 

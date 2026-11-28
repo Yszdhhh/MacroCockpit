@@ -158,8 +158,8 @@ class DesktopProHandler(BaseHTTPRequestHandler):
                 fallback = (
                     "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
                     f"<meta name='desktop-token' content='{self.server.desktop_token}'>"  # type: ignore[attr-defined]
-                    "<title>MacroCockpit 桌面专业终端</title></head>"
-                    "<body><h1>MacroCockpit 桌面专业终端后端已就绪</h1></body></html>"
+                    "<title>观澜 Pro · 桌面专业终端</title></head>"
+                    "<body><h1>观澜 Pro 桌面专业终端后端已就绪</h1></body></html>"
                 )
                 self._send_bytes(200, fallback.encode("utf-8"), "text/html; charset=utf-8")
                 return

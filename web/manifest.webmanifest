@@ -1,7 +1,7 @@
 {
-  "name": "宏观金融决策驾驶舱",
-  "short_name": "宏观驾驶舱",
-  "description": "宏观流动性、辅助仓位、美股算力与关键快讯统一驾驶舱",
+  "name": "观澜 · Meridian",
+  "short_name": "观澜",
+  "description": "全球宏观、跨市场个股投研、持仓风控与决策复盘终端",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
