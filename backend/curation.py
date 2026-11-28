@@ -866,3 +866,35 @@ def rank_curated_signals(
             start = 0
     lim = max(1, int(limit)) if limit and limit > 0 else len(ranked)
     return ranked[start : start + lim]
+
+
+def rank_curated_events(
+    event_cards: list[dict[str, Any]],
+    *,
+    rules: list[dict[str, Any]] | None = None,
+    workspace: dict[str, Any] | None = None,
+    scope: str = "all",
+    category: str | None = None,
+    subtopic: str | None = None,
+    direction: str | None = None,
+    instrument_id: str | None = None,
+    event_id: str | None = None,
+    sort: str = "importance",
+    cursor: str | int | None = None,
+    limit: int = 85,
+) -> list[dict[str, Any]]:
+    """Rank and filter persistent event cards reusing personal curation rules & holding radar."""
+    return rank_curated_signals(
+        event_cards,
+        rules=rules,
+        workspace=workspace,
+        scope=scope,
+        category=category,
+        subtopic=subtopic,
+        direction=direction,
+        instrument_id=instrument_id,
+        event_id=event_id,
+        sort=sort,
+        cursor=cursor,
+        limit=limit,
+    )

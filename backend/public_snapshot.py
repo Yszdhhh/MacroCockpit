@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.discussion_temperature import SNAPSHOT_TAGS, project_discussion_trends
+from backend.discussion_temperature import SNAPSHOT_TAGS, load_valid_trends_from_cache, project_discussion_trends
 
 BJT = timezone(timedelta(hours=8))
 MAX_ARTICLE_BYTES = 512 * 1024
@@ -35,6 +35,10 @@ PUBLIC_STATE_KEYS: frozenset[str] = frozenset(
         "stock_profiles",
         "signals",
         "signal_candidates",
+        "event_cards",
+        "event_stats",
+        "signal_plans",
+        "signal_plan_stats",
         "kazike_stats",
         "correlations",
         "kol_digest",
@@ -53,10 +57,17 @@ PUBLIC_STATE_KEYS: frozenset[str] = frozenset(
 
 _PRIVATE_TOP_LEVEL_KEYS = frozenset({"journal", "portfolio", "preferences", "workspace", "credentials"})
 _PUBLISH_LOCK = threading.RLock()
+_FILE_LOCK_LOCAL = threading.local()
+_FILE_LOCK_GUARD = threading.Lock()
+_FILE_LOCK_RLOCKS: dict[str, threading.RLock] = {}
 _PRIVATE_ARTICLE_TEXT = re.compile(
     r"占\s*(?:总\s*)?净值|净值\s*占比|portfolio_exposure"
     r"|(?:现货|合约|实际|私人)持仓明细"
     r"|(?:当前|目前|个人|账户|实盘)\s*(?:持仓|仓位|权益|现金)\s*[：:=]"
+    r"|(?:我的|本人|个人|实际|我在[\u4e00-\u9fffA-Za-z0-9]{0,16}的)\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)"
+    r"|(?:我|本人|个人|咱们)\s*(?:目前|当前|现在|手里|手头|账户里?)?\s*(?:持有|买了|买入|建仓|加仓|重仓|满仓|做多|做空|套牢)\s*[^\n。；;]{0,28}?(?:\d[\d,.]*\s*(?:万|千|亿)?\s*(?:美元|美金|人民币|港元|港币|元|股|手|张|枚|份|USDT|USD|CNY|RMB|HKD)|股票|仓位|多单|空单)"
+    r"|\bI\s+(?:currently\s+)?(?:hold|own|bought|shorted)\s+\$?\d[\d,.]*\b"
+    r"|(?:账户\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)|持仓金额|持仓市值|仓位金额|账户金额|保证金金额)\s*(?:为|是|有|约|达|[:：=])?\s*\d"
     r"|(?:手头现金|可用现金|现金余额|保证金余额)\s*[：:=]?\s*[+-]?\s*(?:HK\$|US\$|CN¥|RMB|HKD|USD|CNY|USDT|USDC|[$¥￥€£])?\s*[+-]?\s*\d"
     r"|\b(?:my\s+(?:actual\s+)?(?:portfolio|holdings?|positions?|trades?|account(?:\s+balance)?)|account\s+balance\s*(?:is|:|=)?\s*[+-]?\s*\$?\d[\d,.]*)\b"
     r"|\b(?:current|personal|private|actual|live|account)\s+(?:portfolio|holdings?|positions?)\s*[:=]"
@@ -64,7 +75,8 @@ _PRIVATE_ARTICLE_TEXT = re.compile(
     r"|\b[A-Z]{2,10}\s+\d[\d,.]*\s+(?:shares?|contracts?|lots?)\b"
     r"|\b(?:bought|sold|holding)\s+\d[\d,.]*\s+(?:shares?|contracts?|lots?|btc|eth|sol|bnb|paxg)\b[^.\n]{0,40}\b(?:at|@)\s*\$?\d"
     r"|\b(?:unrealized\s+p(?:&|n)l|liquidation\s+price)\s*(?:is|:|=)?\s*[+-]?\$?\d"
-    r"|(?<![A-Z0-9_-])(?:sk-|Bearer\s+|gh[pousr]_[A-Z0-9]+)"
+    r"|(?<![A-Z0-9_-])(?:sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{16,}|Bearer\s+|gh[pousr]_[A-Z0-9]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"
+    r"|(?<![A-Z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r"|(?<![A-Z0-9])(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|secret)\s*[\x22\x27]?\s*[:=]",
     re.IGNORECASE,
 )
@@ -107,22 +119,61 @@ def has_private_article_content(article: Any) -> bool:
     return any(check(text) for text in _iter_strings(article))
 
 
+def _get_thread_rlock(key: str) -> threading.RLock:
+    with _FILE_LOCK_GUARD:
+        lk = _FILE_LOCK_RLOCKS.get(key)
+        if lk is None:
+            lk = threading.RLock()
+            _FILE_LOCK_RLOCKS[key] = lk
+        return lk
+
+
 @contextmanager
 def file_lock(path: Path):
-    """Serialize readers and writers across processes via a stable sidecar."""
+    """Serialize readers and writers across threads and processes via a stable sidecar (thread-reentrant)."""
     lock_path = path.with_name(f".{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as lock:
-        if os.name == "nt":
-            import msvcrt
+    key = os.path.normcase(str(lock_path.resolve()))
+    held = getattr(_FILE_LOCK_LOCAL, "held", None)
+    if held is None:
+        held = {}
+        _FILE_LOCK_LOCAL.held = held
 
-            lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
+    if held.get(key, 0) > 0:
+        held[key] += 1
+        try:
+            yield
+        finally:
+            held[key] -= 1
+            if held[key] <= 0:
+                held.pop(key, None)
+        return
 
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        yield
+    t_lock = _get_thread_rlock(key)
+    with t_lock:
+        with lock_path.open("a+b") as lock:
+            if os.name == "nt":
+                import msvcrt
+
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            held[key] = 1
+            try:
+                yield
+            finally:
+                held.pop(key, None)
+                try:
+                    if os.name == "nt":
+                        lock.seek(0)
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
 
 
 def _now_bjt_iso() -> str:
@@ -566,6 +617,55 @@ def project_public_state(
     elif isinstance(market_analysis, dict) and has_private_article_text(json.dumps(market_analysis, ensure_ascii=False)):
         projected.pop("market_analysis", None)
 
+    raw_event_cards = projected.get("event_cards")
+    if raw_event_cards is not None and not isinstance(raw_event_cards, list):
+        projected.pop("event_cards", None)
+    elif isinstance(raw_event_cards, list):
+        from backend.event_feed import project_event_cards
+
+        projected["event_cards"] = project_event_cards(raw_event_cards)
+
+    raw_event_stats = projected.get("event_stats")
+    if raw_event_stats is not None and not isinstance(raw_event_stats, dict):
+        projected.pop("event_stats", None)
+    elif isinstance(raw_event_stats, dict):
+        projected["event_stats"] = _scalar_only_copy(
+            raw_event_stats,
+            (
+                "raw_items",
+                "opinions_skipped",
+                "total_events",
+                "new_events",
+                "reused_or_replayed",
+                "reprint_collapsed",
+                "low_conf_linked",
+                "roundups",
+                "multi_source_count",
+                "confirmed_count",
+                "denied_or_corrected_count",
+            ),
+        )
+
+    raw_signal_plans = projected.get("signal_plans")
+    if raw_signal_plans is not None and not isinstance(raw_signal_plans, list):
+        projected.pop("signal_plans", None)
+    elif isinstance(raw_signal_plans, list):
+        from backend.signal_advisor import project_signal_plans
+
+        projected["signal_plans"] = project_signal_plans(raw_signal_plans)
+
+    raw_plan_stats = projected.get("signal_plan_stats")
+    if raw_plan_stats is not None and not isinstance(raw_plan_stats, dict):
+        projected.pop("signal_plan_stats", None)
+    elif isinstance(raw_plan_stats, dict):
+        from backend.signal_advisor import project_signal_plan_stats
+
+        clean_ps = project_signal_plan_stats(raw_plan_stats)
+        if clean_ps is not None:
+            projected["signal_plan_stats"] = clean_ps
+        else:
+            projected.pop("signal_plan_stats", None)
+
     projected["schema_version"] = int(projected.get("schema_version") or 2)
     projected["strategy_targets"] = _build_structured_strategy_targets(projected if "positions" in projected else raw_state)
     projected["coverage"] = _build_default_coverage(projected)
@@ -797,6 +897,102 @@ def publish_generation(
                     raise ValueError("stale_generation")
                 generated_at = cur_manifest["generated_at"]
 
+        # Preserve richer server-side multi-day discussion trends across stateless remote publishes (e.g. Windows vps_sync)
+        fs_clean = clean_state.get("forum_sentiment")
+        if isinstance(fs_clean, dict):
+            def _trend_richness(tr: Any) -> tuple[int, int]:
+                if not isinstance(tr, dict):
+                    return (0, 0)
+                max_days = 0
+                non_insuf = 0
+                for a in tr.get("assets") or []:
+                    for w in (a.get("windows") or []) if isinstance(a, dict) else []:
+                        if isinstance(w, dict):
+                            max_days = max(max_days, int(w.get("sample_days") or 0))
+                            if w.get("state") not in (None, "insufficient"):
+                                non_insuf += 1
+                return (non_insuf, max_days)
+
+            best_trends = project_discussion_trends(fs_clean.get("discussion_trends"))
+            best_score = _trend_richness(best_trends)
+            cached_trends = load_valid_trends_from_cache(data_dir)
+            if _trend_richness(cached_trends) > best_score:
+                best_trends = cached_trends
+                best_score = _trend_richness(cached_trends)
+            if cur_manifest is not None and cur_gen > 0:
+                try:
+                    prior_state = _read_generation_state(gens_dir / f"gen_{cur_gen}", cur_gen)
+                    prior_tr = project_discussion_trends((prior_state.get("forum_sentiment") or {}).get("discussion_trends"))
+                    if _trend_richness(prior_tr) > best_score:
+                        best_trends = prior_tr
+                except (OSError, ValueError, TypeError):
+                    pass
+            if best_trends:
+                fs_clean["discussion_trends"] = best_trends
+            else:
+                fs_clean.pop("discussion_trends", None)
+
+        from backend.event_feed import (
+            LEDGER_FILENAME,
+            project_event_cards,
+            try_load_public_event_cards_from_ledger,
+        )
+
+        explicit_events = isinstance(state, dict) and state.get("event_cards") is not None
+        if explicit_events:
+            chosen_events = clean_state.get("event_cards") if isinstance(clean_state.get("event_cards"), list) else []
+        else:
+            ledger_file = data_dir / LEDGER_FILENAME
+            loaded_cards = try_load_public_event_cards_from_ledger(data_dir) if ledger_file.exists() else None
+            if loaded_cards is not None:
+                chosen_events = loaded_cards
+            elif cur_manifest is not None and cur_gen > 0:
+                chosen_events = []
+                try:
+                    prior_ev_state = _read_generation_state(gens_dir / f"gen_{cur_gen}", cur_gen)
+                    chosen_events = project_event_cards(prior_ev_state.get("event_cards"))
+                except (OSError, ValueError, TypeError):
+                    chosen_events = []
+            else:
+                chosen_events = []
+        if chosen_events:
+            clean_state["event_cards"] = chosen_events
+        else:
+            clean_state.pop("event_cards", None)
+
+        from backend.signal_advisor import (
+            ADVISOR_LEDGER_FILENAME,
+            compute_signal_plan_stats,
+            merge_signal_plans,
+            project_signal_plans,
+            try_load_public_signal_plans_from_ledger,
+        )
+
+        adv_file = data_dir / ADVISOR_LEDGER_FILENAME
+        loaded_plans, _loaded_pstats = try_load_public_signal_plans_from_ledger(data_dir) if adv_file.exists() else (None, None)
+        prior_plans: list[dict[str, Any]] = []
+        if cur_manifest is not None and cur_gen > 0:
+            try:
+                prior_pl_state = _read_generation_state(gens_dir / f"gen_{cur_gen}", cur_gen)
+                prior_plans = project_signal_plans(prior_pl_state.get("signal_plans"))
+            except (OSError, ValueError, TypeError):
+                prior_plans = []
+        base_plans = merge_signal_plans(loaded_plans or [], prior_plans)
+
+        explicit_plans = isinstance(state, dict) and state.get("signal_plans") is not None
+        incoming_plans = clean_state.get("signal_plans") if (explicit_plans and isinstance(clean_state.get("signal_plans"), list)) else []
+        if incoming_plans:
+            chosen_plans = merge_signal_plans(incoming_plans, base_plans)
+        else:
+            chosen_plans = base_plans
+
+        if chosen_plans:
+            clean_state["signal_plans"] = chosen_plans
+            clean_state["signal_plan_stats"] = compute_signal_plan_stats(chosen_plans)
+        else:
+            clean_state.pop("signal_plans", None)
+            clean_state.pop("signal_plan_stats", None)
+
         clean_state["generation"] = target_gen
         state_sha = _canonical_state_sha256(clean_state)
 
@@ -839,7 +1035,14 @@ def publish_generation(
                 (stage_articles / art["filename"]).write_text(art["content"], encoding="utf-8", newline="")
             if final_gen_dir.exists():
                 raise ValueError("generation_conflict")
-            os.replace(stage_dir, final_gen_dir)
+            for attempt in range(5):
+                try:
+                    os.replace(stage_dir, final_gen_dir)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05)
             _atomic_write_text(manifest_path, manifest_text)
         finally:
             if stage_dir.exists():

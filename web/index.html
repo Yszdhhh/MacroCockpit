@@ -22,7 +22,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20261128a">
+  <link rel="stylesheet" href="styles.css?v=20261128g">
 </head>
 <body>
   <header class="masthead" id="masthead">
@@ -112,6 +112,10 @@
           <div class="panel-head signals-head-bar" style="margin-bottom:10px">
             <div class="signals-head-left">
               <h2 class="sec-title" id="signalsHeading">核心快讯</h2>
+              <div class="seg seg-sm" id="feedViewSwitch" role="group" aria-label="快讯展示方式" hidden>
+                <button type="button" class="seg-btn is-active" data-fview="events" aria-pressed="true">事件卡</button>
+                <button type="button" class="seg-btn" data-fview="wire" aria-pressed="false">逐条快讯</button>
+              </div>
               <div class="seg seg-sm" id="newsModeSwitch" role="group" aria-label="信息视图切换">
                 <button type="button" class="seg-btn is-active" data-nmode="ranked" aria-pressed="true">算法精选</button>
                 <button type="button" class="seg-btn" data-nmode="timeline" aria-pressed="false">实时时间线</button>
@@ -368,7 +372,7 @@
             <div class="forum-channels-bar" id="forumChannelsBar"></div>
           </div>
           <div class="forum-macro-strip" id="forumMacroStrip" hidden></div>
-          <div id="forumDiscussionTrend"></div>
+          <div id="forumDiscussionTrend" hidden></div>
           <div class="forum-div-grid" id="forumDivergenceGrid"></div>
           <div class="forum-hot-wrap" id="forumHotWrap" hidden>
             <div class="forum-hot-head">
@@ -461,36 +465,39 @@
     <!-- 4. 记录 -->
     <section class="view" id="view-records" data-view="records" aria-label="记录" hidden>
       <div class="subtab-bar" id="recordsSubTabs" role="tablist" aria-label="记录子模块">
-        <button type="button" class="chip is-active" data-recsub="reviews" aria-pressed="true">操作复盘</button>
-        <button type="button" class="chip" data-recsub="essays" aria-pressed="false">随笔备忘</button>
+        <button type="button" class="chip is-active" data-recsub="reviews" aria-pressed="true">信号建议与复盘</button>
+        <button type="button" class="chip" data-recsub="essays" aria-pressed="false">投资备忘录</button>
       </div>
 
-      <!-- 操作复盘 -->
-      <section class="subview" id="view-journal" data-recsub-panel="reviews" aria-label="操作复盘">
+      <!-- 信号建议与复盘 -->
+      <section class="subview" id="view-journal" data-recsub-panel="reviews" aria-label="信号建议与复盘">
         <section class="panel">
           <div class="panel-head">
-            <h2 class="sec-title">操作复盘台账</h2>
+            <h2 class="sec-title">日线信号建议与复盘跟踪</h2>
             <span class="panel-meta" id="journalModeHint"></span>
           </div>
+          <div class="sigplan-stats-bar" id="signalPlanStatsBar" hidden></div>
           <div class="toolbar toolbar-tight">
-            <button type="button" class="btn btn-accent btn-sm" id="newReviewBtn">+ 新建复盘</button>
+            <button type="button" class="btn btn-accent btn-sm" id="newReviewBtn">+ 记实操备忘</button>
             <div class="chip-group" id="reviewStatusChips" role="group" aria-label="复盘状态">
               <button type="button" class="chip is-active" data-rstatus="all" aria-pressed="true">全部</button>
-              <button type="button" class="chip" data-rstatus="当前跟踪" aria-pressed="false">当前跟踪</button>
-              <button type="button" class="chip" data-rstatus="持有中" aria-pressed="false">持有中</button>
-              <button type="button" class="chip" data-rstatus="closed" aria-pressed="false">已平仓</button>
+              <button type="button" class="chip" data-rstatus="active" aria-pressed="false">跟踪中</button>
+              <button type="button" class="chip" data-rstatus="reviewed" aria-pressed="false">已出复盘</button>
+              <button type="button" class="chip" data-rstatus="adopted" aria-pressed="false">已记实操</button>
             </div>
           </div>
 
           <form class="composer" id="reviewForm" hidden novalidate>
             <input type="hidden" id="rvId">
             <input type="hidden" id="rvRev">
+            <input type="hidden" id="rvPlanId">
             <div class="form-grid">
               <label class="field"><span>日期</span><input type="date" id="rvDate" required></label>
-              <label class="field"><span>标的</span><input type="text" id="rvSymbol" maxlength="40" placeholder="例如 BTC" required autocomplete="off"></label>
+              <label class="field"><span>标的</span><input type="text" id="rvSymbol" maxlength="40" placeholder="例如 NVDA / BTC" required autocomplete="off"></label>
               <label class="field"><span>方向</span>
                 <select id="rvDirection">
                   <option value="做多">做多</option>
+                  <option value="防守减仓">防守减仓</option>
                   <option value="做空">做空</option>
                   <option value="对冲">对冲</option>
                   <option value="观望">观望</option>
@@ -499,21 +506,23 @@
               <label class="field"><span>仓位%</span><input type="number" id="rvSize" step="0.1" min="0" inputmode="decimal" value="0"></label>
               <label class="field"><span>参考均价</span><input type="number" id="rvPrice" step="any" min="0" inputmode="decimal" value="0"></label>
               <label class="field"><span>盈亏USD</span><input type="number" id="rvPnl" step="any" inputmode="decimal" value="0"></label>
-              <label class="field"><span>状态</span>
+              <label class="field"><span>执行状态</span>
                 <select id="rvStatus">
-                  <option value="当前跟踪">当前跟踪</option>
+                  <option value="未采用·观察">未采用·观察</option>
+                  <option value="计划跟进">计划跟进</option>
                   <option value="持有中">持有中</option>
                   <option value="已止盈">已止盈</option>
                   <option value="已止损">已止损</option>
+                  <option value="当前跟踪">当前跟踪</option>
                   <option value="已取消">已取消</option>
                 </select>
               </label>
             </div>
-            <label class="field field-wide"><span>核心逻辑</span><textarea id="rvThesis" rows="2" maxlength="2000"></textarea></label>
-            <label class="field field-wide"><span>执行细节</span><textarea id="rvExec" rows="2" maxlength="2000"></textarea></label>
-            <label class="field field-wide"><span>教训反思</span><textarea id="rvLesson" rows="2" maxlength="2000"></textarea></label>
+            <label class="field field-wide"><span>布局逻辑</span><textarea id="rvThesis" rows="2" maxlength="2000"></textarea></label>
+            <label class="field field-wide"><span>实操备忘（仓位计划 / 未采用原因）</span><textarea id="rvExec" rows="2" maxlength="2000"></textarea></label>
+            <label class="field field-wide"><span>个人复盘补充</span><textarea id="rvLesson" rows="2" maxlength="2000"></textarea></label>
             <div class="form-actions">
-              <button type="submit" class="btn btn-accent" id="rvSaveBtn">保存复盘</button>
+              <button type="submit" class="btn btn-accent" id="rvSaveBtn">保存备忘</button>
               <button type="button" class="btn btn-ghost" id="rvCancelBtn">取消</button>
             </div>
           </form>
@@ -522,12 +531,12 @@
         </section>
       </section>
 
-      <!-- 随笔 -->
-      <section class="subview" id="view-essays" data-recsub-panel="essays" aria-label="随笔备忘" hidden>
+      <!-- 投资备忘录 -->
+      <section class="subview" id="view-essays" data-recsub-panel="essays" aria-label="投资备忘录" hidden>
         <section class="panel">
           <div class="panel-head">
-            <h2 class="sec-title">市场随笔与观点备忘</h2>
-            <button type="button" class="btn btn-accent btn-sm" id="newEssayBtn">+ 写随笔</button>
+            <h2 class="sec-title">市场投资备忘录与随笔</h2>
+            <button type="button" class="btn btn-accent btn-sm" id="newEssayBtn">+ 写备忘</button>
           </div>
           <form class="composer" id="essayForm" hidden novalidate>
             <input type="hidden" id="esId">
@@ -753,16 +762,41 @@
     </section>
   </div>
 
-  <!-- 导入外部深研抽屉 -->
+  <!-- 深研工作台（在线并行深研 / 粘贴导入） -->
   <div class="drawer" id="ingestDrDrawer" role="dialog" aria-modal="true" aria-labelledby="ingestDrTitle" hidden>
     <div class="drawer-backdrop" data-close-drawer="ingestDr"></div>
     <section class="drawer-panel">
       <div class="drawer-handle" aria-hidden="true"><span></span></div>
       <div class="drawer-bar">
-        <h2 class="drawer-heading" id="ingestDrTitle">导入外部深研</h2>
-        <button type="button" class="icon-btn" id="closeIngestDrBtn" aria-label="关闭导入深研">✕</button>
+        <h2 class="drawer-heading" id="ingestDrTitle">深研工作台</h2>
+        <div class="seg seg-sm" id="drModeSwitch" role="group" aria-label="深研模式" hidden>
+          <button type="button" class="seg-btn is-active" data-drmode="run" aria-pressed="true">在线深研</button>
+          <button type="button" class="seg-btn" data-drmode="paste" aria-pressed="false">粘贴导入</button>
+        </div>
+        <button type="button" class="icon-btn" id="closeIngestDrBtn" aria-label="关闭深研工作台">✕</button>
       </div>
       <div class="drawer-scroll">
+        <form class="composer" id="drRunForm" novalidate hidden>
+          <div class="form-grid" style="margin-bottom:10px">
+            <label class="field field-span-2"><span>课题标题（选填）</span>
+              <input type="text" id="drRunTitleInput" maxlength="160" placeholder="留空自动由结论提取" autocomplete="off">
+            </label>
+            <label class="field field-span-2"><span>关联标的（选填，逗号分隔）</span>
+              <input type="text" id="drRunTickersInput" maxlength="160" placeholder="例如 NVDA, TSM, BTC" autocomplete="off">
+            </label>
+          </div>
+          <label class="field field-wide"><span>深研课题提问词（必填）</span>
+            <textarea id="drRunPromptInput" rows="7" maxlength="20000" required placeholder="输入研究问题或从周/月报点击「直接深研」带入提问词"></textarea>
+          </label>
+          <div class="dr-job-box" id="drJobBox" hidden>
+            <span class="badge badge-accent" id="drJobStatusBadge">准备中</span>
+            <span class="panel-meta" id="drJobMetaText"></span>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-accent" id="drRunBtn">开始深研</button>
+            <button type="button" class="btn btn-ghost" id="drRunCancelBtn">取消</button>
+          </div>
+        </form>
         <form class="composer" id="ingestDrForm" novalidate>
           <div class="form-grid" style="margin-bottom:10px">
             <label class="field field-span-2"><span>标题（选填）</span>
@@ -812,6 +846,6 @@
     </button>
   </nav>
 
-  <script src="app.js?v=20261128c"></script>
+  <script src="app.js?v=20261128g"></script>
 </body>
 </html>

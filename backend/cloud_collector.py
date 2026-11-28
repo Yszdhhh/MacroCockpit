@@ -39,6 +39,7 @@ from backend.fred_and_market import (
     fetch_us_equities,
 )
 from backend.kazike_engine import cluster_and_dedup, prefilter_financial, process_financial_signals, score_five_axes
+from backend.event_feed import update_event_feed
 from backend.market_quotes import fetch_crypto_quotes, fetch_fx_snapshot
 from backend.mobile_push import get_push_channels_status, load_push_env
 from backend.public_snapshot import (
@@ -115,6 +116,11 @@ try:
     from backend.source_matrix import build_asset_source_matrix
 except ImportError:
     build_asset_source_matrix = None  # type: ignore[assignment]
+
+try:
+    from backend.signal_advisor import update_signal_advisor
+except ImportError:
+    update_signal_advisor = None  # type: ignore[assignment]
 from backend.stock_research import (
     CACHE_TTL_SECONDS as STOCK_CACHE_TTL_SECONDS,
     CORE_RESEARCH_STOCKS,
@@ -837,6 +843,15 @@ def run_cn_merge_and_publish(
             receipts_path=data_dir / "scoring_receipts.json",
         )
         signal_candidates = kazike_stats.pop("candidates", [])
+        pre_cluster_items = kazike_stats.pop("pre_cluster_items", [])
+        event_cards: list[dict[str, Any]] | None = None
+        event_stats: dict[str, Any] = {}
+        try:
+            event_cards, event_stats = update_event_feed(pre_cluster_items, data_dir=data_dir)
+            if event_stats.get("ledger_persist_skipped"):
+                event_cards = None
+        except Exception:
+            event_cards, event_stats = None, {}
 
         # Deduplicate & persist curated articles (feed_*.md) while retaining guru_*.md & ta_*.md
         scored_arts: list[dict[str, Any]] = []
@@ -1074,9 +1089,30 @@ def run_cn_merge_and_publish(
             source_matrix_count = len((asset_source_matrix or {}).get("categories") or [])
             cross_links_count = len((market_analysis or {}).get("cross_source_links") or [])
 
+            signal_plans = None
+            signal_plan_stats = None
+            if update_signal_advisor is not None:
+                try:
+                    signal_plans, signal_plan_stats = update_signal_advisor(
+                        {
+                            "us_equities": us_equities,
+                            "macro_fred": macro_fred,
+                            "crypto_quotes": crypto_quotes,
+                            "risk_gate": risk_gate,
+                            "forum_sentiment": forum_sentiment,
+                        },
+                        data_dir=data_dir,
+                    )
+                    if isinstance(signal_plan_stats, dict) and signal_plan_stats.get("ledger_persist_skipped"):
+                        signal_plans, signal_plan_stats = None, None
+                except Exception:
+                    signal_plans, signal_plan_stats = None, None
+
             coverage = {
                 "signals_count": len(all_signals),
                 "signal_candidates_count": len(signal_candidates),
+                **({"event_cards_count": len(event_cards)} if event_cards is not None else {}),
+                **({"signal_plans_count": len(signal_plans)} if signal_plans is not None else {}),
                 "signal_sources_count": int(kazike_stats.get("source_count") or 0),
                 "source_count": int(kazike_stats.get("source_count") or 0),
                 "category_breakdown": cat_counts,
@@ -1110,6 +1146,8 @@ def run_cn_merge_and_publish(
                     "stock_profiles": stock_profiles,
                     "signals": all_signals,
                     "signal_candidates": signal_candidates,
+                    **({"event_cards": event_cards, "event_stats": event_stats} if event_cards is not None else {}),
+                    **({"signal_plans": signal_plans, **({"signal_plan_stats": signal_plan_stats} if signal_plan_stats else {})} if signal_plans is not None else {}),
                     "kazike_stats": kazike_stats,
                     "correlations": correlations,
                     "kol_digest": kol_digest,
@@ -1241,6 +1279,15 @@ def run_eqn_fast_sync(
                 receipts_path=data_dir / "scoring_receipts.json",
             )
             signal_candidates = kazike_stats.pop("candidates", [])
+            pre_cluster_items = kazike_stats.pop("pre_cluster_items", [])
+            event_cards: list[dict[str, Any]] | None = None
+            event_stats: dict[str, Any] = {}
+            try:
+                event_cards, event_stats = update_event_feed(pre_cluster_items, data_dir=data_dir)
+                if event_stats.get("ledger_persist_skipped"):
+                    event_cards = None
+            except Exception:
+                event_cards, event_stats = None, {}
 
             cat_counts = _count_signal_categories(all_signals)
             next_gen = cur_gen + 1
@@ -1266,6 +1313,7 @@ def run_eqn_fast_sync(
                 {
                     "signals_count": len(all_signals),
                     "signal_candidates_count": len(signal_candidates),
+                    **({"event_cards_count": len(event_cards)} if event_cards is not None else {}),
                     "signal_sources_count": int(kazike_stats.get("source_count") or 0),
                     "source_count": int(kazike_stats.get("source_count") or 0),
                     "category_breakdown": cat_counts,
@@ -1278,6 +1326,12 @@ def run_eqn_fast_sync(
             cur_state["generated_at_bjt"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
             cur_state["signals"] = all_signals
             cur_state["signal_candidates"] = signal_candidates
+            if event_cards is not None:
+                cur_state["event_cards"] = event_cards
+                cur_state["event_stats"] = event_stats
+            else:
+                cur_state.pop("event_cards", None)
+                cur_state.pop("event_stats", None)
             cur_state["kazike_stats"] = kazike_stats
             cur_state["coverage"] = coverage
 

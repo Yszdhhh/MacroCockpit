@@ -8,11 +8,11 @@ MacroCockpit 2.0 是一个面向跨市场（美股、A股·港股、AI 前沿、
 
 1. **全网舆论风向聚合与资金宽度对照（[`backend/forum_sentiment.py`](backend/forum_sentiment.py)）**
    - 汇聚雪球、东财股吧人气榜、全网主流热榜（微博/百度/头条/抖音/知乎/华尔街见闻/财联社）、Reddit/HN、小红书 5 路社区讨论，结合沪深两市成交额、两融余额、港股通南向资金与大众热榜占榜率进行温差与分歧对照。
-   - 首页「全网舆论风向」卡片精简为综合情绪指数、宏观资金宽度与四大核心赛道专业/散户聚合指数（移动端自动单列对齐）；舆论详情页将当期观点对照与持续讨论趋势分开。榜单股当日涨跌或一次热点不构成持续升温，更不是见顶或交易信号。
-   - 国内采集以已有公开热榜标题样本记录黄金、比特币、QQQ、智谱及 MiniMax 的 7/30/90 天关注趋势。只认同窗口内具备持续证据的可比来源；无历史回填，无可信观测时不填零。这里不是平台全量发帖指数，不把微信、雪球、X 的缺口当成已接入。
+   - 首页「全网舆论风向」卡片精简为综合情绪指数、宏观资金宽度与四大核心赛道专业/散户聚合指数（移动端单列对齐）；舆论详情页将当期观点对照与多日讨论趋势分开。榜单股当日涨跌幅不再计入社区多空分，仅作为「人气榜」热度展示。
+   - 国内及本地聚合端全天分 4 个 6 小时时段滚动记录微博、百度、头条、抖音、知乎、B站公开热榜前 30 条，追踪「A股与港股 / 美股AI与科技 / 黄金与贵金属 / 比特币与加密 / 美联储与宏观」5 大赛道的 7/30/90 天关注趋势；并支持跨端发布自动承接云端历史趋势，无历史回填且不将缺口填零。
 
-2. **英文快讯与海外热帖中文简介（[`backend/zh_brief.py`](backend/zh_brief.py)）**
-   - 自动识别英文财经快讯与海外社区热帖（如 CNBC、MarketWatch、CoinDesk、Cointelegraph、Reddit），在标题下方展示简明中文简介并将较长英文原文默认折叠至「展开全文」内按需查看。
+2. **英文快讯与海外热帖 Memo 投资备忘（[`backend/zh_brief.py`](backend/zh_brief.py)）**
+   - 自动识别英文财经快讯与海外社区热帖（如 CNBC、MarketWatch、CoinDesk、Cointelegraph、Reddit），在标题下方以简洁 `Memo` 投资备忘标签展示中文要点摘要并将较长英文原文默认折叠至「展开全文」内按需查看。
    - 仅缓存有效网络译文并跳过兜底草稿，且在请求外部翻译前先经本地隐私文本过滤器拦截，杜绝敏感或疑似持仓文本外发。
 
 3. **快讯评分护栏升级与加密降噪（[`backend/kazike_engine.py`](backend/kazike_engine.py)、[`backend/curation.py`](backend/curation.py)）**
@@ -22,8 +22,18 @@ MacroCockpit 2.0 是一个面向跨市场（美股、A股·港股、AI 前沿、
 4. **KOL 零前视胜率核验、信源导航与周期深研（[`backend/kol_intel_engine.py`](backend/kol_intel_engine.py)、[`backend/market_synthesis.py`](backend/market_synthesis.py)、[`backend/source_matrix.py`](backend/source_matrix.py)、[`backend/periodic_report.py`](backend/periodic_report.py)）**
    - 新增高胜率 KOL 零前视历史观点胜率核验、海外大佬长文专栏全文抓取、市场四维定调与跨源共振/背离分析、6 大资产类别信源导航与中美产业链映射，以及周/月度深研报告自动生成。
 
-5. **私密持仓防倒退云同步、隐私加固与双端适配（[`backend/vps_sync.py`](backend/vps_sync.py)、[`backend/public_snapshot.py`](backend/public_snapshot.py)、[`backend/mcp_server.py`](backend/mcp_server.py)）**
+5. **一事一卡事件流与离线回放（[`backend/event_feed.py`](backend/event_feed.py)、[`docs/EVENT_FEED_DESIGN.md`](docs/EVENT_FEED_DESIGN.md)）**
+   - 新增持久事件台账 `data/event_ledger.json` 与 `GET /api/v2/events`，把跨源转载、中英译文与同源采访归并至统一出处家族，严格分离观点与综述；仅在出现实质增量事实时递增时间线版本，首页支持「事件卡 / 逐条快讯」一键切换，默认不启用新推送并支持 `python -m backend.event_feed --replay` 离线回放。
+
+6. **私密持仓防倒退云同步、隐私加固与双端适配（[`backend/vps_sync.py`](backend/vps_sync.py)、[`backend/public_snapshot.py`](backend/public_snapshot.py)、[`backend/mcp_server.py`](backend/mcp_server.py)）**
    - 新增经 `PORTFOLIO_RW` 令牌防倒退同步本机账户/现货/合约/筛选规则至云端登录态账本，同时在公开快照投影与只读 MCP 输出中加强信号、中文简介及信源矩阵的隐私文本和结构校验；优化桌面与手机端排版及资源缓存控制。
+
+7. **多智能体并行深研工作台（接入 `google-gemini/demolab` 方法论：[`backend/deep_research_runner.py`](backend/deep_research_runner.py)、[`.agents/skills/deep-research/SKILL.md`](.agents/skills/deep-research/SKILL.md)）**
+   - 将课题自动拆解为「一手官方披露 / 产业传导 / 反方证伪」3 路并发检索（自带防长尾超时熔断与缺口标注），主研究员交叉合成后自动清洗违禁词并写入 `articles/`；支持周/月报提问词旁一键点击「直接深研」、CLI `--run-demolab-dr`、MCP `deep_research_run(mode="demolab")`，同时保留 Markdown 粘贴导入作为兜底，消费端与离线包安全隔离。
+
+8. **日线信号建议与短中期自动复盘（[`backend/signal_advisor.py`](backend/signal_advisor.py)）**
+   - 基于已完成日线收盘序列零前视检测四类日线级结构（「日线超跌反弹 / 日线底部反转 / 主升顺风布局 / 过热背离防守」），给出明确参考价位、目标参考与失效保护，彻底屏蔽盘中噪声与超短线信号。
+   - `记录` 模块升级为「信号建议与复盘 + 投资备忘录」，即使用户未采用系统信号也自动跟踪 T+5 个交易日（短期）与 T+20 个交易日（中期）真实走势并区分「冲高回落 vs 演化反转」，支持关联个人实操备忘。
 
 ---
 

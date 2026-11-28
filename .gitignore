@@ -20,6 +20,10 @@ data/generations/
 data/intl_relay_bundle.json
 data/cn_bundle.json
 data/portfolio_sync_state.json
+data/event_ledger.json
+data/event_push_state.json
+data/deep_research_jobs.json
+data/signal_advisor_ledger.json
 data/*sync_state*.json
 
 # Built artifacts & local backups

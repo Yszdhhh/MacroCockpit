@@ -36,6 +36,10 @@ from backend.fred_and_market import (
     fetch_us_equities,
 )
 from backend.kazike_engine import lexical_similarity, normalize_url, process_financial_signals
+try:
+    from backend.event_feed import update_event_feed
+except ImportError:
+    update_event_feed = None  # type: ignore[assignment]
 from backend.mobile_push import get_push_channels_status
 from backend.public_snapshot import file_lock, has_private_article_content, safe_article_filename
 import backend.rss_sources as _rss_mod
@@ -84,10 +88,17 @@ except ImportError:
     fetch_hybrid_perp_quotes = None  # type: ignore[assignment]
 
 try:
-    from backend.forum_sentiment import build_sentiment_divergence, collect_forum_pulse
+    from backend.forum_sentiment import (
+        build_sentiment_divergence,
+        collect_forum_pulse,
+        collect_public_discussion_trends,
+        trim_forum_sentiment,
+    )
 except ImportError:
     build_sentiment_divergence = None  # type: ignore[assignment]
     collect_forum_pulse = None  # type: ignore[assignment]
+    collect_public_discussion_trends = None  # type: ignore[assignment]
+    trim_forum_sentiment = None  # type: ignore[assignment]
 
 try:
     from backend.source_matrix import build_asset_source_matrix
@@ -98,6 +109,11 @@ try:
     from backend.periodic_report import generate_periodic_decision_report
 except ImportError:
     generate_periodic_decision_report = None  # type: ignore[assignment]
+
+try:
+    from backend.signal_advisor import update_signal_advisor
+except ImportError:
+    update_signal_advisor = None  # type: ignore[assignment]
 
 STATE_OUTPUT_PATH = DATA_DIR / "cockpit_state.json"
 AIHOT_CACHE_PATH = DATA_DIR / "aihot_cache.json"
@@ -1382,6 +1398,27 @@ def generate_cockpit_state(
     ]
     all_signals, kazike_stats = process_financial_signals(raw_signals)
     signal_candidates = kazike_stats.pop("candidates", [])
+    pre_cluster_items = kazike_stats.pop("pre_cluster_items", [])
+    event_cards: list[dict[str, Any]] | None = None
+    event_stats: dict[str, Any] = {}
+    if update_event_feed is not None:
+        try:
+            event_cards, event_stats = update_event_feed(pre_cluster_items, data_dir=output_path.parent)
+            if event_stats.get("ledger_persist_skipped"):
+                event_cards = None
+        except Exception:
+            event_cards, event_stats = None, {}
+    if event_cards is None and output_path.is_file():
+        try:
+            prior_obj = json.loads(output_path.read_text(encoding="utf-8"))
+            if isinstance(prior_obj, dict) and isinstance(prior_obj.get("event_cards"), list):
+                from backend.event_feed import project_event_cards
+
+                event_cards = project_event_cards(prior_obj.get("event_cards"))
+                if isinstance(prior_obj.get("event_stats"), dict) and not event_stats:
+                    event_stats = dict(prior_obj["event_stats"])
+        except (OSError, ValueError, TypeError):
+            pass
     for sig_list in (all_signals, signal_candidates):
         for sig in sig_list:
             if isinstance(sig, dict):
@@ -1501,6 +1538,12 @@ def generate_cockpit_state(
                 kol_scorecards=kol_scorecards,
                 signals=all_signals,
             )
+            if collect_public_discussion_trends is not None and isinstance(forum_sentiment, dict):
+                trends = collect_public_discussion_trends(output_path.parent)
+                if trends:
+                    forum_sentiment["discussion_trends"] = trends
+                    if trim_forum_sentiment is not None:
+                        forum_sentiment = trim_forum_sentiment(forum_sentiment)
         except Exception:
             forum_sentiment = {}
 
@@ -1570,9 +1613,38 @@ def generate_cockpit_state(
     source_matrix_count = len((asset_source_matrix or {}).get("categories") or [])
     cross_links_count = len((market_analysis or {}).get("cross_source_links") or [])
 
+    signal_plans: list[dict[str, Any]] | None = None
+    signal_plan_stats: dict[str, Any] | None = None
+    if update_signal_advisor is not None:
+        try:
+            advisor_ctx = {
+                "us_equities": us_equities,
+                "macro_fred": macro_fred,
+                "crypto_quotes": crypto_quotes,
+                "risk_gate": risk_gate,
+                "forum_sentiment": forum_sentiment,
+            }
+            signal_plans, signal_plan_stats = update_signal_advisor(advisor_ctx, data_dir=output_path.parent)
+            if isinstance(signal_plan_stats, dict) and signal_plan_stats.get("ledger_persist_skipped"):
+                signal_plans, signal_plan_stats = None, None
+        except Exception:
+            signal_plans, signal_plan_stats = None, None
+    if signal_plans is None and output_path.is_file():
+        try:
+            prior_obj = json.loads(output_path.read_text(encoding="utf-8"))
+            if isinstance(prior_obj, dict) and isinstance(prior_obj.get("signal_plans"), list):
+                from backend.signal_advisor import project_signal_plan_stats, project_signal_plans
+
+                signal_plans = project_signal_plans(prior_obj.get("signal_plans"))
+                signal_plan_stats = project_signal_plan_stats(prior_obj.get("signal_plan_stats"))
+        except (OSError, ValueError, TypeError):
+            pass
+
     coverage = {
         "signals_count": len(all_signals),
         "signal_candidates_count": len(signal_candidates),
+        "event_cards_count": len(event_cards or []),
+        **({"signal_plans_count": len(signal_plans)} if signal_plans is not None else {}),
         "signal_sources_count": int(kazike_stats.get("source_count") or 0),
         "source_count": int(kazike_stats.get("source_count") or 0),
         "category_breakdown": cat_counts,
@@ -1599,6 +1671,8 @@ def generate_cockpit_state(
         "stock_profiles": stock_profiles,
         "signals": all_signals,
         "signal_candidates": signal_candidates,
+        **({"event_cards": event_cards, "event_stats": event_stats} if event_cards is not None else {}),
+        **({"signal_plans": signal_plans, **({"signal_plan_stats": signal_plan_stats} if signal_plan_stats else {})} if signal_plans is not None else {}),
         "kazike_stats": kazike_stats,
         "correlations": correlations,
         "kol_digest": kol_digest,

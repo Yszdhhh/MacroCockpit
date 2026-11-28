@@ -606,7 +606,7 @@ def _fetch_xueqiu_channel(*, user_home: Path, timeout: int = 6) -> dict[str, Any
                     "channel": "xueqiu",
                     "title": stock_title,
                     "summary": stock_title,
-                    "sentiment": "人气榜参考",
+                    "sentiment": "人气榜",
                     "kind": "quote_rank",
                     "heat": heat,
                     "tickers": tickers[:4],
@@ -1800,7 +1800,7 @@ def _fetch_eastmoney_guba_channel(*, timeout: int = 6) -> dict[str, Any]:
                 "channel": "eastmoney",
                 "title": _truncate(title, 76),
                 "summary": _truncate(summary, 140),
-                "sentiment": "人气榜参考",
+                "sentiment": "人气榜",
                 "kind": "quote_rank",
                 "heat": heat,
                 "tickers": tickers[:4],
@@ -2391,7 +2391,7 @@ def _judge_divergence(
     # These branches describe a single snapshot, independent from the history-based warning.
     if cn_platform_count >= 2 and street_score >= 30 and xhs_count >= 3 and xhs_heat >= 76 and xhs_score >= 35:
         return (
-            "当期关注较高",
+            "关注较高",
             "neutral",
             "本次样本关注度较高，不代表持续升温。",
         )
@@ -2400,16 +2400,16 @@ def _judge_divergence(
         or (mass_topic_hits >= 6 and mass_penetration_pct >= 14.0 and street_score >= 32 and cn_crowd_heat >= 74)
     ):
         return (
-            "当期关注较高",
+            "关注较高",
             "neutral",
             "本次样本关注度较高，不代表持续升温。",
         )
     if desk_count == 0:
-        return ("仅社区样本", "neutral", "本次没有可作对照的专业样本。")
+        return ("仅社区帖", "neutral", "本次没有可作对照的专业样本。")
     if street_heat >= 62 and street_score >= 28 and (desk_score <= 15 or gap >= 25):
-        return ("当期看多分歧", "neutral", "本次社区样本偏多，专业样本未显示相同倾向。")
+        return ("看多分歧", "neutral", "本次社区样本偏多，专业样本未显示相同倾向。")
     if street_score <= -25 and street_heat >= 50 and (desk_score >= -5 or desk_score - street_score >= 25):
-        return ("当期看空分歧", "neutral", "本次社区样本偏空，专业样本未显示相同倾向。")
+        return ("看空分歧", "neutral", "本次社区样本偏空，专业样本未显示相同倾向。")
     if abs(desk_score) >= 22 and street_heat < 58 and (
         (desk_score > 0 and -15 < street_score < 22) or (desk_score < 0 and -20 < street_score < 15)
     ):
@@ -2419,7 +2419,7 @@ def _judge_divergence(
             if desk_score > 0
             else "本次专业样本偏空，社区样本倾向不明显。"
         )
-        return ("专业倾向较强", tone, hint)
+        return ("专业偏强", tone, hint)
     if (
         (desk_score >= 15 and street_score <= -15)
         or (desk_score <= -15 and street_score >= 15)
@@ -2457,21 +2457,23 @@ def build_sentiment_divergence(
 ) -> dict[str, Any]:
     """Compare DESK (KOL + institutional wires) vs STREET (forums) across 6 core tracks (<= 40KB)."""
     pulse = forum_pulse if isinstance(forum_pulse, dict) else {}
-    street_items: list[dict[str, Any]] = []
+    all_street_items: list[dict[str, Any]] = []
     if isinstance(pulse.get("items"), list) and pulse["items"]:
-        street_items = [
+        all_street_items = [
             x for x in pulse["items"]
             if isinstance(x, dict) and not has_private_article_text(json.dumps(x, ensure_ascii=False))
         ]
     else:
         for ch in (pulse.get("channels") or {}).values():
             if isinstance(ch, dict):
-                street_items.extend(
+                all_street_items.extend(
                     x for x in (ch.get("items") or [])
                     if isinstance(x, dict) and not has_private_article_text(json.dumps(x, ensure_ascii=False))
                 )
 
-    street_items = [item for item in street_items if not _is_quote_rank(item)]
+    # Stock quote rankings (% gain/loss) never bias directional community sentiment,
+    # while remaining visible in hot_discussions under the neutral "人气榜" label.
+    street_items = [item for item in all_street_items if not _is_quote_rank(item)]
 
     raw_market_pulse = pulse.get("market_pulse") if isinstance(pulse.get("market_pulse"), dict) else {}
     clean_market_pulse = project_market_pulse(raw_market_pulse)
@@ -2671,7 +2673,7 @@ def build_sentiment_divergence(
 
     hot_discussions: list[dict[str, Any]] = []
     seen_hot: set[str] = set()
-    sorted_street = sorted(street_items, key=lambda x: int(x.get("heat") or 0), reverse=True)
+    sorted_street = sorted(all_street_items, key=lambda x: int(x.get("heat") or 0), reverse=True)
 
     def _to_hot_row(item: dict[str, Any]) -> dict[str, Any] | None:
         title = _truncate(strip_emojis(str(item.get("title") or "")), 76)

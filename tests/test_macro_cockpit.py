@@ -229,6 +229,7 @@ def test_state_refresh_generation_and_zero_baseline_invariant(
             "updated_at_bjt": now_bjt,
             "items": [{"title": "关注现货金", "topics": ["黄金与大宗"], "heat": 60, "score": 0}],
         },
+        "collect_public_discussion_trends": {},
     }
     for name, value in providers.items():
         monkeypatch.setattr(signal_aggregator, name, lambda *args, _value=value, **kwargs: _value)

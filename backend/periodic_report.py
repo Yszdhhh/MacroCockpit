@@ -961,6 +961,8 @@ def ingest_deep_research_markdown(
     related_period: str = "",
     articles_dir: Path | str | None = None,
     url: str = "",
+    publisher: str = "Deep Research 深度补充",
+    author_role: str = "外部深研闭环",
 ) -> dict[str, Any]:
     """Sanitize, privacy-check, persist, and return an external Deep Research markdown article."""
     raw_text = str(raw_markdown or "").strip()
@@ -1033,13 +1035,13 @@ def ingest_deep_research_markdown(
     if not safe_article_filename(filename):
         raise ValueError(f"非法文件名: {filename}")
 
-    publisher = "Deep Research 深度补充"
-    author_role = "外部深研闭环"
+    clean_pub = _scrub_forbidden(publisher) or "Deep Research 深度补充"
+    clean_role = _scrub_forbidden(author_role) or "外部深研闭环"
     frontmatter = _build_yaml_frontmatter(
         title=clean_title,
         summary=summary,
-        publisher=publisher,
-        author_role=author_role,
+        publisher=clean_pub,
+        author_role=clean_role,
         report_kind="deep_research",
         score=90,
         tickers=norm_tickers,
@@ -1056,8 +1058,8 @@ def ingest_deep_research_markdown(
         filename=filename,
         title=clean_title,
         summary=summary,
-        publisher=publisher,
-        author_role=author_role,
+        publisher=clean_pub,
+        author_role=clean_role,
         report_kind="deep_research",
         score=90,
         tickers=norm_tickers,
@@ -1068,7 +1070,7 @@ def ingest_deep_research_markdown(
 
 
 def check_deep_research_capabilities() -> dict[str, Any]:
-    """Inspect local Deep Research CLI, env key presence (bool only), and desktop debate bridge."""
+    """Inspect local Deep Research CLI, DemoLab parallel runner, env key presence (bool only), and desktop debate bridge."""
     which_cli = shutil.which("gemini-api") or shutil.which("gemini-api.exe")
     cli_path: str | None = None
     if which_cli:
@@ -1085,16 +1087,44 @@ def check_deep_research_capabilities() -> dict[str, Any]:
     has_agy_bridge = acp_bridge_script.is_file()
     can_run_gemini_dr = bool(cli_path and has_api_key)
 
+    demolab_caps: dict[str, Any] = {
+        "demolab_skill_found": False,
+        "agy_cli_found": False,
+        "staff_hub_found": False,
+        "can_run_demolab_dr": False,
+        "available_runners": [],
+    }
+    try:
+        from backend.deep_research_runner import probe_demolab_capabilities
+
+        demolab_caps = probe_demolab_capabilities()
+    except Exception:
+        pass
+
+    can_run_demolab_dr = bool(demolab_caps.get("can_run_demolab_dr"))
+    if can_run_gemini_dr:
+        rec_mode = "gemini_deep_research"
+    elif can_run_demolab_dr:
+        rec_mode = "demolab_parallel"
+    else:
+        rec_mode = "manual_prompt_copy"
+
     return {
         "gemini_api_cli_found": bool(cli_path),
         "gemini_api_cli_path": cli_path,
         "has_gemini_api_key": has_api_key,
         "can_run_gemini_dr": can_run_gemini_dr,
+        "demolab_skill_found": bool(demolab_caps.get("demolab_skill_found")),
+        "agy_cli_found": bool(demolab_caps.get("agy_cli_found")),
+        "staff_hub_found": bool(demolab_caps.get("staff_hub_found")),
+        "can_run_demolab_dr": can_run_demolab_dr,
+        "can_run_any_dr": bool(can_run_gemini_dr or can_run_demolab_dr),
+        "available_runners": list(demolab_caps.get("available_runners") or []),
         "default_agent": GEMINI_DR_AGENT,
         "auto_paid_calls_disabled": True,
         "has_multi_agent_debate": has_debate,
         "has_agy_bridge": has_agy_bridge,
-        "recommended_mode": "gemini_deep_research" if can_run_gemini_dr else "manual_prompt_copy",
+        "recommended_mode": rec_mode,
     }
 
 
@@ -1227,7 +1257,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--url", type=str, default="", help="导入时可选来源链接")
     parser.add_argument("--status", action="store_true", help="输出本地 Deep Research 调用能力 JSON")
     parser.add_argument("--run-gemini-dr", action="store_true", help="显式触发 Gemini Deep Research（需 GEMINI_API_KEY）")
-    parser.add_argument("--prompt", type=str, default="", help="配合 --run-gemini-dr 使用的提问词")
+    parser.add_argument("--run-demolab-dr", action="store_true", help="显式触发 DemoLab 多智能体并行深研")
+    parser.add_argument("--prompt", type=str, default="", help="配合 --run-gemini-dr / --run-demolab-dr 使用的提问词")
     parser.add_argument("--ingest-result", action="store_true", help="若接口同步返回正文则自动入库")
 
     args = parser.parse_args(argv)
@@ -1261,6 +1292,23 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if args.run_demolab_dr:
+        from backend.deep_research_runner import run_demolab_deep_research
+
+        state = _load_state_file(args.state)
+        res = run_demolab_deep_research(
+            args.prompt,
+            execute=True,
+            state=state,
+            articles_dir=args.articles_dir,
+            ingest=args.ingest_result,
+            title=args.title,
+            tickers=args.tickers or None,
+            related_period=args.related_period,
+        )
+        print(json.dumps({k: v for k, v in res.items() if k != "markdown"}, ensure_ascii=False, indent=2))
+        return 0 if res.get("status") == "completed" else 1
 
     if args.run_gemini_dr:
         res = run_gemini_deep_research(

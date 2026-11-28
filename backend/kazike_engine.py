@@ -1041,8 +1041,12 @@ def process_financial_signals(
                 non_cr_tail.append(x)
         visible = head_kept + non_cr_tail + cr_tail
 
+    pre_cluster_items = [
+        {k: v for k, v in item.items() if not str(k).startswith("_")}
+        for item in kept_pre
+    ]
     attach_zh_briefs_batch(
-        visible + bounded_candidates[:80],
+        visible + bounded_candidates[:80] + pre_cluster_items[:120],
         allow_network=not bool(os.environ.get("PYTEST_CURRENT_TEST")),
         max_network_items=60,
     )
@@ -1064,5 +1068,6 @@ def process_financial_signals(
         "source_breakdown": dict(sorted(source_tally.items(), key=lambda kv: (-kv[1], kv[0]))),
         "candidates_count": len(bounded_candidates),
         "candidates": bounded_candidates,
+        "pre_cluster_items": pre_cluster_items,
     }
     return (visible, stats)

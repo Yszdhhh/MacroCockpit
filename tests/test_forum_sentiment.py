@@ -329,9 +329,9 @@ def test_build_sentiment_divergence_contract_tags_and_forbidden_terms() -> None:
     assert len(div["divergences"]) == 6
     by_topic = {d["topic"]: d for d in div["divergences"]}
     assert set(by_topic.keys()) == set(fs.CORE_TOPICS)
-    assert by_topic["美股AI与科技"]["divergence_tag"] == "当期看多分歧"
-    assert by_topic["黄金与大宗"]["divergence_tag"] == "当期看空分歧"
-    assert by_topic["A股与港股"]["divergence_tag"] == "专业倾向较强"
+    assert by_topic["美股AI与科技"]["divergence_tag"] == "看多分歧"
+    assert by_topic["黄金与大宗"]["divergence_tag"] == "看空分歧"
+    assert by_topic["A股与港股"]["divergence_tag"] == "专业偏强"
     assert by_topic["比特币与加密"]["divergence_tag"] == "多头共振"
 
     for d in div["divergences"]:
@@ -509,7 +509,7 @@ def test_xhs_noise_filtering_comments_and_contrarian_top_warning(monkeypatch: py
     }
     div = fs.build_sentiment_divergence(pulse)
     gold_div = {d["topic"]: d for d in div["divergences"]}["黄金与大宗"]
-    assert gold_div["divergence_tag"] == "当期关注较高"
+    assert gold_div["divergence_tag"] == "关注较高"
     assert gold_div["tone"] == "neutral"
     _assert_no_forbidden_recursive(div)
 
@@ -556,10 +556,10 @@ def test_xhs_noise_filtering_comments_and_contrarian_top_warning(monkeypatch: py
     }
     mixed_div = fs.build_sentiment_divergence(mixed_xhs_pulse)
     gold_mixed = {d["topic"]: d for d in mixed_div["divergences"]}["黄金与大宗"]
-    assert gold_mixed["divergence_tag"] != "当期关注较高"
+    assert gold_mixed["divergence_tag"] != "关注较高"
     assert any(h.get("zh_brief") for h in mixed_div["hot_discussions"] if h.get("platform") == "Reddit")
 
-    # Single Xiaohongshu item on an overall slightly bearish Fed crowd (street_score < 0) must NOT emit 当期关注较高 or 出圈见顶
+    # Single Xiaohongshu item on an overall slightly bearish Fed crowd (street_score < 0) must NOT emit 关注较高 or 出圈见顶
     fed_neg_pulse = {
         "updated_at_bjt": "2026-11-27 23:32",
         "channels_status": [],
@@ -569,7 +569,7 @@ def test_xhs_noise_filtering_comments_and_contrarian_top_warning(monkeypatch: py
         ],
     }
     fed_neg_div = {d["topic"]: d for d in fs.build_sentiment_divergence(fed_neg_pulse)["divergences"]}["美联储与宏观利率"]
-    assert fed_neg_div["divergence_tag"] not in ("当期关注较高", "出圈见顶")
+    assert fed_neg_div["divergence_tag"] not in ("关注较高", "出圈见顶")
 
     # #1 & #5: Private portfolio holdings leak blocked in build_sentiment_divergence & project_public_state (incl. channels_status.note), plus CJK-adjacent E21 scrub
     from backend.public_snapshot import project_public_state
@@ -603,7 +603,7 @@ def test_xhs_noise_filtering_comments_and_contrarian_top_warning(monkeypatch: py
     }
     cn_only_div = fs.build_sentiment_divergence(cn_only_pulse)
     cn_a = {d["topic"]: d for d in cn_only_div["divergences"]}["A股与港股"]
-    assert cn_a["divergence_tag"] == "当期关注较高"
+    assert cn_a["divergence_tag"] == "关注较高"
     assert "小红书" not in cn_a["action_hint"]
 
     proj = project_public_state(
@@ -813,7 +813,7 @@ def test_hermes_scoring_guardrails_crypto_cap_and_zh_brief(tmp_path: Path) -> No
             ],
         }
     )
-    assert {d["topic"]: d for d in single_xhs["divergences"]}["黄金与大宗"]["divergence_tag"] != "当期关注较高"
+    assert {d["topic"]: d for d in single_xhs["divergences"]}["黄金与大宗"]["divergence_tag"] != "关注较高"
 
 
 def test_holding_radar_and_hybrid_perp_quote_parsing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -945,6 +945,11 @@ def test_ahk_expansion_unit_conversions_dedup_and_public_guard(monkeypatch: pyte
         return {}
 
     monkeypatch.setattr(fs.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(
+        fs,
+        "_fetch_xueqiu_channel",
+        lambda **kw: {"id": "xueqiu", "name": "雪球社区", "status": "需登录态", "count": 0, "note": "mock", "hot_stocks": [], "items": []},
+    )
     monkeypatch.setattr(fs, "_http_post_text", _mock_post)
     monkeypatch.setattr(fs, "_http_get_text", _mock_get_text)
     monkeypatch.setattr(fs, "_http_get_json", _mock_get_json)
@@ -984,7 +989,8 @@ def test_ahk_expansion_unit_conversions_dedup_and_public_guard(monkeypatch: pyte
     ahk = by_t["A股与港股"]
     assert ahk["desk_count"] >= 5  # hkpro + NVDA/HK07687 + gelonghui + 南向 + 两融
     assert all("user1" not in s["author"] for s in ahk["desk_samples"])
-    assert ahk["street_count"] == 1  # two quote-enriched rankings are not community posts
+    assert ahk["street_count"] == 1  # two quote-enriched rankings excluded from directional street_score
+    assert any(h.get("sentiment") == "人气榜" for h in div["hot_discussions"])
 
     long_prefix = "沪深两市核心芯片及算力产业链公司发布三季度业绩预告公告显示主营业务整体表现为"
     dedup_div = fs.build_sentiment_divergence(

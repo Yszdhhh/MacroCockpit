@@ -9,7 +9,9 @@
     showAmt: "macro_cockpit_show_amt_v1",
     currency: "macro_cockpit_currency_v1",
     readBriefs: "macro_cockpit_read_briefs_v1",
-    newsMode: "macro_cockpit_news_mode_v1"
+    readEvents: "macro_cockpit_read_events_v1",
+    newsMode: "macro_cockpit_news_mode_v1",
+    feedView: "macro_cockpit_feed_view_v1"
   };
 
   const TOP_VIEWS = ["today", "portfolio", "research", "records"];
@@ -185,6 +187,13 @@
         } catch (_e) {
           return "ranked";
         }
+      })(),
+      feedView: (() => {
+        try {
+          return localStorage.getItem(STORAGE_KEYS.feedView) === "wire" ? "wire" : "events";
+        } catch (_e) {
+          return "events";
+        }
       })()
     },
     readBriefs: (() => {
@@ -196,6 +205,16 @@
         return new Set();
       }
     })(),
+    readEvents: (() => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEYS.readEvents);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch (_e) {
+        return {};
+      }
+    })(),
+    expandedEvents: new Set(),
     openSignalMenu: "",
     openScoreId: "",
     lastUndoAction: null,
@@ -219,6 +238,10 @@
     previewReqSeq: 0,
     positionFormInitial: null,
     maskedPositionValues: null,
+    drCapabilities: null,
+    drMode: "paste",
+    drJobPollTimer: 0,
+    drActiveJobId: "",
     drafts: {
       review: null,
       essay: null,
@@ -235,7 +258,7 @@
       "capitalGroup", "capitalInput", "applyCapitalBtn", "currencySeg", "toggleAmtBtn",
       "themeToggleBtn", "refreshBtn", "openPushBtn", "logoutBtn", "viewNav",
       "toast", "undoBar", "undoText", "undoBtn", "undoDismissBtn", "mobileFocusBar",
-      "todayOverviewBar", "sectorRibbon", "newsModeSwitch", "dailyGlance", "execStrip", "execGate", "execPositions",
+      "todayOverviewBar", "sectorRibbon", "feedViewSwitch", "newsModeSwitch", "dailyGlance", "execStrip", "execGate", "execPositions",
       "signalsHeading", "signalScopeChips", "polarityChips", "highOnlyBtn", "keywordInput",
       "keywordApplyBtn", "dailyCounter", "curationRulesPanel", "closeRulesPanelBtn",
       "ruleQuickForm", "ruleKindSelect", "ruleActionSelect", "ruleTargetInput",
@@ -262,8 +285,8 @@
       "articleStatusTabs", "articleSourceChips", "articleSearchInput", "articleSearchBtn",
       "exportOpmlBtn", "openIngestDrBtn", "articleList",
       "sourceCategoryChips", "sourcesMeta", "sourcesGrid",
-      "recordsSubTabs", "journalModeHint", "newReviewBtn", "reviewStatusChips",
-      "reviewForm", "rvId", "rvRev", "rvDate", "rvSymbol", "rvDirection", "rvSize",
+      "recordsSubTabs", "journalModeHint", "signalPlanStatsBar", "newReviewBtn", "reviewStatusChips",
+      "reviewForm", "rvId", "rvRev", "rvPlanId", "rvDate", "rvSymbol", "rvDirection", "rvSize",
       "rvPrice", "rvPnl", "rvStatus", "rvThesis", "rvExec", "rvLesson", "rvSaveBtn",
       "rvCancelBtn", "reviewList",
       "newEssayBtn", "essayForm", "esId", "esRev", "esTitle", "esMood", "esTags",
@@ -281,7 +304,9 @@
       "pfSaveBtn", "pfCancelBtn",
       "importDrawer", "closeImportDrawerBtn", "importForm", "impFormat", "impMode",
       "impAccount", "impBody", "impPreviewBtn", "impCommitBtn", "importPreviewArea",
-      "ingestDrDrawer", "closeIngestDrBtn", "ingestDrForm", "drTitleInput", "drTickersInput",
+      "ingestDrDrawer", "drModeSwitch", "closeIngestDrBtn", "drRunForm", "drRunTitleInput",
+      "drRunTickersInput", "drRunPromptInput", "drJobBox", "drJobStatusBadge", "drJobMetaText",
+      "drRunBtn", "drRunCancelBtn", "ingestDrForm", "drTitleInput", "drTickersInput",
       "drBodyInput", "drSaveBtn", "drCancelBtn",
       "mobileTabbar"
     ];
@@ -749,7 +774,13 @@
           i += 1;
         }
         i += 1;
-        out.push('<div class="code-copy-wrap"><button type="button" class="btn btn-sm code-copy-btn" data-copy-code>复制提问词</button><pre><code>' + buf.join("\n") + "</code></pre></div>");
+        const canDirectDr = !appState.offline && Boolean(appState.drCapabilities && appState.drCapabilities.can_run_any_dr);
+        out.push(
+          '<div class="code-copy-wrap"><div class="code-copy-actions">' +
+          '<button type="button" class="btn btn-sm code-copy-btn" data-copy-code>复制提问词</button>' +
+          (canDirectDr ? '<button type="button" class="btn btn-sm btn-accent code-copy-btn" data-run-dr-code>直接深研</button>' : "") +
+          "</div><pre><code>" + buf.join("\n") + "</code></pre></div>"
+        );
         continue;
       }
       const heading = line.match(MD_HEADING);
@@ -1063,7 +1094,7 @@
       today: arr(st.signals).length,
       portfolio: portCount || arr(st.positions).length,
       research: Object.keys(st.stock_profiles || {}).length + unreadCount(),
-      records: arr(appState.journal.trade_reviews).length + arr(appState.journal.essays).length
+      records: (arr(st.signal_plans).length || arr(appState.journal.trade_reviews).filter((r) => !isLegacyAutoSeedReview(r)).length) + arr(appState.journal.essays).length
     };
     document.querySelectorAll("[data-count-for]").forEach((el) => {
       const n = counts[el.getAttribute("data-count-for")];
@@ -1427,6 +1458,58 @@
     return !appState.offline && Array.isArray(signals) ? signals : null;
   }
 
+  function curatedEventList() {
+    const events = appState.workspace?.curated_events;
+    return !appState.offline && Array.isArray(events) ? events : null;
+  }
+
+  function hasEventFeedData() {
+    return arr(state().event_cards).length > 0 || (curatedEventList()?.length || 0) > 0;
+  }
+
+  function activeEventCardsList() {
+    const curated = curatedEventList();
+    if (curated) return curated;
+    return arr(state().event_cards);
+  }
+
+  function isEventFeedActive() {
+    return appState.daily.feedView === "events" && hasEventFeedData();
+  }
+
+  function markEventRead(eventId, version) {
+    const eid = String(eventId || "").trim();
+    if (!eid) return;
+    const ver = Math.max(1, Number(version) || 1);
+    const prev = Number(appState.readEvents[eid] || 0);
+    if (prev >= ver) return;
+    appState.readEvents[eid] = ver;
+    const keys = Object.keys(appState.readEvents);
+    if (keys.length > 400) {
+      keys.slice(0, keys.length - 400).forEach((k) => { delete appState.readEvents[k]; });
+    }
+    safeStorageSet(STORAGE_KEYS.readEvents, JSON.stringify(appState.readEvents));
+  }
+
+  function eventReadState(ev) {
+    const eid = String((ev && (ev.event_id || ev.id)) || "");
+    const seenVer = Number(appState.readEvents[eid] || 0);
+    const curVer = Math.max(1, Number((ev && ev.substantive_version) || 1));
+    return {
+      seen: seenVer > 0,
+      hasNewProgress: seenVer > 0 && curVer > seenVer,
+      curVer
+    };
+  }
+
+  function verificationTone(status) {
+    if (status === "confirmed") return "badge-bull";
+    if (status === "denied" || status === "corrected") return "badge-bear";
+    if (status === "conflicted") return "badge-warn";
+    if (status === "multi_source") return "badge-proof";
+    return "badge-outline";
+  }
+
   function filteredSignals(opts) {
     const f = appState.daily;
     const kw = f.keyword.toLowerCase();
@@ -1434,11 +1517,14 @@
     const ignoreSubtopic = Boolean(opts && opts.ignoreSubtopic);
     const heldSet = heldSymbolsSet();
     const rulesInfo = watchedSymbolsAndKeywords();
-    const curated = curatedSignalList();
+    const useEvents = !opts?.forceWire && isEventFeedActive();
+    const curated = useEvents ? curatedEventList() : curatedSignalList();
     const candidates = arr(state().signal_candidates);
-    const rawList = curated ?? (candidates.length && (f.scope === "held" || f.scope === "watch")
-      ? candidates
-      : arr(state().signals));
+    const rawList = useEvents
+      ? activeEventCardsList()
+      : (curated ?? (candidates.length && (f.scope === "held" || f.scope === "watch")
+        ? candidates
+        : arr(state().signals)));
 
     return rawList.filter((s) => {
       const hay = [s.title, s.summary, s.source, s.why_it_matters, arr(s.tickers).join(" "), arr(s.topics).join(" ")].join(" ").toLowerCase();
@@ -1730,7 +1816,7 @@
       ? '<div class="score-breakdown">' + reasons.map((r) => "<span>· " + escapeHtml(r) + "</span>").join("") + "</div>"
       : "";
     const zhBriefHtml = showZhBrief
-      ? '<p class="signal-zh-brief"><b>中文简介</b>' + escapeHtml(zhBrief) + "</p>"
+      ? '<p class="signal-zh-brief"><b title="投资备忘录">Memo</b>' + escapeHtml(zhBrief) + "</p>"
       : "";
     const whyHtml = whyText
       ? '<p class="signal-why' + (showWhyInline ? "" : " is-extra-only") + '"><b>影响研判</b>' + escapeHtml(whyText) + "</p>"
@@ -1782,12 +1868,194 @@
       '<div class="tl-row-main">' +
       '<div class="signal-head-row"><div class="signal-meta">' + meta + "</div>" + menuHtml + "</div>" +
       '<h3 class="tl-row-title">' + (url ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + title + "</a>" : title) + "</h3>" +
-      (showZhBrief ? '<p class="tl-row-zh-brief"><b>中文简介</b>' + escapeHtml(zhBrief) + "</p>" : "") +
+      (showZhBrief ? '<p class="tl-row-zh-brief"><b title="投资备忘录">Memo</b>' + escapeHtml(zhBrief) + "</p>" : "") +
       (summary ? '<p class="tl-row-summary' + (hideRawSummary ? " is-extra-only" : "") + '">' + escapeHtml(summary) + "</p>" : "") +
       '<div class="signal-foot">' + signalTickersHtml(s) + signalTopicTagsHtml(s) +
       '<span class="badge badge-' + dir.cls + '">' + dir.label + "</span>" +
       (hideRawSummary || summary.length > 70 ? '<button type="button" class="btn-link" data-expand>展开全文</button>' : "") +
       "</div></div></li>";
+  }
+
+  function eventDetailHtml(ev) {
+    const eid = String(ev.event_id || ev.id || "");
+    const expanded = appState.expandedEvents.has(eid);
+    const conflicts = arr(ev.conflict_claims);
+    const priors = arr(ev.prior_claims);
+    const timeline = arr(ev.timeline);
+    const families = arr(ev.provenance_families);
+    if (!expanded) return "";
+
+    const conflictHtml = conflicts.length
+      ? '<div class="event-box is-conflict"><div class="event-box-title">说法冲突并列对照</div>' +
+        conflicts.map((c) => {
+          const cu = safeHttpUrl(c.url);
+          return '<div class="event-claim-row"><b>' + escapeHtml(c.source || "多方说法") + "：</b>" +
+            escapeHtml(c.claim || "") +
+            (cu ? ' <a href="' + escapeHtml(cu) + '" target="_blank" rel="noopener noreferrer">原文</a>' : "") +
+            "</div>";
+        }).join("") + "</div>"
+      : "";
+
+    const priorHtml = priors.length
+      ? '<div class="event-box is-prior"><div class="event-box-title">历史说法留痕</div>' +
+        priors.map((c) =>
+          '<div class="event-claim-row"><span class="badge badge-outline">' + escapeHtml(c.label || "已更正旧说") + "</span> " +
+          escapeHtml(c.claim || "") +
+          (c.recorded_at ? ' <span class="num-plain">(' + escapeHtml(shortStamp(c.recorded_at)) + ")</span>" : "") +
+          "</div>"
+        ).join("") + "</div>"
+      : "";
+
+    const tlHtml = timeline.length
+      ? '<div class="event-subsec"><div class="event-box-title">事件时间线</div><ul class="event-tl-list">' +
+        timeline.slice().reverse().map((step) => {
+          const su = safeHttpUrl(step.url);
+          const stamp = shortStamp(step.published_at || step.first_seen_at || "");
+          return '<li class="event-tl-item">' +
+            '<div class="event-tl-meta">' +
+            (stamp ? '<span class="num-plain">' + escapeHtml(stamp) + "</span>" : "") +
+            (step.status_label ? '<span class="badge ' + verificationTone(step.status) + '">' + escapeHtml(step.status_label) + "</span>" : "") +
+            (step.effective_at ? '<span class="badge badge-outline">生效 ' + escapeHtml(step.effective_at) + "</span>" : "") +
+            (step.source ? '<span>' + escapeHtml(step.source) + "</span>" : "") +
+            "</div>" +
+            '<div class="event-tl-sum">' + escapeHtml(step.summary || "") +
+            (su ? ' · <a href="' + escapeHtml(su) + '" target="_blank" rel="noopener noreferrer" data-event-link="' + escapeHtml(eid) + '" data-event-ver="' + Math.max(1, Number(ev.substantive_version) || 1) + '">出处</a>' : "") +
+            "</div></li>";
+        }).join("") + "</ul></div>"
+      : "";
+
+    const famHtml = families.length
+      ? '<div class="event-subsec"><div class="event-box-title">原始出处归并（' + families.length + " 家独立出处）</div>" +
+        '<div class="event-fam-list">' +
+        families.map((fam) => {
+          const linksHtml = arr(fam.links).map((lk) => {
+            const lu = safeHttpUrl(lk.url);
+            const lName = lk.source || "原文";
+            const lTitle = lk.title ? " · " + lk.title : "";
+            return lu
+              ? '<a class="event-src-link" href="' + escapeHtml(lu) + '" target="_blank" rel="noopener noreferrer" data-event-link="' + escapeHtml(eid) + '" data-event-ver="' + Math.max(1, Number(ev.substantive_version) || 1) + '">' + escapeHtml(lName + lTitle) + "</a>"
+              : '<span class="event-src-link">' + escapeHtml(lName + lTitle) + "</span>";
+          }).join("");
+          return '<div class="event-fam-row"><span class="badge badge-outline">' + escapeHtml(fam.label || "报道") + "</span>" +
+            '<div class="event-fam-links">' + linksHtml + "</div></div>";
+        }).join("") + "</div></div>"
+      : "";
+
+    return '<div class="event-detail">' + conflictHtml + priorHtml + tlHtml + famHtml + "</div>";
+  }
+
+  function eventMetaHtml(ev, dir, radar, omitTime) {
+    const rState = eventReadState(ev);
+    const famCount = Math.max(1, Number(ev.independent_family_count) || 1);
+    const totalCount = Math.max(1, Number(ev.total_source_count) || 1);
+    const srcCountText = famCount > 1 || totalCount > 1
+      ? famCount + "家出处" + (totalCount > famCount ? " · " + totalCount + "篇" : "")
+      : "";
+    const radarCls = radar && radar.status === "顺风" ? "badge-bull" : radar && radar.status === "逆风" ? "badge-bear" : "badge-warn";
+    return [
+      '<span class="dot dot-' + dir.cls + '" aria-hidden="true"></span>',
+      '<span class="badge ' + verificationTone(ev.verification_status) + '"' + (ev.verification_desc ? ' title="' + escapeHtml(ev.verification_desc) + '"' : "") + ">" +
+        escapeHtml(ev.verification_label || "未证实") + "</span>",
+      rState.hasNewProgress ? '<span class="badge badge-accent">有新进展</span>' : "",
+      ev.pending_review ? '<span class="badge badge-outline">待核对</span>' : "",
+      signalSourceHtml(ev.source),
+      srcCountText ? '<span class="badge badge-proof num-plain">' + escapeHtml(srcCountText) + "</span>" : "",
+      (!omitTime && !isBlank(ev.time_bjt)) ? '<span class="num-plain">' + escapeHtml(shortStamp(ev.time_bjt)) + "</span>" : "",
+      CATEGORY_LABELS[ev.category] ? '<span class="badge">' + CATEGORY_LABELS[ev.category] + "</span>" : "",
+      radar ? '<span class="badge ' + radarCls + '">持仓 · ' + escapeHtml(radar.status) + "</span>" : "",
+      (ev.personal_high ?? (ev.importance === "高")) ? '<span class="badge badge-accent">高优</span>' : ""
+    ].filter(Boolean).join("");
+  }
+
+  function eventCardHtml(ev, idx) {
+    const dir = DIRECTION_META[ev.direction] || DIRECTION_META.neutral;
+    const url = safeHttpUrl(ev.url);
+    const cleanTitle = stripEmojis(ev.title);
+    const title = escapeHtml(cleanTitle);
+    const zhBrief = stripEmojis(ev.zh_brief || "");
+    const showZhBrief = Boolean(zhBrief) && isMostlyEnglishText(cleanTitle);
+    const latestChange = stripEmojis(ev.latest_change || "");
+    const showLatest = Boolean(latestChange) && latestChange !== cleanTitle;
+    const radar = computeHoldingRadar(ev, heldSymbolsSet());
+    const eid = String(ev.event_id || ev.id || ("ev-" + idx));
+    const ver = Math.max(1, Number(ev.substantive_version) || 1);
+    const expanded = appState.expandedEvents.has(eid);
+    const rState = eventReadState(ev);
+    const reasons = arr(ev.reasons).filter((r) => !isBlank(r));
+    const menuOpen = appState.openSignalMenu === eid;
+    const primaryTicker = arr(ev.tickers).find((t) => !isBlank(t)) || "";
+    const stepTotal = Math.max(arr(ev.timeline).length, Math.max(1, Number(ev.total_source_count) || 1));
+
+    return '<li class="signal event-card' + (rState.seen && !rState.hasNewProgress ? " is-seen-event" : "") + '" data-sig-id="' + escapeHtml(eid) + '" data-event-id="' + escapeHtml(eid) + '">' +
+      '<span class="signal-idx num-plain" aria-hidden="true">' + (idx + 1) + "</span>" +
+      '<div class="signal-body">' +
+      '<div class="signal-head-row"><div class="signal-meta">' + eventMetaHtml(ev, dir, radar, false) + "</div>" + signalMenuHtml(ev, eid, menuOpen, primaryTicker) + "</div>" +
+      '<h3 class="signal-title">' + (url ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer" data-event-link="' + escapeHtml(eid) + '" data-event-ver="' + ver + '">' + title + "</a>" : title) + "</h3>" +
+      (showZhBrief ? '<p class="signal-zh-brief"><b title="投资备忘录">Memo</b>' + escapeHtml(zhBrief) + "</p>" : "") +
+      (showLatest ? '<p class="event-latest-change"><b>最新变化</b>' + escapeHtml(latestChange) + "</p>" : "") +
+      eventDetailHtml(ev) +
+      '<div class="signal-foot">' + signalTickersHtml(ev) + signalTopicTagsHtml(ev) +
+      '<span class="badge badge-' + dir.cls + '">' + dir.label + "</span>" +
+      signalScoreHtml(ev, eid, reasons) +
+      '<button type="button" class="btn-link" data-event-expand="' + escapeHtml(eid) + '" data-event-ver="' + ver + '">' +
+        (expanded ? "收起详情" : "时间线与出处 (" + stepTotal + ")") + "</button>" +
+      "</div>" +
+      (appState.openScoreId === eid && reasons.length
+        ? '<div class="score-breakdown">' + reasons.map((r) => "<span>· " + escapeHtml(r) + "</span>").join("") + "</div>"
+        : "") +
+      "</div></li>";
+  }
+
+  function eventTimelineHtml(ev, idx, isFirst, isLast) {
+    const dir = DIRECTION_META[ev.direction] || DIRECTION_META.neutral;
+    const url = safeHttpUrl(ev.url);
+    const cleanTitle = stripEmojis(ev.title);
+    const title = escapeHtml(cleanTitle);
+    const zhBrief = stripEmojis(ev.zh_brief || "");
+    const showZhBrief = Boolean(zhBrief) && isMostlyEnglishText(cleanTitle);
+    const latestChange = stripEmojis(ev.latest_change || "");
+    const showLatest = Boolean(latestChange) && latestChange !== cleanTitle;
+    const radar = computeHoldingRadar(ev, heldSymbolsSet());
+    const eid = String(ev.event_id || ev.id || ("ev-tl-" + idx));
+    const ver = Math.max(1, Number(ev.substantive_version) || 1);
+    const rState = eventReadState(ev);
+    const expanded = appState.expandedEvents.has(eid);
+    const primaryTicker = arr(ev.tickers).find((t) => !isBlank(t)) || "";
+    const stepTotal = Math.max(arr(ev.timeline).length, Math.max(1, Number(ev.total_source_count) || 1));
+    const rowCls = [
+      "tl-row event-tl-row",
+      isFirst ? "is-group-first" : "",
+      isLast ? "is-group-last" : "",
+      rState.seen && !rState.hasNewProgress ? "is-read" : ""
+    ].filter(Boolean).join(" ");
+
+    return '<li class="' + rowCls + '" data-sig-id="' + escapeHtml(eid) + '" data-event-id="' + escapeHtml(eid) + '" data-dir="' + escapeHtml(ev.direction || "neutral") + '">' +
+      '<span class="tl-row-time num-plain">' + escapeHtml(extractSignalClock(ev.time_bjt)) + "</span>" +
+      '<span class="tl-row-rail" aria-hidden="true"></span>' +
+      '<div class="tl-row-main">' +
+      '<div class="signal-head-row"><div class="signal-meta">' + eventMetaHtml(ev, dir, radar, true) + "</div>" + signalMenuHtml(ev, eid, appState.openSignalMenu === eid, primaryTicker) + "</div>" +
+      '<h3 class="tl-row-title">' + (url ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer" data-event-link="' + escapeHtml(eid) + '" data-event-ver="' + ver + '">' + title + "</a>" : title) + "</h3>" +
+      (showZhBrief ? '<p class="tl-row-zh-brief"><b title="投资备忘录">Memo</b>' + escapeHtml(zhBrief) + "</p>" : "") +
+      (showLatest ? '<p class="event-latest-change"><b>最新变化</b>' + escapeHtml(latestChange) + "</p>" : "") +
+      eventDetailHtml(ev) +
+      '<div class="signal-foot">' + signalTickersHtml(ev) + signalTopicTagsHtml(ev) +
+      '<span class="badge badge-' + dir.cls + '">' + dir.label + "</span>" +
+      '<button type="button" class="btn-link" data-event-expand="' + escapeHtml(eid) + '" data-event-ver="' + ver + '">' +
+        (expanded ? "收起详情" : "时间线与出处 (" + stepTotal + ")") + "</button>" +
+      "</div></div></li>";
+  }
+
+  function renderFeedViewSwitch() {
+    if (!dom.feedViewSwitch) return;
+    const hasEvents = hasEventFeedData();
+    dom.feedViewSwitch.hidden = !hasEvents;
+    if (!hasEvents) return;
+    const view = appState.daily.feedView === "wire" ? "wire" : "events";
+    dom.feedViewSwitch.querySelectorAll("[data-fview]").forEach((btn) => {
+      const on = btn.getAttribute("data-fview") === view;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-pressed", String(on));
+    });
   }
 
   function renderNewsModeSwitch() {
@@ -1863,7 +2131,7 @@
     }).join("");
   }
 
-  function renderTimelineHtml(sorted) {
+  function renderTimelineHtml(sorted, useEvents) {
     const groups = [];
     const byDate = new Map();
     sorted.forEach((s) => {
@@ -1879,14 +2147,19 @@
     let seqIdx = 0;
     return groups.map((grp) => {
       const head = '<li class="tl-date-head"><span class="tl-date-label">' + escapeHtml(grp.date) + '</span><span class="tl-date-count num-plain">' + grp.items.length + " 条</span></li>";
-      const rows = grp.items.map((s, j) => timelineSignalHtml(s, seqIdx++, j === 0, j === grp.items.length - 1)).join("");
+      const rows = grp.items.map((s, j) => (
+        useEvents
+          ? eventTimelineHtml(s, seqIdx++, j === 0, j === grp.items.length - 1)
+          : timelineSignalHtml(s, seqIdx++, j === 0, j === grp.items.length - 1)
+      )).join("");
       return head + rows;
     }).join("");
   }
 
   function renderSignals() {
-    const curated = curatedSignalList();
-    const all = curated ?? arr(state().signals);
+    const useEvents = isEventFeedActive();
+    const curated = useEvents ? curatedEventList() : curatedSignalList();
+    const all = useEvents ? activeEventCardsList() : (curated ?? arr(state().signals));
     const f = appState.daily;
     const mode = f.mode === "timeline" ? "timeline" : "ranked";
     const filtered = filteredSignals();
@@ -1895,6 +2168,7 @@
     const visible = list.slice(0, limit);
     const remaining = Math.max(0, list.length - visible.length);
 
+    renderFeedViewSwitch();
     renderNewsModeSwitch();
     renderSectorDrilldown(f.cat);
 
@@ -1902,15 +2176,16 @@
       dom.signalList.hidden = false;
       dom.signalList.classList.toggle("is-timeline", mode === "timeline" && visible.length > 0);
       if (!list.length) {
-        dom.signalList.innerHTML = '<li class="empty-hint">没有符合条件的快讯 · <button type="button" class="btn-link" data-clear-filters="daily">清除筛选</button></li>';
+        dom.signalList.innerHTML = '<li class="empty-hint">没有符合条件的' + (useEvents ? "事件" : "快讯") + ' · <button type="button" class="btn-link" data-clear-filters="daily">清除筛选</button></li>';
       } else {
         const bodyHtml = mode === "timeline"
-          ? renderTimelineHtml(visible)
-          : visible.map(signalHtml).join("");
+          ? renderTimelineHtml(visible, useEvents)
+          : visible.map(useEvents ? eventCardHtml : signalHtml).join("");
+        const moreLabel = useEvents ? "事件" : "快讯";
         const moreHtml = remaining > 0
           ? '<li class="signal-more-row">' +
-            '<button type="button" class="btn btn-sm" data-signals-more="1">展开更多快讯（剩余 ' + remaining + ' 条）</button>' +
-            '<button type="button" class="btn-link" data-signals-all="1">全部显示 (' + list.length + ')</button>' +
+            '<button type="button" class="btn btn-sm" data-signals-more="1">展开更多' + moreLabel + "（剩余 " + remaining + " 条）</button>" +
+            '<button type="button" class="btn-link" data-signals-all="1">全部显示 (' + list.length + ")</button>" +
             "</li>"
           : "";
         dom.signalList.innerHTML = bodyHtml + moreHtml;
@@ -1919,8 +2194,8 @@
 
     if (dom.dailyCounter) {
       dom.dailyCounter.textContent = remaining > 0
-        ? "展示 " + visible.length + " / " + list.length + " 条"
-        : "显示 " + list.length + " / " + all.length + " 条";
+        ? "展示 " + visible.length + " / " + list.length + (useEvents ? " 事" : " 条")
+        : "显示 " + list.length + " / " + all.length + (useEvents ? " 事" : " 条");
     }
   }
 
@@ -2050,7 +2325,8 @@
       highOnly: false,
       keyword: "",
       visibleLimit: defaultSignalLimit(),
-      mode: appState.daily.mode || "ranked"
+      mode: appState.daily.mode || "ranked",
+      feedView: appState.daily.feedView || "events"
     };
     syncDailyFilterChipsUi();
     if (dom.curationRulesPanel) dom.curationRulesPanel.hidden = true;
@@ -3379,24 +3655,38 @@
 
   function forumSnapshotContext(d) {
     const legacy = {
-      "热度偏高": "当期关注较高", "散户过热": "当期看多分歧",
-      "出圈见顶": "当期关注较高", "恐慌见底": "当期看空分歧",
+      "热度偏高": "关注较高",
+      "当期关注较高": "关注较高",
+      "散户过热": "看多分歧",
+      "当期看多分歧": "看多分歧",
+      "出圈见顶": "关注较高",
+      "恐慌见底": "看空分歧",
+      "当期看空分歧": "看空分歧",
+      "机构抢跑": "专业偏强",
+      "专业倾向较强": "专业偏强",
+      "仅社区样本": "仅社区帖"
     };
     const tag = String((d && d.divergence_tag) || "");
     return legacy[tag] ? Object.assign({}, d, {
-      divergence_tag: legacy[tag], tone: "neutral", action_hint: "仅为当期样本，不代表持续趋势。",
+      divergence_tag: legacy[tag], tone: "neutral", action_hint: "仅作当期截面参考。"
     }) : d;
   }
 
-  const DISCUSSION_ASSET_LABELS = {GOLD: "黄金", BTC: "比特币", QQQ: "QQQ", "02513.HK": "智谱", "00100.HK": "MiniMax"};
-  const DISCUSSION_STATES = {warming: "持续升温", cooling: "关注回落", stable: "暂无一致趋势", high: "持续高关注"};
+  const DISCUSSION_ASSET_LABELS = {
+    ASHARE_HK: "A股与港股",
+    US_AI: "美股AI与科技",
+    GOLD: "黄金与贵金属",
+    BTC: "比特币与加密",
+    FED_MACRO: "美联储与宏观"
+  };
+  const DISCUSSION_STATES = { warming: "持续升温", cooling: "关注回落", stable: "趋势平稳", high: "持续高热" };
   const DISCUSSION_PLATFORM_LABELS = {
-    weibo: "微博", baidu: "百度", toutiao: "头条", douyin: "抖音", zhihu: "知乎", "bilibili-hot-search": "B站",
+    weibo: "微博", baidu: "百度", toutiao: "头条", douyin: "抖音", zhihu: "知乎", "bilibili-hot-search": "B站"
   };
 
   function currentDiscussionTrends(fs) {
     const trends = fs && fs.discussion_trends;
-    if (!trends || trends.method !== "paired-coverage-v2" ||
+    if (!trends || trends.method !== "paired-coverage-v3" ||
         !/^\d{4}-\d{2}-\d{2}$/.test(String(trends.as_of || ""))) return [];
     const todayBjt = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
     const age = Date.parse(todayBjt) - Date.parse(trends.as_of);
@@ -3411,22 +3701,22 @@
   }
 
   function renderDiscussionTrendHtml(trends) {
-    const rows = trends.filter((a) => discussionWindows(a).length).map((a) => {
+    const activeAssets = trends.filter((a) => discussionWindows(a).length);
+    if (!activeAssets.length) return "";
+    const rows = activeAssets.map((a) => {
       const labels = discussionWindows(a).map((w) => {
-        const copy = w.days + "天 " + DISCUSSION_STATES[w.state] + " · " + w.platforms + "平台 / " + w.sample_days + "天";
+        const copy = w.days + "天 " + DISCUSSION_STATES[w.state] + " · " + w.platforms + "平台/" + w.sample_days + "天";
         const platforms = arr(w.sources).filter((s) => s && Object.hasOwn(DISCUSSION_PLATFORM_LABELS, s.platform) &&
           Object.hasOwn(DISCUSSION_STATES, s.state)).map((s) => DISCUSSION_PLATFORM_LABELS[s.platform] + " " +
-            DISCUSSION_STATES[s.state] + " " + s.sample_days + "天").join("；");
-        return '<details><summary class="badge ' + (w.state === "warming" ? "badge-warn" : "badge-outline") + '">' +
-          escapeHtml(copy) + "</summary>" + (platforms ? '<span class="panel-meta">' + escapeHtml(platforms) + "</span>" : "") + "</details>";
+            DISCUSSION_STATES[s.state] + " " + s.sample_days + "天").join(" · ");
+        return '<details class="trend-win-detail"><summary class="badge ' + (w.state === "warming" ? "badge-warn" : w.state === "cooling" ? "badge-bull" : "badge-outline") + '">' +
+          escapeHtml(copy) + "</summary>" + (platforms ? '<span class="panel-meta trend-win-platforms">' + escapeHtml(platforms) + "</span>" : "") + "</details>";
       }).join("");
-      return '<div class="forum-sample-row"><b class="forum-sample-author">' +
+      return '<div class="forum-sample-row trend-asset-row"><b class="forum-sample-author">' +
         escapeHtml(DISCUSSION_ASSET_LABELS[a.asset]) + '</b><div class="synth-head-left">' +
         labels + "</div></div>";
     }).join("");
-    return '<div class="forum-hot-wrap"><h3 class="subsec-title">持续讨论趋势</h3>' +
-      '<p class="panel-meta">公开热榜标题样本，不是全平台发帖量，也不是买卖信号。天数为可比平台中的最少观测天数。</p>' +
-      (rows || '<p class="panel-meta">可比样本积累中，暂不判断趋势。</p>') + "</div>";
+    return '<div class="forum-hot-wrap forum-trend-wrap"><div class="forum-hot-head"><h3 class="subsec-title">多日讨论趋势</h3></div><div class="forum-trend-list">' + rows + "</div></div>";
   }
 
   function forumBarMetrics(score, opts) {
@@ -3618,7 +3908,7 @@
                   (u
                     ? '<a class="forum-sample-txt forum-sample-title" href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(cleanTitle) + "\u00a0↗</a>"
                     : '<span class="forum-sample-txt">' + escapeHtml(cleanTitle) + "</span>") +
-                  (showStreetZh ? '<span class="forum-zh-brief">中文简介：' + escapeHtml(zhBr) + "</span>" : "") +
+                  (showStreetZh ? '<span class="forum-zh-brief"><b class="memo-tag" title="投资备忘录">Memo</b>' + escapeHtml(zhBr) + "</span>" : "") +
                   "</div></div>";
               }).join("") +
               "</div>"
@@ -3628,7 +3918,9 @@
     }
 
     if (dom.forumDiscussionTrend) {
-      dom.forumDiscussionTrend.innerHTML = renderDiscussionTrendHtml(trends);
+      const trendHtml = renderDiscussionTrendHtml(trends);
+      dom.forumDiscussionTrend.innerHTML = trendHtml;
+      dom.forumDiscussionTrend.hidden = !trendHtml;
     }
 
     if (dom.forumHotWrap && dom.forumHotList) {
@@ -3652,7 +3944,7 @@
             (u
               ? '<a class="forum-hot-title" href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(cleanTitle) + "\u00a0↗</a>"
               : '<span class="forum-hot-title">' + escapeHtml(cleanTitle) + "</span>") +
-            (showHotZh ? '<p class="forum-zh-brief">中文简介：' + escapeHtml(zhBr) + "</p>" : "") +
+            (showHotZh ? '<p class="forum-zh-brief"><b class="memo-tag" title="投资备忘录">Memo</b>' + escapeHtml(zhBr) + "</p>" : "") +
             (tks ? '<div class="forum-hot-tickers">' + tks + "</div>" : "") +
             "</div>";
         }).join("");
@@ -4452,6 +4744,160 @@
     }
   }
 
+  function canRunOnlineDr() {
+    return !appState.offline && Boolean(appState.drCapabilities && appState.drCapabilities.can_run_demolab_dr);
+  }
+
+  function syncDrDrawerModeUi() {
+    const online = canRunOnlineDr();
+    if (dom.drModeSwitch) dom.drModeSwitch.hidden = !online;
+    if (!online) appState.drMode = "paste";
+    const isRun = online && appState.drMode === "run";
+    if (dom.drModeSwitch) {
+      dom.drModeSwitch.querySelectorAll("[data-drmode]").forEach((btn) => {
+        const active = btn.getAttribute("data-drmode") === (isRun ? "run" : "paste");
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-pressed", String(active));
+      });
+    }
+    if (dom.drRunForm) dom.drRunForm.hidden = !isRun;
+    if (dom.ingestDrForm) dom.ingestDrForm.hidden = isRun;
+  }
+
+  function setDrMode(mode) {
+    appState.drMode = mode === "run" && canRunOnlineDr() ? "run" : "paste";
+    syncDrDrawerModeUi();
+  }
+
+  function openDrWorkbench(opts) {
+    const o = opts && typeof opts === "object" ? opts : {};
+    const targetMode = o.mode || (canRunOnlineDr() ? "run" : "paste");
+    setDrMode(targetMode);
+    if (appState.drMode === "run") {
+      if (dom.drRunPromptInput && typeof o.prompt === "string") dom.drRunPromptInput.value = o.prompt;
+      if (dom.drRunTitleInput && typeof o.title === "string") dom.drRunTitleInput.value = o.title;
+      if (dom.drRunTickersInput && typeof o.tickers === "string") dom.drRunTickersInput.value = o.tickers;
+      return openDrawer(dom.ingestDrDrawer, dom.drRunPromptInput || dom.drBodyInput);
+    }
+    if (dom.drBodyInput && typeof o.body === "string") dom.drBodyInput.value = o.body;
+    return openDrawer(dom.ingestDrDrawer, dom.drBodyInput);
+  }
+
+  async function loadDrCapabilities() {
+    if (appState.offline) {
+      appState.drCapabilities = null;
+      syncDrDrawerModeUi();
+      return null;
+    }
+    try {
+      const caps = await apiJson("/api/research/capabilities");
+      appState.drCapabilities = caps && typeof caps === "object" ? caps : null;
+    } catch (_) {
+      appState.drCapabilities = null;
+    }
+    if (dom.openIngestDrBtn) {
+      const isCons = Boolean((appState.drCapabilities && appState.drCapabilities.consumer_mode) || appState.serverRole === "consumer");
+      dom.openIngestDrBtn.hidden = Boolean(appState.offline) || isCons;
+    }
+    syncDrDrawerModeUi();
+    if (appState.drawerArticle && dom.articleDrawer && !dom.articleDrawer.hidden) {
+      const cur = arr(state().articles).find((a) => a.filename === appState.drawerArticle.filename);
+      if (cur && !isBlank(cur.body_md)) fillArticle(cur);
+    }
+    return appState.drCapabilities;
+  }
+
+  function renderDrJobStatus(job) {
+    if (!dom.drJobBox || !dom.drJobStatusBadge || !dom.drJobMetaText) return;
+    if (!job) {
+      dom.drJobBox.hidden = true;
+      return;
+    }
+    dom.drJobBox.hidden = false;
+    const st = String(job.status || "");
+    const lbl = String(job.stage_label || "处理中");
+    dom.drJobStatusBadge.textContent = lbl;
+    dom.drJobStatusBadge.className = "badge " + (st === "completed" ? "badge-ok" : (st === "failed" ? "badge-bear" : "badge-accent"));
+    const gaps = arr(job.unresolved_gaps);
+    if (st === "completed") {
+      dom.drJobMetaText.textContent = "已完成 " + Number(job.tracks_succeeded || 0) + "/" + Number(job.tracks_total || 3) + " 路并行核查" + (gaps.length ? " · 含 " + gaps.length + " 项待复核缺口" : "");
+    } else if (st === "failed") {
+      dom.drJobMetaText.textContent = String(job.error || "深研未完成，可切换粘贴导入补充");
+    } else {
+      dom.drJobMetaText.textContent = "三路多智能体并行核查中（每路独立核实一手信源与反方阈值）";
+    }
+  }
+
+  function stopDrJobPoll() {
+    if (appState.drJobPollTimer) {
+      window.clearInterval(appState.drJobPollTimer);
+      appState.drJobPollTimer = 0;
+    }
+  }
+
+  async function pollDrJobOnce(jobId) {
+    if (!jobId || appState.offline) return;
+    try {
+      const res = await apiJson("/api/research/jobs?job_id=" + encodeURIComponent(jobId));
+      const job = res && res.job ? res.job : null;
+      if (!job) return;
+      renderDrJobStatus(job);
+      if (job.status === "completed") {
+        stopDrJobPoll();
+        appState.busy.runDr = false;
+        if (dom.drRunBtn) dom.drRunBtn.disabled = false;
+        const art = job.article;
+        if (art && art.filename) {
+          if (!appState.raw || typeof appState.raw !== "object") appState.raw = {};
+          const prev = arr(appState.raw.articles).filter((a) => a.filename !== art.filename);
+          appState.raw.articles = [art].concat(prev);
+        }
+        renderArticles();
+        renderCounts();
+        showToast("并行深研已完成并入库", "ok");
+        closeDrawer("ingestDr");
+        if (art && art.filename) await openArticle(art.filename);
+      } else if (job.status === "failed") {
+        stopDrJobPoll();
+        appState.busy.runDr = false;
+        if (dom.drRunBtn) dom.drRunBtn.disabled = false;
+        showToast(job.error || "并行深研执行失败", "error");
+      }
+    } catch (_) {
+      /* transient poll skip */
+    }
+  }
+
+  async function submitRunDr(e) {
+    e.preventDefault();
+    if (!canRunOnlineDr()) return showToast("当前环境仅支持粘贴导入", "error");
+    if (appState.busy.runDr) return showToast("已有深研任务运行中", "error");
+    const prompt = dom.drRunPromptInput ? dom.drRunPromptInput.value.trim() : "";
+    const title = dom.drRunTitleInput ? dom.drRunTitleInput.value.trim() : "";
+    const tickers = dom.drRunTickersInput ? dom.drRunTickersInput.value.trim() : "";
+    if (!prompt) return showToast("请输入深研课题提问词", "error");
+
+    appState.busy.runDr = true;
+    if (dom.drRunBtn) dom.drRunBtn.disabled = true;
+    try {
+      const res = await apiJson("/api/research/run", {
+        method: "POST",
+        body: { prompt, title, tickers }
+      });
+      const job = res && res.job ? res.job : null;
+      if (!job || !job.job_id) throw new Error("未返回有效深研任务编号");
+      appState.drActiveJobId = job.job_id;
+      renderDrJobStatus(job);
+      stopDrJobPoll();
+      appState.drJobPollTimer = window.setInterval(() => { pollDrJobOnce(job.job_id); }, 2000);
+      showToast("已启动 3 路并行深研，可稍候或留在本页查看进度", "ok");
+    } catch (err) {
+      appState.busy.runDr = false;
+      if (dom.drRunBtn) dom.drRunBtn.disabled = false;
+      showToast(err.message || "启动深研失败", "error");
+    }
+  }
+
   async function submitIngestDr(e) {
     e.preventDefault();
     if (appState.offline) return showToast("共享离线快照只读，无法导入深研", "error");
@@ -4562,50 +5008,176 @@
     return map;
   }
 
+  function isLegacyAutoSeedReview(r) {
+    if (!r || typeof r !== "object") return false;
+    const sym = String(r.symbol || "");
+    return (
+      Number(r.rev || 0) === 0 &&
+      r.direction === "跟踪" &&
+      ["btc_trend", "gold_hedge", "bear_basket", "crash_bounce"].includes(sym) &&
+      isBlank(r.execution_note) &&
+      isBlank(r.lesson) &&
+      isBlank(r.position_id)
+    );
+  }
+
   function reviewStatusBadge(status) {
-    const cls = status === "已止盈" ? "badge-bull" : status === "已止损" ? "badge-bear" : status === "持有中" ? "badge-accent" : status === "当前跟踪" ? "badge-outline" : "";
+    const cls = status === "已止盈" ? "badge-bull" : status === "已止损" ? "badge-bear" : (status === "持有中" || status === "计划跟进") ? "badge-accent" : (status === "当前跟踪" || status === "未采用·观察") ? "badge-outline" : "";
     return '<span class="badge ' + cls + '">' + escapeHtml(status) + "</span>";
   }
 
-  function filteredReviews() {
-    const f = appState.reviewStatus;
-    return arr(appState.journal.trade_reviews).filter((r) => {
-      if (f === "all") return true;
-      if (f === "closed") return CLOSED_REVIEW_STATUSES.has(r.status);
-      return r.status === f;
-    });
+  function reviewOutcomeBadge(block, pendingFallback) {
+    if (!block || typeof block !== "object") return '<span class="badge badge-outline">' + escapeHtml(pendingFallback || "跟踪中") + "</span>";
+    const o = String(block.outcome || "pending");
+    const cls = o === "hit" ? "badge-bull" : o === "miss" ? "badge-bear" : o === "flat" ? "badge-outline" : "badge-warn";
+    return '<span class="badge ' + cls + '">' + escapeHtml(block.verdict || pendingFallback || "跟踪中") + "</span>";
+  }
+
+  function realUserReviews() {
+    return arr(appState.journal.trade_reviews).filter((r) => !isLegacyAutoSeedReview(r));
+  }
+
+  function standaloneReviewCardHtml(r, names) {
+    const dirCls = r.direction === "做多" ? "badge-bull" : (r.direction === "做空" || r.direction === "防守减仓") ? "badge-bear" : "";
+    const price = toNum(r.price_usd);
+    const pnl = toNum(r.pnl_usd);
+    const showPnl = Number.isFinite(pnl) && (pnl !== 0 || CLOSED_REVIEW_STATUSES.has(r.status));
+    const notes = [["布局逻辑", r.thesis], ["实操备忘", r.execution_note], ["复盘补充", r.lesson]]
+      .filter((n) => !isBlank(n[1]))
+      .map((n) => "<div><dt>" + n[0] + "</dt><dd>" + escapeHtml(n[1]) + "</dd></div>").join("");
+    const tags = arr(r.tags).filter((t) => !isBlank(t)).map((t) => '<span class="badge badge-outline">#' + escapeHtml(t) + "</span>").join("");
+    const id = escapeHtml(r.id);
+    return '<article class="review-card"><div class="review-head">' +
+      '<span class="review-symbol">' + escapeHtml(names[r.symbol] || r.symbol) + "</span>" +
+      '<span class="badge badge-outline">手记实操</span>' +
+      (!isBlank(r.direction) ? '<span class="badge ' + dirCls + '">' + escapeHtml(r.direction) + "</span>" : "") +
+      (!isBlank(r.status) ? reviewStatusBadge(r.status) : "") +
+      '<span class="review-date num-plain">' + escapeHtml(r.trade_date) + "</span>" +
+      (!appState.offline ? '<div class="review-actions"><button type="button" class="btn btn-sm" data-edit-review="' + id + '">编辑</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-del-review="' + id + '">删除</button></div>' : "") +
+      '</div><div class="review-figs"><span>仓位<b>' + escapeHtml(formatWeight(r.size_pct)) + "</b></span>" +
+      (price > 0 ? "<span>参考均价<b>" + escapeHtml(formatPrice(price)) + "</b></span>" : "") +
+      (showPnl ? "<span>盈亏<b>" + amtHtml(pnl, { signed: true, cls: toneClass(pnl) }) + "</b></span>" : "") +
+      "</div>" + (notes ? '<dl class="review-notes">' + notes + "</dl>" : "") +
+      (tags ? '<div class="essay-tags">' + tags + "</div>" : "") + "</article>";
+  }
+
+  function signalPlanCardHtml(p, linkedMemo) {
+    const dirCls = p.stance_sign > 0 ? "badge-bull" : "badge-warn";
+    const setupCls = p.setup_code === "overheat_trim" ? "badge-warn" : p.setup_code === "oversold_rebound" ? "badge-accent" : "badge-bull";
+    const ret = toNum(p.live_return_pct);
+    const retCls = Number.isFinite(ret) && ret !== 0 ? (ret > 0 ? "is-bull" : "is-bear") : "";
+    const retStr = Number.isFinite(ret) ? " (" + (ret >= 0 ? "+" : "") + ret.toFixed(2) + "%)" : "";
+    const pidEsc = escapeHtml(p.plan_id);
+    const adoptHtml = linkedMemo
+      ? reviewStatusBadge(linkedMemo.status || "已记实操")
+      : '<span class="badge badge-outline">未采用·自动跟踪</span>';
+    const sr = p.short_review || {};
+    const mr = p.mid_review || {};
+
+    let memoHtml = "";
+    if (linkedMemo) {
+      const mPrice = toNum(linkedMemo.price_usd);
+      const mPnl = toNum(linkedMemo.pnl_usd);
+      const ridEsc = escapeHtml(linkedMemo.id);
+      memoHtml = '<div class="sigplan-memo-box"><div class="sigplan-rev-head"><span>实操备忘 · ' +
+        escapeHtml(linkedMemo.status || "已记录") + "（仓位 " + escapeHtml(formatWeight(linkedMemo.size_pct)) +
+        (mPrice > 0 ? " · 成本 " + amtHtml(mPrice) : "") +
+        (Number.isFinite(mPnl) && mPnl !== 0 ? " · 盈亏 " + amtHtml(mPnl, { signed: true, cls: toneClass(mPnl) }) : "") +
+        "）</span>" +
+        (!appState.offline ? '<span class="review-actions"><button type="button" class="btn btn-sm" data-edit-review="' + ridEsc + '">编辑</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-del-review="' + ridEsc + '">删除</button></span>' : "") +
+        "</div>" +
+        (!isBlank(linkedMemo.execution_note) ? '<p class="sigplan-rev-sum"><b>执行计划：</b>' + escapeHtml(linkedMemo.execution_note) + "</p>" : "") +
+        (!isBlank(linkedMemo.lesson) ? '<p class="sigplan-rev-sum"><b>复盘补充：</b>' + escapeHtml(linkedMemo.lesson) + "</p>" : "") +
+        "</div>";
+    }
+
+    return '<article class="review-card sigplan-card" data-plan-id="' + pidEsc + '">' +
+      '<div class="review-head">' +
+      '<span class="review-symbol">' + escapeHtml(p.symbol) + (p.name && p.name !== p.symbol ? " · " + escapeHtml(p.name) : "") + "</span>" +
+      '<span class="badge ' + setupCls + '">' + escapeHtml(p.setup_label || "日线信号") + "</span>" +
+      '<span class="badge ' + dirCls + '">' + escapeHtml(p.direction || "做多") + "</span>" +
+      adoptHtml +
+      '<span class="review-date num-plain">' + escapeHtml(p.signal_date) + " · " + escapeHtml(p.horizon_label || "5–20交易日") + "</span>" +
+      (!appState.offline
+        ? '<div class="review-actions"><button type="button" class="btn btn-sm" data-memo-plan="' + pidEsc + '">' + (linkedMemo ? "编辑实操" : "写实操备忘") + "</button></div>"
+        : "") +
+      "</div>" +
+      '<div class="review-figs">' +
+      '<span>信号价<b>' + escapeHtml(formatPrice(p.entry_price)) + "</b></span>" +
+      '<span>现价<b class="num-plain ' + retCls + '">' + escapeHtml(formatPrice(p.current_price)) + escapeHtml(retStr) + "</b></span>" +
+      '<span>目标参考<b>' + escapeHtml(formatPrice(p.target_price)) + "</b></span>" +
+      '<span>失效保护<b>' + escapeHtml(formatPrice(p.stop_price)) + "</b></span>" +
+      "</div>" +
+      (!isBlank(p.signal_reason) ? '<p class="sigplan-plan-text"><b>触发依据</b>' + escapeHtml(p.signal_reason) + "</p>" : "") +
+      (!isBlank(p.action_plan) ? '<p class="sigplan-plan-text"><b>布局建议</b>' + escapeHtml(p.action_plan) + "</p>" : "") +
+      (!isBlank(p.invalidation) ? '<p class="sigplan-plan-text"><b>失效条件</b>' + escapeHtml(p.invalidation) + "</p>" : "") +
+      (!isBlank(p.context_note) ? '<p class="sigplan-plan-text"><b>市场环境</b>' + escapeHtml(p.context_note) + "</p>" : "") +
+      '<div class="sigplan-reviews-grid">' +
+      '<div class="sigplan-rev-box"><div class="sigplan-rev-head"><span>短期复盘 · 5交易日</span>' + reviewOutcomeBadge(sr, "第0/5日") + '</div><p class="sigplan-rev-sum">' + escapeHtml(sr.summary || "等待满 5 个交易日自动复盘") + "</p></div>" +
+      '<div class="sigplan-rev-box"><div class="sigplan-rev-head"><span>中期复盘 · 20交易日</span>' + reviewOutcomeBadge(mr, "第0/20日") + '</div><p class="sigplan-rev-sum">' + escapeHtml(mr.summary || "等待满 20 个交易日检验反弹/反转") + "</p></div>" +
+      "</div>" +
+      memoHtml +
+      "</article>";
   }
 
   function renderReviews() {
     if (!dom.reviewList) return;
     const names = positionNameMap();
-    const list = filteredReviews();
-    if (!list.length) {
-      dom.reviewList.innerHTML = '<p class="empty-hint">' + (arr(appState.journal.trade_reviews).length ? "当前筛选下没有复盘记录" : (appState.offline ? "共享离线快照未公开私人复盘记录" : "还没有复盘记录，点击「+ 新建复盘」开始记录")) + "</p>";
+    const plans = arr(state().signal_plans);
+    const pstats = state().signal_plan_stats || {};
+    if (dom.signalPlanStatsBar) {
+      if (plans.length) {
+        const sDone = Number(pstats.short_completed || 0);
+        const sHit = Number(pstats.short_hits || 0);
+        const mDone = Number(pstats.mid_completed || 0);
+        const mHit = Number(pstats.mid_hits || 0);
+        dom.signalPlanStatsBar.hidden = false;
+        dom.signalPlanStatsBar.innerHTML =
+          '<span>日线级别信号 <b>' + (pstats.total || plans.length) + "</b> 条</span>" +
+          '<span>跟踪中 <b>' + (pstats.active_count != null ? pstats.active_count : plans.length) + "</b></span>" +
+          '<span>5日短期兑现 <b>' + sHit + "/" + sDone + "</b></span>" +
+          '<span>20日中期兑现 <b>' + mHit + "/" + mDone + "</b></span>" +
+          '<span class="sub">未采用信号亦自动执行 T+5 / T+20 复盘跟踪</span>';
+      } else {
+        dom.signalPlanStatsBar.hidden = true;
+        dom.signalPlanStatsBar.innerHTML = "";
+      }
+    }
+
+    const realMemos = realUserReviews();
+    const memoByPlan = {};
+    realMemos.forEach((r) => {
+      if (!isBlank(r.position_id) && !memoByPlan[r.position_id]) {
+        memoByPlan[r.position_id] = r;
+      }
+    });
+
+    const f = appState.reviewStatus || "all";
+    const filteredPlans = plans.filter((p) => {
+      const linked = memoByPlan[p.plan_id] || null;
+      const isMidDone = p.mid_review && p.mid_review.status === "completed";
+      const isShortDone = p.short_review && p.short_review.status === "completed";
+      if (f === "active") return !isMidDone;
+      if (f === "reviewed") return isShortDone || isMidDone;
+      if (f === "adopted") return Boolean(linked);
+      return true;
+    });
+    const standaloneMemos = (f === "all" || f === "adopted")
+      ? realMemos.filter((r) => isBlank(r.position_id) || !plans.some((p) => p.plan_id === r.position_id))
+      : [];
+
+    if (!filteredPlans.length && !standaloneMemos.length) {
+      dom.reviewList.innerHTML = '<p class="empty-hint">' +
+        (plans.length || realMemos.length
+          ? "当前筛选下没有信号或实操记录"
+          : (appState.offline ? "共享离线快照未公开私人实操备忘" : "暂无日线信号或实操备忘，点击「+ 记实操备忘」开始记录")) +
+        "</p>";
       return;
     }
-    dom.reviewList.innerHTML = list.map((r) => {
-      const dirCls = r.direction === "做多" ? "badge-bull" : r.direction === "做空" ? "badge-bear" : "";
-      const price = toNum(r.price_usd);
-      const pnl = toNum(r.pnl_usd);
-      const showPnl = Number.isFinite(pnl) && (pnl !== 0 || CLOSED_REVIEW_STATUSES.has(r.status));
-      const notes = [["核心逻辑", r.thesis], ["执行细节", r.execution_note], ["教训反思", r.lesson]]
-        .filter((n) => !isBlank(n[1]))
-        .map((n) => "<div><dt>" + n[0] + "</dt><dd>" + escapeHtml(n[1]) + "</dd></div>").join("");
-      const tags = arr(r.tags).filter((t) => !isBlank(t)).map((t) => '<span class="badge badge-outline">#' + escapeHtml(t) + "</span>").join("");
-      const id = escapeHtml(r.id);
-      return '<article class="review-card"><div class="review-head">' +
-        '<span class="review-symbol">' + escapeHtml(names[r.symbol] || r.symbol) + "</span>" +
-        (!isBlank(r.direction) ? '<span class="badge ' + dirCls + '">' + escapeHtml(r.direction) + "</span>" : "") +
-        (!isBlank(r.status) ? reviewStatusBadge(r.status) : "") +
-        '<span class="review-date num-plain">' + escapeHtml(r.trade_date) + "</span>" +
-        (!appState.offline ? '<div class="review-actions"><button type="button" class="btn btn-sm" data-edit-review="' + id + '">编辑</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-del-review="' + id + '">删除</button></div>' : "") +
-        '</div><div class="review-figs"><span>仓位<b>' + escapeHtml(formatWeight(r.size_pct)) + "</b></span>" +
-        (price > 0 ? "<span>参考均价<b>" + escapeHtml(formatPrice(price)) + "</b></span>" : "") +
-        (showPnl ? "<span>盈亏<b>" + amtHtml(pnl, { signed: true, cls: toneClass(pnl) }) + "</b></span>" : "") +
-        "</div>" + (notes ? '<dl class="review-notes">' + notes + "</dl>" : "") +
-        (tags ? '<div class="essay-tags">' + tags + "</div>" : "") + "</article>";
-    }).join("");
+
+    dom.reviewList.innerHTML =
+      filteredPlans.map((p) => signalPlanCardHtml(p, memoByPlan[p.plan_id] || null)).join("") +
+      standaloneMemos.map((r) => standaloneReviewCardHtml(r, names)).join("");
   }
 
   function ensureOption(select, value) {
@@ -4620,10 +5192,11 @@
   }
 
   function openReviewForm(row) {
-    if (appState.offline) return showToast("共享离线快照只读，禁止新建或编辑复盘", "error");
+    if (appState.offline) return showToast("共享离线快照只读，禁止新建或编辑实操备忘", "error");
     const r = row || appState.drafts.review || {};
     dom.rvId.value = r.id ? String(r.id) : "";
     if (dom.rvRev) dom.rvRev.value = r.rev != null ? String(r.rev) : "";
+    if (dom.rvPlanId) dom.rvPlanId.value = r.position_id ? String(r.position_id) : "";
     dom.rvDate.value = r.trade_date || todayBjt();
     dom.rvSymbol.value = r.symbol || "";
     if (r.direction) ensureOption(dom.rvDirection, r.direction);
@@ -4637,10 +5210,10 @@
     dom.rvExec.value = r.execution_note || "";
     dom.rvLesson.value = r.lesson || "";
     appState.editingReviewTags = arr(r.tags);
-    dom.rvSaveBtn.textContent = r.id ? "更新复盘" : "保存复盘";
+    dom.rvSaveBtn.textContent = r.id ? "更新备忘" : "保存备忘";
     dom.reviewForm.hidden = false;
     dom.reviewForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    dom.rvSymbol.focus({ preventScroll: true });
+    (dom.rvPlanId && dom.rvPlanId.value && !r.id ? dom.rvExec : dom.rvSymbol).focus({ preventScroll: true });
   }
 
   async function submitReview(event) {
@@ -4651,7 +5224,7 @@
     const size = Number(dom.rvSize.value || 0);
     const price = Number(dom.rvPrice.value || 0);
     const pnl = Number(dom.rvPnl.value || 0);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return showToast("请选择交易日期", "error");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return showToast("请选择日期", "error");
     if (!symbol) { dom.rvSymbol.focus(); return showToast("请填写标的", "error"); }
     if (![size, price, pnl].every(Number.isFinite) || size < 0 || price < 0) return showToast("仓位与均价需为有效的非负数字", "error");
     const payload = {
@@ -4665,6 +5238,7 @@
       thesis: dom.rvThesis.value.trim(),
       execution_note: dom.rvExec.value.trim(),
       lesson: dom.rvLesson.value.trim(),
+      position_id: dom.rvPlanId ? dom.rvPlanId.value.trim() : "",
       tags: appState.editingReviewTags
     };
     if (dom.rvId.value) {
@@ -4678,7 +5252,7 @@
       dom.reviewForm.hidden = true;
       renderReviews();
       renderCounts();
-      showToast(payload.id ? "复盘已更新" : "复盘已保存", "ok");
+      showToast(payload.id ? "实操备忘已更新" : "实操备忘已保存", "ok");
     } catch (err) {
       showToast(err.message || "保存失败", "error");
     } finally {
@@ -5142,8 +5716,9 @@
 
   function applyModeUi() {
     const ro = Boolean(appState.offline);
+    const isCons = Boolean((appState.drCapabilities && appState.drCapabilities.consumer_mode) || appState.serverRole === "consumer");
     if (dom.exportOpmlBtn) dom.exportOpmlBtn.hidden = ro;
-    if (dom.openIngestDrBtn) dom.openIngestDrBtn.hidden = ro;
+    if (dom.openIngestDrBtn) dom.openIngestDrBtn.hidden = ro || isCons;
     if (dom.openAddPosBtn) dom.openAddPosBtn.hidden = ro;
     if (dom.openImportBtn) dom.openImportBtn.hidden = ro;
     if (dom.newReviewBtn) dom.newReviewBtn.hidden = ro;
@@ -5333,6 +5908,33 @@
     // Currency toggle
     if ((el = hit("#currencySeg [data-currency]"))) return applyCurrency(el.getAttribute("data-currency"), true);
 
+    if ((el = hit("#feedViewSwitch [data-fview]"))) {
+      const fv = el.getAttribute("data-fview") === "wire" ? "wire" : "events";
+      if (appState.daily.feedView === fv) return undefined;
+      appState.daily.feedView = fv;
+      safeStorageSet(STORAGE_KEYS.feedView, fv);
+      resetSignalLimit();
+      renderFeedViewSwitch();
+      renderSectorRibbon();
+      return renderSignals();
+    }
+    if ((el = hit("[data-event-expand]"))) {
+      const eid = el.getAttribute("data-event-expand");
+      const ver = Number(el.getAttribute("data-event-ver") || 1);
+      if (eid) {
+        if (appState.expandedEvents.has(eid)) appState.expandedEvents.delete(eid);
+        else appState.expandedEvents.add(eid);
+        markEventRead(eid, ver);
+        renderSignals();
+        const targetBtn = dom.signalList && dom.signalList.querySelector('[data-event-expand="' + eid.replace(/"/g, '\\"') + '"]');
+        if (targetBtn && typeof targetBtn.focus === "function") targetBtn.focus({ preventScroll: true });
+      }
+      return undefined;
+    }
+    if ((el = hit("[data-event-link]"))) {
+      markEventRead(el.getAttribute("data-event-link"), el.getAttribute("data-event-ver"));
+      return undefined;
+    }
     if ((el = hit("#newsModeSwitch [data-nmode]"))) {
       const m = el.getAttribute("data-nmode") === "timeline" ? "timeline" : "ranked";
       if (appState.daily.mode === m) return undefined;
@@ -5564,15 +6166,26 @@
     if (hit("#articleSearchBtn")) return commitArticleKeyword();
     if (hit("#openIngestDrBtn")) {
       if (appState.offline) return showToast("共享离线快照只读", "error");
-      return openDrawer(dom.ingestDrDrawer, dom.drBodyInput);
+      return openDrWorkbench();
     }
-    if (hit("#closeIngestDrBtn") || hit("#drCancelBtn")) return closeDrawer("ingestDr");
+    if ((el = hit("#drModeSwitch [data-drmode]"))) {
+      return setDrMode(el.getAttribute("data-drmode"));
+    }
+    if (hit("#closeIngestDrBtn") || hit("#drCancelBtn") || hit("#drRunCancelBtn")) return closeDrawer("ingestDr");
     if ((el = hit("[data-copy-code]"))) {
       const wrap = el.closest(".code-copy-wrap");
       const codeEl = wrap ? wrap.querySelector("pre code, pre") : null;
       const text = codeEl ? codeEl.textContent : "";
       if (!text) return undefined;
       return copyText(text).then((ok) => showToast(ok ? "提问词已复制" : "复制失败", ok ? "ok" : "error"));
+    }
+    if ((el = hit("[data-run-dr-code]"))) {
+      const wrap = el.closest(".code-copy-wrap");
+      const codeEl = wrap ? wrap.querySelector("pre code, pre") : null;
+      const text = codeEl ? codeEl.textContent.trim() : "";
+      if (!text) return undefined;
+      closeDrawer("article");
+      return openDrWorkbench({ mode: "run", prompt: text, title: "", tickers: "" });
     }
     if ((el = hit("[data-set-status]"))) return setArticleStatus(el.getAttribute("data-set-status"), false);
     if (hit("#saveNoteBtn")) {
@@ -5586,8 +6199,26 @@
       setActive(dom.reviewStatusChips, "data-rstatus", appState.reviewStatus);
       return renderReviews();
     }
-    if (hit("#newReviewBtn")) return openReviewForm(null);
+    if (hit("#newReviewBtn")) return openReviewForm({ status: "计划跟进" });
     if (hit("#rvCancelBtn")) { appState.drafts.review = null; dom.reviewForm.hidden = true; return undefined; }
+    if ((el = hit("[data-memo-plan]"))) {
+      const pid = el.getAttribute("data-memo-plan") || "";
+      const plan = arr(state().signal_plans).find((p) => p.plan_id === pid);
+      const existing = arr(appState.journal.trade_reviews).find((r) => r.position_id === pid) || null;
+      if (existing) return openReviewForm(existing);
+      if (plan) {
+        return openReviewForm({
+          position_id: plan.plan_id,
+          trade_date: plan.signal_date,
+          symbol: plan.symbol,
+          direction: plan.direction,
+          price_usd: plan.entry_price,
+          status: "未采用·观察",
+          thesis: [plan.signal_reason, plan.action_plan].filter(Boolean).join("；")
+        });
+      }
+      return undefined;
+    }
     if ((el = hit("[data-edit-review]"))) {
       const id = el.getAttribute("data-edit-review");
       return openReviewForm(arr(appState.journal.trade_reviews).find((r) => String(r.id) === id) || null);
@@ -5717,6 +6348,7 @@
     }
     if (dom.positionForm) dom.positionForm.addEventListener("submit", submitPosition);
     if (dom.ingestDrForm) dom.ingestDrForm.addEventListener("submit", submitIngestDr);
+    if (dom.drRunForm) dom.drRunForm.addEventListener("submit", submitRunDr);
     for (const input of [dom.impBody, dom.impAccount, dom.impFormat, dom.impMode]) {
       input?.addEventListener("input", invalidateImportPreview);
       input?.addEventListener("change", invalidateImportPreview);
@@ -5827,6 +6459,7 @@
       }
       await refreshWorkspaceOnly();
       await checkHealth();
+      await loadDrCapabilities();
       startAutoRefreshPoll();
       return;
     }

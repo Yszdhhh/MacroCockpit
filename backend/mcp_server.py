@@ -427,15 +427,18 @@ DESKTOP_PRO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "deep_research_run",
-        "description": "运行桌面五角色多智能体深度研判（fast 量化推演或 llm 对抗辩论），产出研报并可选同步网页（仅桌面专业模式）。",
+        "description": "运行五角色多智能体深度研判（fast/llm）或 DemoLab 三路并行深研（demolab），产出研报并可选同步网页（仅桌面专业模式）。",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["symbol"],
+            "required": [],
             "properties": {
                 "symbol": {"type": "string", "minLength": 1, "maxLength": 24},
                 "market": {"type": "string", "enum": ["auto", "us", "ashare", "hk", "crypto"]},
-                "mode": {"type": "string", "enum": ["fast", "llm"]},
+                "mode": {"type": "string", "enum": ["fast", "llm", "demolab"]},
+                "prompt": {"type": "string", "minLength": 1, "maxLength": 20000},
+                "title": {"type": "string", "maxLength": 160},
+                "related_period": {"type": "string", "maxLength": 32},
                 "include_portfolio": {"type": "boolean", "default": False},
                 "sync_to_web": {"type": "boolean"},
             },
@@ -1225,9 +1228,43 @@ class McpDispatcher:
         return _tool_ok(f"OpenBB {dataset} 查询成功 ({sym or 'macro'})", {"ok": True, "dataset": dataset, "symbol": sym, **payload})
 
     def _tool_deep_research_run(self, args: dict[str, Any]) -> dict[str, Any]:
-        sym = str(args["symbol"]).strip().upper()
-        market = str(args.get("market") or "auto").strip().lower()
         mode = str(args.get("mode") or "fast").strip().lower()
+        sym = str(args.get("symbol") or "").strip().upper()
+        if mode == "demolab":
+            prompt = str(args.get("prompt") or "").strip()
+            if not prompt and not sym:
+                return _tool_err("demolab 模式至少需要提供 prompt 或 symbol", code=400)
+            try:
+                from backend.deep_research_runner import run_demolab_deep_research
+
+                state_file = self.base_dir / "data" / "cockpit_state.json"
+                state_snap = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {}
+                res = run_demolab_deep_research(
+                    prompt,
+                    execute=True,
+                    state=state_snap,
+                    articles_dir=self.base_dir / "articles",
+                    ingest=True,
+                    title=str(args.get("title") or ""),
+                    tickers=[sym] if sym else None,
+                    related_period=str(args.get("related_period") or ""),
+                    symbol=sym,
+                )
+            except ValueError as exc:
+                return _tool_err(str(exc), code=400)
+            except Exception as exc:
+                return _tool_err(f"DemoLab 并行深研运行失败: {type(exc).__name__}: {exc}", code=500)
+            if res.get("status") != "completed":
+                return _tool_err(str(res.get("error") or res.get("message") or "DemoLab 并行深研未完成"), code=500, detail=res)
+            art = res.get("ingested_article") or {}
+            return _tool_ok(
+                f"DemoLab 并行深研完成（{res.get('tracks_succeeded', 0)}/{res.get('tracks_total', 3)} 路收回 · 已入库 {art.get('filename', '')}）",
+                {"ok": True, "mode": "demolab", **{k: v for k, v in res.items() if k != "markdown"}},
+            )
+
+        if not sym:
+            return _tool_err("fast/llm 模式必须提供 symbol", code=400)
+        market = str(args.get("market") or "auto").strip().lower()
         inc_pf = args.get("include_portfolio", False)
         sync_web = bool(args.get("sync_to_web", False))
         try:

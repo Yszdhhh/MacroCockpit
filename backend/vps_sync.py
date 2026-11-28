@@ -98,6 +98,8 @@ def collect_payload(
             for article in raw_state.get("articles") or []
         ]
     state = project_public_state(raw_state, include_candidates=True, excluded_article_names=blocked)
+    state.pop("event_cards", None)
+    state.pop("event_stats", None)
     if generation is not None:
         state["generation"] = int(generation)
 
@@ -984,9 +986,12 @@ def _public_payload(payload: dict[str, Any]) -> dict[str, Any]:
     articles = payload.get("articles") or []
     blocked = private_article_filenames(articles)
     blocked.update(private_article_filenames(state.get("articles") or []))
+    pub_state = project_public_state(state, include_candidates=True, excluded_article_names=blocked)
+    pub_state.pop("event_cards", None)
+    pub_state.pop("event_stats", None)
     return {
         **payload,
-        "state": project_public_state(state, include_candidates=True, excluded_article_names=blocked),
+        "state": pub_state,
         "articles": [
             a for a in articles if not has_private_article_content(a)
             and (not isinstance(a, dict) or _safe_article_name(a.get("filename")) not in blocked)

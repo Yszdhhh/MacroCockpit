@@ -157,14 +157,19 @@ def _read_until_id(
     deadline: float,
     send: Callable[[dict[str, Any]], None],
     chunks: list[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("AGY ACP cancelled")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"AGY ACP timeout waiting for response id={target_id}")
         try:
-            line = out_q.get(timeout=min(remaining, 1.0))
+            line = out_q.get(timeout=min(remaining, 0.25))
         except queue.Empty:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("AGY ACP cancelled")
             if proc.poll() is not None and out_q.empty():
                 raise RuntimeError(f"AGY ACP exited unexpectedly (code={proc.returncode})")
             continue
@@ -246,6 +251,7 @@ def ask_agy(
     transport: str = "acp",
     timeout: int | float = 60,
     cwd: Path | str = COCKPIT_ROOT,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Send a prompt to local AGY via ACP stdio NDJSON (default) or CLI --print fallback."""
     clean_prompt = str(prompt or "").strip()
@@ -254,6 +260,8 @@ def ask_agy(
     tr = str(transport or "acp").strip().lower()
     if tr not in ("acp", "cli"):
         raise ValueError(f"unsupported AGY transport: {transport!r}")
+    if cancel_event is not None and cancel_event.is_set():
+        return {"ok": False, "transport": tr, "reply": "", "error": "cancelled", "elapsed_ms": 0}
 
     exe = resolve_agy_executable()
     if exe is None:
@@ -261,10 +269,18 @@ def ask_agy(
 
     # Keep cwd in the API while isolating every model session.
     with tempfile.TemporaryDirectory(prefix="macrocockpit-agy-") as work_dir:
-        return _ask_agy(exe.resolve(), clean_prompt, tr, float(timeout), work_dir)
+        return _ask_agy(exe.resolve(), clean_prompt, tr, float(timeout), work_dir, cancel_event=cancel_event)
 
 
-def _ask_agy(exe: Path, clean_prompt: str, tr: str, timeout: float, work_dir: str) -> dict[str, Any]:
+def _ask_agy(
+    exe: Path,
+    clean_prompt: str,
+    tr: str,
+    timeout: float,
+    work_dir: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
     t0 = time.monotonic()
     deadline = t0 + max(0.0, timeout)
     proc: subprocess.Popen[str] | None = None
@@ -289,7 +305,44 @@ def _ask_agy(exe: Path, clean_prompt: str, tr: str, timeout: float, work_dir: st
                 errors="replace",
                 start_new_session=os.name != "nt",
             )
-            stdout, stderr = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
+            out_chunks: list[str] = []
+            err_chunks: list[str] = []
+
+            def _drain_stream(stream: Any, sink: list[str]) -> None:
+                if stream is None:
+                    return
+                try:
+                    for chunk in iter(lambda: stream.read(4096), ""):
+                        sink.append(chunk)
+                except (OSError, ValueError):
+                    pass
+
+            t_out = threading.Thread(target=_drain_stream, args=(proc.stdout, out_chunks), daemon=True)
+            t_err = threading.Thread(target=_drain_stream, args=(proc.stderr, err_chunks), daemon=True)
+            t_out.start()
+            t_err.start()
+
+            while proc.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    _close_agy(proc)
+                    return {
+                        "ok": False,
+                        "transport": "cli",
+                        "reply": "",
+                        "error": "cancelled",
+                        "elapsed_ms": int((time.monotonic() - t0) * 1000),
+                    }
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(cmd="agy", timeout=timeout)
+                time.sleep(0.05)
+            try:
+                proc.wait(timeout=max(0.2, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise subprocess.TimeoutExpired(cmd="agy", timeout=timeout)
+            t_out.join(timeout=1.5)
+            t_err.join(timeout=1.5)
+            stdout = "".join(out_chunks)
+            stderr = "".join(err_chunks)
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             if proc.returncode != 0:
                 return {
@@ -394,7 +447,7 @@ def _ask_agy(exe: Path, clean_prompt: str, tr: str, timeout: float, work_dir: st
                 "params": {"protocolVersion": 1, "clientCapabilities": {}},
             }
         )
-        _read_until_id(proc, out_q, 1, deadline, _send)
+        _read_until_id(proc, out_q, 1, deadline, _send, cancel_event=cancel_event)
 
         _send(
             {
@@ -404,7 +457,7 @@ def _ask_agy(exe: Path, clean_prompt: str, tr: str, timeout: float, work_dir: st
                 "params": {"methodId": "oauth-personal"},
             }
         )
-        _read_until_id(proc, out_q, 2, deadline, _send)
+        _read_until_id(proc, out_q, 2, deadline, _send, cancel_event=cancel_event)
 
         _send(
             {
@@ -414,7 +467,7 @@ def _ask_agy(exe: Path, clean_prompt: str, tr: str, timeout: float, work_dir: st
                 "params": {"cwd": str(work_dir), "mcpServers": []},
             }
         )
-        sess_resp = _read_until_id(proc, out_q, 3, deadline, _send)
+        sess_resp = _read_until_id(proc, out_q, 3, deadline, _send, cancel_event=cancel_event)
         session_id = str((sess_resp.get("result") or {}).get("sessionId") or "")
         if not session_id:
             raise RuntimeError("AGY ACP session/new returned empty sessionId")
@@ -431,7 +484,7 @@ def _ask_agy(exe: Path, clean_prompt: str, tr: str, timeout: float, work_dir: st
                 },
             }
         )
-        prompt_resp = _read_until_id(proc, out_q, 4, deadline, _send, chunks=chunks)
+        prompt_resp = _read_until_id(proc, out_q, 4, deadline, _send, chunks=chunks, cancel_event=cancel_event)
         reply = "".join(chunks).strip()
         if not reply:
             res_obj = prompt_resp.get("result") or {}

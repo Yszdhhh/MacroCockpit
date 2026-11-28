@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 import zlib
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,7 +26,8 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.curation import rank_curated_signals
+from backend.curation import rank_curated_events, rank_curated_signals
+from backend.event_feed import project_event_card
 from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
 from backend.import_positions import PreviewExpiredError, PreviewValidationError, commit_import, preview_import
 from backend.journal_store import RevisionConflictError
@@ -38,6 +40,10 @@ from backend.mcp_server import (
 from backend.mobile_push import build_muse_markdown_digest, dispatch_mobile_push, load_push_env
 from backend.portfolio_store import ConstraintViolationError, IdempotencyConflictError, PortfolioStore
 from backend.public_snapshot import (
+    BJT,
+    _PUBLISH_LOCK,
+    _current_manifest,
+    _generation_timestamp,
     file_lock,
     load_published_generation,
     lookup_published_article,
@@ -85,7 +91,7 @@ MAX_JSON_BODY_BYTES = 2_000_000
 MAX_SYNC_BODY_BYTES = 16 * 1024 * 1024
 MAX_LOGIN_FORM_BYTES = 65_536
 
-_REFRESH_LOCK = threading.Lock()
+_REFRESH_LOCK = threading.RLock()
 _INGEST_MERGE_LOCK = threading.Lock()
 
 
@@ -366,6 +372,126 @@ class CockpitHTTPServer(ThreadingHTTPServer):
     def _revoked_cookies(self) -> dict[str, int]:
         with self.journal_store._connect("read") as db:
             return dict(db.execute("SELECT tok_hash, exp_ts FROM auth_revoked_cookies WHERE exp_ts>?", (int(time.time()),)))
+
+    def publish_ingested_article(
+        self,
+        art_summary: dict[str, Any],
+        *,
+        producer_id: str = "research-ingest",
+    ) -> tuple[dict[str, Any], int]:
+        """Insert or update an ingested article into published state and rotate generation."""
+        fname = str(art_summary.get("filename") or "")
+        parsed = parse_markdown_article(self.articles_dir / fname, "周月度深研") if fname else None
+        if isinstance(parsed, dict):
+            merged_art = dict(parsed)
+            for k in ("report_kind", "publisher", "author_role", "tickers", "score", "url"):
+                if k not in merged_art and k in art_summary:
+                    merged_art[k] = art_summary[k]
+            merged_art["source"] = "周月度深研"
+            out_art = merged_art
+        else:
+            out_art = dict(art_summary)
+            out_art["source"] = "周月度深研"
+
+        manifest_path = self.base_dir / "data" / "current_generation.json"
+        with _REFRESH_LOCK, _PUBLISH_LOCK, file_lock(manifest_path):
+            cur_manifest = _current_manifest(manifest_path, recover_newer=True)
+            if cur_manifest is not None:
+                loaded_pub = load_published_generation(self.base_dir)
+                cur_state = dict(loaded_pub.get("state") or {})
+                pub_gen = int(loaded_pub.get("generation") or 0)
+                pub_manifest = loaded_pub.get("manifest")
+            else:
+                cur_state = {}
+                for cand_sp in (self.state_path, self.base_dir / "data" / "cockpit_state.json"):
+                    if cand_sp.is_file():
+                        try:
+                            loaded_obj = json.loads(cand_sp.read_text(encoding="utf-8"))
+                            if isinstance(loaded_obj, dict):
+                                cur_state = loaded_obj
+                                break
+                        except (OSError, ValueError):
+                            pass
+                pub_gen = 0
+                pub_manifest = None
+
+            cur_state.pop("generation", None)
+            cand_ts = str(cur_state.get("generated_at_bjt") or "").strip()
+            now_iso = datetime.now(BJT).isoformat(timespec="seconds")
+            if cur_manifest is not None:
+                if not cand_ts:
+                    cand_ts = now_iso
+                try:
+                    if _generation_timestamp(cand_ts) < _generation_timestamp(cur_manifest["generated_at"]):
+                        cand_ts = str(cur_manifest["generated_at"])
+                except ValueError:
+                    cand_ts = str(cur_manifest["generated_at"])
+            else:
+                try:
+                    if cand_ts:
+                        _generation_timestamp(cand_ts)
+                    else:
+                        cand_ts = now_iso
+                except ValueError:
+                    cand_ts = now_iso
+            cur_state["generated_at_bjt"] = cand_ts
+            cur_state.setdefault("risk_gate", {"light": "GREEN", "label": "绿灯", "long_risk_cap": 1.0})
+            cur_state.setdefault("signals", [])
+
+            prev_articles = [
+                a
+                for a in (cur_state.get("articles") or [])
+                if isinstance(a, dict) and a.get("filename") != fname
+            ]
+            cur_state["articles"] = [out_art, *prev_articles]
+            cov = dict(cur_state.get("coverage") or {})
+            cov["articles_count"] = len(cur_state["articles"])
+            cov["periodic_reports_count"] = sum(
+                1 for a in cur_state["articles"] if isinstance(a, dict) and a.get("source") == "周月度深研"
+            )
+            cur_state["coverage"] = cov
+
+            gen_art_dir = self.base_dir / "data" / "generations" / f"gen_{pub_gen}" / "articles" if pub_gen > 0 else None
+            arts_payload: list[dict[str, str]] = []
+            seen_payload: set[str] = set()
+            new_file = self.articles_dir / fname
+            if fname and new_file.is_file():
+                arts_payload.append({"filename": fname, "content": new_file.read_text(encoding="utf-8")})
+                seen_payload.add(fname)
+            art_entries = (
+                (pub_manifest.get("articles") if isinstance(pub_manifest, dict) else None)
+                or cur_state.get("articles")
+                or []
+            )
+            for entry in art_entries:
+                if not isinstance(entry, dict):
+                    continue
+                ef = safe_article_filename(entry.get("filename"))
+                if not ef or ef in seen_payload:
+                    continue
+                seen_payload.add(ef)
+                cand = gen_art_dir / ef if gen_art_dir is not None else self.articles_dir / ef
+                if not cand.is_file():
+                    cand = self.articles_dir / ef
+                if not cand.is_file():
+                    cand = self.base_dir / "articles" / ef
+                if cand.is_file():
+                    try:
+                        arts_payload.append({"filename": ef, "content": cand.read_text(encoding="utf-8")})
+                    except OSError:
+                        pass
+            manifest = publish_generation(
+                self.base_dir,
+                cur_state,
+                arts_payload,
+                producer_id=producer_id,
+            )
+            out_gen = int(manifest.get("generation") or 0)
+            compat_state = self.base_dir / "data" / "cockpit_state.json"
+            if self.state_path != compat_state and compat_state.is_file():
+                with file_lock(self.state_path):
+                    atomic_write_json(self.state_path, json.loads(compat_state.read_text(encoding="utf-8")))
+        return out_art, out_gen
 
 
 class CockpitRequestHandler(BaseHTTPRequestHandler):
@@ -957,11 +1083,194 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if path == "/api/v2/events":
+                q = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+                scope = (q.get("scope") or ["all"])[0].strip().lower() or "all"
+                category = (q.get("category") or ["all"])[0].strip().lower() or "all"
+                subtopic = (q.get("subtopic") or [""])[0].strip() or None
+                direction = (q.get("direction") or [""])[0].strip().lower()
+                if direction == "all":
+                    direction = ""
+                instrument_id = (q.get("instrument_id") or [""])[0].strip().upper() or None
+                event_id = (q.get("event_id") or [""])[0].strip() or None
+                date_from = (q.get("from") or [""])[0].strip() or None
+                date_to = (q.get("to") or [""])[0].strip() or None
+                sort_mode = (q.get("sort") or ["importance"])[0].strip().lower() or "importance"
+                if sort_mode not in ("importance", "time"):
+                    self._send_json(400, {"error": "sort must be importance or time"})
+                    return
+                cursor_raw = (q.get("cursor") or [""])[0].strip() or None
+                try:
+                    limit = max(1, min(200, int((q.get("limit") or ["85"])[0])))
+                    offset = max(0, int(cursor_raw)) if cursor_raw else 0
+                except ValueError:
+                    self._send_json(400, {"error": "invalid limit or cursor"})
+                    return
+
+                is_ro_bearer = auth.get("role") == "READ_ONLY"
+                if is_ro_bearer and scope in ("held", "watch", "rules"):
+                    self._send_json(
+                        403,
+                        {"error": "READ_ONLY 禁止筛选持仓、自选或规则专属范围"},
+                    )
+                    return
+
+                st = self._state()
+                pool = list(st.get("event_cards") or [])
+                pool = _filter_by_time_window(pool, date_from, date_to)
+
+                rules = None
+                workspace = None
+                if not is_ro_bearer:
+                    rules = self.server.portfolio_store.list_curation_rules(enabled_only=True)
+                    workspace = self.server.portfolio_store.build_workspace(public_state=st)
+
+                matched = rank_curated_events(
+                    pool,
+                    rules=rules,
+                    workspace=workspace,
+                    scope=scope,
+                    category=category,
+                    subtopic=subtopic,
+                    direction=direction or None,
+                    instrument_id=instrument_id,
+                    event_id=event_id,
+                    sort=sort_mode,
+                    cursor=None,
+                    limit=max(len(pool), 500),
+                )
+                total = len(matched)
+                sliced = matched[offset : offset + limit]
+                next_cursor = str(offset + limit) if (offset + limit) < total else None
+                if is_ro_bearer:
+                    pub_sliced = []
+                    for ev in sliced:
+                        clean_ev = project_event_card(ev)
+                        if clean_ev is not None:
+                            clean_ev["final_score"] = float(clean_ev.get("base_score") or clean_ev.get("attention_score") or 0)
+                            clean_ev["personal_high"] = False
+                            clean_ev.pop("holding_radar", None)
+                            pub_sliced.append(clean_ev)
+                    sliced = pub_sliced
+
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "generation": int(st.get("generation") or 0),
+                        "scope": scope,
+                        "category": category,
+                        "subtopic": subtopic or "",
+                        "sort": sort_mode,
+                        "total": total,
+                        "count": len(sliced),
+                        "next_cursor": next_cursor,
+                        "events": sliced,
+                    },
+                )
+                return
+
+            if path == "/api/v2/signal-plans":
+                from backend.signal_advisor import (
+                    compute_signal_plan_stats,
+                    project_signal_plan_stats,
+                    project_signal_plans,
+                )
+
+                q = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+                status_filter = (q.get("status") or ["all"])[0].strip().lower() or "all"
+                if status_filter not in ("all", "active", "reviewed"):
+                    self._send_json(400, {"error": "status must be all, active, or reviewed"})
+                    return
+                sym_filter = (q.get("symbol") or [""])[0].strip().upper() or ""
+                try:
+                    limit = max(1, min(100, int((q.get("limit") or ["20"])[0])))
+                except ValueError:
+                    self._send_json(400, {"error": "invalid limit"})
+                    return
+
+                st = self._state()
+                all_plans = project_signal_plans(st.get("signal_plans") or [])
+                matched = []
+                for p in all_plans:
+                    if sym_filter and p.get("symbol") != sym_filter:
+                        continue
+                    is_mid_done = isinstance(p.get("mid_review"), dict) and p["mid_review"].get("status") == "completed"
+                    is_short_done = isinstance(p.get("short_review"), dict) and p["short_review"].get("status") == "completed"
+                    if status_filter == "active" and is_mid_done:
+                        continue
+                    if status_filter == "reviewed" and not (is_short_done or is_mid_done):
+                        continue
+                    matched.append(p)
+                sliced = matched[:limit]
+                pstats = project_signal_plan_stats(st.get("signal_plan_stats")) or compute_signal_plan_stats(all_plans)
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "generation": int(st.get("generation") or 0),
+                        "status": status_filter,
+                        "symbol": sym_filter,
+                        "total": len(matched),
+                        "count": len(sliced),
+                        "stats": pstats,
+                        "plans": sliced,
+                    },
+                )
+                return
+
             if path == "/api/journal":
                 if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
                     self._send_json(403, {"error": "需要登录或 PORTFOLIO_RW 权限"})
                     return
                 self._send_json(200, self._snap())
+                return
+
+            if path == "/api/research/capabilities":
+                if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
+                    self._send_json(403, {"error": "需要登录或 PORTFOLIO_RW 权限"})
+                    return
+                if self.server.role == "consumer":
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "consumer_mode": True,
+                            "can_run_gemini_dr": False,
+                            "can_run_demolab_dr": False,
+                            "can_run_any_dr": False,
+                            "recommended_mode": "manual_prompt_copy",
+                        },
+                    )
+                    return
+                from backend.periodic_report import check_deep_research_capabilities
+
+                caps = dict(check_deep_research_capabilities())
+                caps.pop("gemini_api_cli_path", None)
+                if getattr(self.server.dr_manager, "runner_fn", None) is not None:
+                    caps["can_run_demolab_dr"] = True
+                    if caps.get("recommended_mode") == "manual_prompt_copy":
+                        caps["recommended_mode"] = "demolab_parallel"
+                caps["can_run_any_dr"] = bool(caps.get("can_run_demolab_dr"))
+                self._send_json(200, {"ok": True, "consumer_mode": False, **caps})
+                return
+
+            if path == "/api/research/jobs":
+                if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
+                    self._send_json(403, {"error": "需要登录或 PORTFOLIO_RW 权限"})
+                    return
+                if self.server.role == "consumer":
+                    self._send_json(403, {"error": "consumer_mode_deep_research_disabled"})
+                    return
+                jid = (urllib.parse.parse_qs(u.query, keep_blank_values=True).get("job_id") or [""])[0].strip()
+                if jid:
+                    job = self.server.dr_manager.get_job(jid)
+                    if job is None:
+                        self._send_json(404, {"error": "未找到对应深研任务"})
+                        return
+                    self._send_json(200, {"ok": True, "job": job})
+                    return
+                self._send_json(200, {"ok": True, "jobs": self.server.dr_manager.list_jobs()})
                 return
 
             if path == "/api/article":
@@ -1180,13 +1489,14 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
 
         producer_id = str(b.get("producer_id") or auth.get("actor_id") or "windows-primary")
         try:
-            manifest = publish_generation(
-                self.server.base_dir,
-                st,
-                arts,
-                producer_id=producer_id,
-                generation=gen_val,
-            )
+            with _REFRESH_LOCK:
+                manifest = publish_generation(
+                    self.server.base_dir,
+                    st,
+                    arts,
+                    producer_id=producer_id,
+                    generation=gen_val,
+                )
         except ValueError as exc:
             msg = str(exc)
             if msg in ("stale_generation", "generation_conflict"):
@@ -1562,87 +1872,45 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": str(exc)})
                     return
 
-                fname = str(art_summary.get("filename") or "")
-                parsed = parse_markdown_article(self.server.articles_dir / fname, "周月度深研") if fname else None
-                if isinstance(parsed, dict):
-                    merged_art = dict(parsed)
-                    for k in ("report_kind", "publisher", "author_role", "tickers", "score", "url"):
-                        if k not in merged_art and k in art_summary:
-                            merged_art[k] = art_summary[k]
-                    merged_art["source"] = "周月度深研"
-                    art_summary = merged_art
-                else:
-                    art_summary["source"] = "周月度深研"
+                out_art, out_gen = self.server.publish_ingested_article(art_summary, producer_id="research-ingest")
+                self._send_json(200, {"ok": True, "article": out_art, "generation": out_gen})
+                return
 
-                with _REFRESH_LOCK:
-                    try:
-                        cur_state = dict(self._state())
-                    except Exception:
-                        cur_state = {}
-                    prev_articles = [
-                        a
-                        for a in (cur_state.get("articles") or [])
-                        if isinstance(a, dict) and a.get("filename") != fname
-                    ]
-                    cur_state["articles"] = [art_summary, *prev_articles]
-                    cov = dict(cur_state.get("coverage") or {})
-                    cov["articles_count"] = len(cur_state["articles"])
-                    cov["periodic_reports_count"] = sum(
-                        1 for a in cur_state["articles"] if isinstance(a, dict) and a.get("source") == "周月度深研"
+            if path == "/api/research/run":
+                if self.server.role == "consumer":
+                    self._send_json(403, {"error": "consumer_mode_deep_research_disabled"})
+                    return
+                try:
+                    from backend.deep_research_runner import BusyError
+                    from backend.periodic_report import check_deep_research_capabilities
+                except ImportError:
+                    self._send_json(503, {"error": "deep research runner unavailable"})
+                    return
+
+                caps = check_deep_research_capabilities()
+                if not caps.get("can_run_demolab_dr") and getattr(self.server.dr_manager, "runner_fn", None) is None:
+                    self._send_json(503, {"error": "当前环境未检测到可用的本地多智能体执行器"})
+                    return
+
+                prompt = str(b.get("prompt") or "").strip()
+                raw_tickers = b.get("tickers")
+                if isinstance(raw_tickers, str) and not raw_tickers.strip():
+                    raw_tickers = None
+                try:
+                    job = self.server.dr_manager.start_job(
+                        prompt,
+                        title=str(b.get("title") or ""),
+                        tickers=raw_tickers,
+                        related_period=str(b.get("related_period") or ""),
+                        symbol=str(b.get("symbol") or ""),
                     )
-                    cur_state["coverage"] = cov
-
-                    manifest_path = self.server.base_dir / "data" / "current_generation.json"
-                    if manifest_path.is_file():
-                        loaded_pub = load_published_generation(self.server.base_dir)
-                        pub_gen = int(loaded_pub.get("generation") or 0)
-                        pub_manifest = loaded_pub.get("manifest")
-                        gen_art_dir = self.server.base_dir / "data" / "generations" / f"gen_{pub_gen}" / "articles"
-                        arts_payload: list[dict[str, str]] = []
-                        seen_payload: set[str] = set()
-                        new_file = self.server.articles_dir / fname
-                        if fname and new_file.is_file():
-                            arts_payload.append({"filename": fname, "content": new_file.read_text(encoding="utf-8")})
-                            seen_payload.add(fname)
-                        art_entries = (
-                            (pub_manifest.get("articles") if isinstance(pub_manifest, dict) else None)
-                            or cur_state.get("articles")
-                            or []
-                        )
-                        for entry in art_entries:
-                            if not isinstance(entry, dict):
-                                continue
-                            ef = safe_article_filename(entry.get("filename"))
-                            if not ef or ef in seen_payload:
-                                continue
-                            seen_payload.add(ef)
-                            cand = gen_art_dir / ef
-                            if not cand.is_file():
-                                cand = self.server.articles_dir / ef
-                            if not cand.is_file():
-                                cand = self.server.base_dir / "articles" / ef
-                            if cand.is_file():
-                                try:
-                                    arts_payload.append({"filename": ef, "content": cand.read_text(encoding="utf-8")})
-                                except OSError:
-                                    pass
-                        manifest = publish_generation(
-                            self.server.base_dir,
-                            cur_state,
-                            arts_payload,
-                            producer_id="research-ingest",
-                        )
-                        out_gen = int(manifest.get("generation") or 0)
-                        compat_state = self.server.base_dir / "data" / "cockpit_state.json"
-                        if self.server.state_path != compat_state and compat_state.is_file():
-                            with file_lock(self.server.state_path):
-                                atomic_write_json(self.server.state_path, json.loads(compat_state.read_text(encoding="utf-8")))
-                    else:
-                        with file_lock(self.server.state_path):
-                            atomic_write_json(self.server.state_path, cur_state)
-                        out_gen = int(cur_state.get("generation") or 0)
-
-                self._send_json(200, {"ok": True, "article": art_summary, "generation": out_gen})
+                except BusyError as exc:
+                    self._send_json(409, {"error": str(exc)})
+                    return
+                except ValueError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                self._send_json(202, {"ok": True, "job": job})
                 return
 
             if path == "/api/push":
@@ -1785,6 +2053,14 @@ def create_server(
     srv.journal_store = srv.portfolio_store.journal
     srv._login_fails = {}
     srv._login_lock = threading.Lock()
+    from backend.deep_research_runner import DeepResearchJobManager
+
+    srv.dr_manager = DeepResearchJobManager(
+        data_dir=sp.parent,
+        articles_dir=srv.articles_dir,
+        state_getter=lambda: _load_or_build_state(srv.state_path, role=srv.role, base_dir=srv.base_dir),
+        on_complete_article=lambda art: srv.publish_ingested_article(art, producer_id="demolab-dr")[1],
+    )
     with srv.journal_store._lock, srv.journal_store._connect("immediate") as db:
         db.execute("INSERT OR IGNORE INTO auth_runtime_kv(k,v) VALUES('cookie_key',?)", (secrets.token_hex(32),))
         srv.cookie_key = bytes.fromhex(db.execute("SELECT v FROM auth_runtime_kv WHERE k='cookie_key'").fetchone()[0])

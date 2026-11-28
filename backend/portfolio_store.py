@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from backend.curation import _check_safe_regex, rank_curated_signals, validate_curation_rule
+from backend.curation import _check_safe_regex, rank_curated_events, rank_curated_signals, validate_curation_rule
 from backend.journal_store import JournalStore, RevisionConflictError
 from backend.market_quotes import KNOWN_SWAP_MULTIPLIERS, fetch_crypto_quotes, fetch_fx_snapshot
 from backend.valuation import (
@@ -1600,6 +1600,16 @@ class PortfolioStore:
                 try:
                     workspace["curated_signals"] = rank_curated_signals(
                         candidates,
+                        rules=rules,
+                        workspace=workspace,
+                    )
+                except Exception:
+                    pass
+            events_pool = public_state.get("event_cards")
+            if isinstance(events_pool, list) and events_pool:
+                try:
+                    workspace["curated_events"] = rank_curated_events(
+                        events_pool,
                         rules=rules,
                         workspace=workspace,
                     )
