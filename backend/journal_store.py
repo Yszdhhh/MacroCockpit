@@ -224,9 +224,6 @@ class JournalStore:
             db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)", ("seeded_v1", "1"))
             return seeded_rows
 
-    def _seed(self, state: dict[str, Any] | None) -> bool:
-        return self.seed_if_empty(state)
-
     @staticmethod
     def _row(row: sqlite3.Row, json_fields: tuple[str, ...] = ()) -> dict[str, Any]:
         result = dict(row)

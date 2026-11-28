@@ -18,7 +18,7 @@ except ImportError:
 
 from backend.guardrails import scrub_forbidden
 from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json, safe_float as _finite
-from backend.fred_and_market import _infer_us_session
+from backend.fred_and_market import infer_us_session
 from backend.sec_edgar import SEC_CIK_MAP, SEC_CN_NAMES, fetch_sec_filings_map
 
 CACHE_PATH = DATA_DIR / "stock_profiles_cache.json"
@@ -759,7 +759,7 @@ def fetch_gtimg_batch(symbols: list[str], timeout: int = 6) -> dict[str, dict[st
                 "market_at": f"{ts_raw} 美东" if ts_raw else received_at,
                 "received_at": received_at,
                 "source": "tencent_gtimg",
-                "session": _infer_us_session(ts_raw),
+                "session": infer_us_session(ts_raw),
                 "volume": _finite(parts[36]),
                 "turnover": _finite(parts[37]),
                 "pe_ttm": _finite(parts[39]),
@@ -1173,7 +1173,7 @@ def _fetch_us_f10(symbol: str, timeout: int = 4) -> dict[str, Any]:
     }
 
 
-def _create_yahoo_session(timeout: int = 7) -> tuple[Any, str] | tuple[None, str]:
+def create_yahoo_session(timeout: int = 7) -> tuple[Any, str] | tuple[None, str]:
     if requests is None:
         return (None, "")
     sess = requests.Session()
@@ -1206,7 +1206,7 @@ def _compute_return(closes: list[float], trading_days: int) -> float | None:
     return round((last - base) / base * 100.0, 2)
 
 
-def _fetch_yahoo_one(symbol: str, sess: Any, crumb: str, timeout: int = 8) -> dict[str, Any] | None:
+def fetch_yahoo_one(symbol: str, sess: Any, crumb: str, timeout: int = 8) -> dict[str, Any] | None:
     sym_u = symbol.strip().upper()
     if sess is None:
         return None
@@ -1971,7 +1971,7 @@ def build_quick_thesis(
     }
 
 
-def _assemble_profile(
+def assemble_profile(
     symbol: str,
     yahoo: dict[str, Any],
     gtimg: dict[str, Any],
@@ -2535,7 +2535,7 @@ def _fetch_cn_equity_profile(
     m_code = re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol)
     exch_cn = {"SH": "上交所", "SZ": "深交所", "BJ": "北交所"}.get(m_code.group(1) if m_code else "", "A股")
     quote.setdefault("exchange", exch_cn)
-    return _assemble_profile(
+    return assemble_profile(
         symbol,
         f10,
         quote,
@@ -2572,7 +2572,7 @@ def _fetch_hk_equity_profile(
             f10 = {}
     f10["chart"] = chart
     quote.setdefault("exchange", "港交所")
-    return _assemble_profile(
+    return assemble_profile(
         symbol,
         f10,
         quote,
@@ -2584,7 +2584,7 @@ def _fetch_hk_equity_profile(
     )
 
 
-def _merge_us_fallbacks(
+def merge_us_fallbacks(
     sym: str,
     yahoo: dict[str, Any],
     gtimg: dict[str, Any],
@@ -2684,10 +2684,10 @@ def build_stock_profiles(
     ]
 
     if need_yahoo:
-        sess, crumb = _create_yahoo_session()
+        sess, crumb = create_yahoo_session()
         if sess is not None:
             with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {pool.submit(_fetch_yahoo_one, sym, sess, crumb): sym for sym in need_yahoo}
+                futures = {pool.submit(fetch_yahoo_one, sym, sess, crumb): sym for sym in need_yahoo}
                 for fut in as_completed(futures):
                     sym = futures[fut]
                     try:
@@ -2712,8 +2712,8 @@ def build_stock_profiles(
         yahoo_item = yahoo_cache.get(sym) or {}
         gtimg_item = gtimg_map.get(sym) or {}
         if not (yahoo_item.get("chart") or {}).get("closes"):
-            yahoo_item = _merge_us_fallbacks(sym, yahoo_item, gtimg_item, timeout=4)
-        prof = _assemble_profile(
+            yahoo_item = merge_us_fallbacks(sym, yahoo_item, gtimg_item, timeout=4)
+        prof = assemble_profile(
             sym,
             yahoo_item,
             gtimg_item,
@@ -2763,8 +2763,8 @@ def fetch_single_stock_profile(
             cache = _read_cache()
             yahoo = cache.get(canon_sym) or {}
             if not yahoo or (now - float(yahoo.get("yahoo_fetched_at") or 0.0)) > CACHE_TTL_SECONDS:
-                sess, crumb = _create_yahoo_session(timeout=2)
-                fresh = _fetch_yahoo_one(canon_sym, sess, crumb, timeout=3) if sess is not None else None
+                sess, crumb = create_yahoo_session(timeout=2)
+                fresh = fetch_yahoo_one(canon_sym, sess, crumb, timeout=3) if sess is not None else None
                 if fresh:
                     yahoo = fresh
                     cache[canon_sym] = fresh
@@ -2772,14 +2772,14 @@ def fetch_single_stock_profile(
                         atomic_write_json(CACHE_PATH, cache)
                     except Exception:
                         pass
-            yahoo = _merge_us_fallbacks(canon_sym, yahoo, gtimg, timeout=4)
+            yahoo = merge_us_fallbacks(canon_sym, yahoo, gtimg, timeout=4)
             sec_filings: list[dict[str, str]] = []
             if canon_sym in SEC_CIK_MAP:
                 try:
                     sec_filings = fetch_sec_filings_map([canon_sym], force_refresh=False, timeout=2).get(canon_sym, [])
                 except Exception:
                     sec_filings = []
-            prof = _assemble_profile(
+            prof = assemble_profile(
                 canon_sym,
                 yahoo,
                 gtimg,
@@ -2800,6 +2800,9 @@ def fetch_single_stock_profile(
                 _ON_DEMAND_CACHE.pop(oldest_key, None)
             _ON_DEMAND_CACHE[canon_sym] = (now, dict(prof))
     return prof
+
+
+_assemble_profile = assemble_profile
 
 
 if __name__ == "__main__":

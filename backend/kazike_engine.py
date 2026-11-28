@@ -60,7 +60,7 @@ _MARKET_ANCHOR_RE = re.compile(
     r"美股|A股|港股|纳指|标普|创业板|科创板|芯片|算力|半导体|大模型|央行|美联储|国债|美债|汇率|黄金|原油|比特币|财报|营收|市值)"
 )
 _CLICKBAIT_RE = re.compile(r"(震惊|揭秘|速看|紧急通知|太可怕了)")
-_ROUNDUP_RE = re.compile(
+ROUNDUP_RE = re.compile(
     r"(?i)(?:^live\s+updates?\s*:|^live\s+blog\s*:|market\s+wrap\b|stock\s+market\s+today\b|"
     r"what\s+to\s+watch\s+today|早报|周报|月报|盘点|合集|汇总|digest|roundup|recap|briefing)"
 )
@@ -353,7 +353,7 @@ def _deterministic_five_axes(item: dict[str, Any]) -> dict[str, Any]:
         action += 1
 
     # Cap explicit noise categories per AIHOT taste rules
-    if _ROUNDUP_RE.search(title):
+    if ROUNDUP_RE.search(title):
         impact = min(impact, 3)
     if _TEASER_RE.search(text) and not re.search(r"\d+(?:\.\d+)?%", text):
         surprise = min(surprise, 3)
@@ -444,7 +444,7 @@ def _select_best_representative(group: list[dict[str, Any]]) -> tuple[dict[str, 
     return ordered[0], ordered[1:]
 
 
-def _extract_isolation_keys(item: dict[str, Any]) -> dict[str, set[str]]:
+def extract_isolation_keys(item: dict[str, Any]) -> dict[str, set[str]]:
     """Extract SEC accession, filing form/date, fiscal quarter, and official notice IDs to prevent over-merging."""
     url = str(item.get("url") or "")
     item_id = str(item.get("id") or "")
@@ -490,7 +490,7 @@ def _extract_isolation_keys(item: dict[str, Any]) -> dict[str, set[str]]:
     }
 
 
-def _extract_numeric_anchors(text: str) -> set[str]:
+def extract_numeric_anchors(text: str) -> set[str]:
     """Extract normalized percentage, bps, model-version, and numeric anchors for cross-lingual matching."""
     low = str(text or "").lower()
     anchors: set[str] = set()
@@ -517,7 +517,7 @@ def _extract_numeric_anchors(text: str) -> set[str]:
     return anchors
 
 
-def _isolation_conflict(keys_a: dict[str, set[str]], keys_b: dict[str, set[str]]) -> bool:
+def isolation_conflict(keys_a: dict[str, set[str]], keys_b: dict[str, set[str]]) -> bool:
     for field in ("sec_acc", "sec_form_date", "fiscal_period", "notice_id"):
         sa = keys_a.get(field) or set()
         sb = keys_b.get(field) or set()
@@ -557,13 +557,13 @@ def cluster_and_dedup(
         norm_u = normalize_url(it.get("url"))
         ts = parse_time_utc(it.get("time_bjt"), now_utc=now)
         tickers = {str(t).upper() for t in (it.get("tickers") or []) if t}
-        num_anchors = _extract_numeric_anchors(f"{title} {summary[:160]}")
-        iso_keys = _extract_isolation_keys(it)
+        num_anchors = extract_numeric_anchors(f"{title} {summary[:160]}")
+        iso_keys = extract_isolation_keys(it)
 
         item_is_crypto = str(it.get("category") or "").lower() == "crypto"
         domain_tag = "crypto" if item_is_crypto else "mkt"
 
-        if _ROUNDUP_RE.search(title):
+        if ROUNDUP_RE.search(title):
             cid = f"clu-{hashlib.sha1(f'roundup|{domain_tag}|{title}'.encode('utf-8')).hexdigest()[:10]}"
             it["cluster_id"] = cid
             it["group_relation"] = "新事件"
@@ -580,7 +580,7 @@ def cluster_and_dedup(
                 continue
             if item_is_crypto != bool(cl.get("is_crypto")):
                 continue
-            if _isolation_conflict(iso_keys, cl["iso_keys"]):
+            if isolation_conflict(iso_keys, cl["iso_keys"]):
                 continue
             if norm_u and norm_u in cl["urls"]:
                 matched_cluster = cl

@@ -17,7 +17,7 @@ from typing import Any
 
 import requests
 
-from backend.guardrails import has_private_article_content, private_article_filenames, safe_article_filename as _safe_article_name
+from backend.guardrails import has_private_article_content, private_article_filenames, safe_article_filename
 from backend.runtime import BJT as _BJT, DATA_DIR, file_lock, resolve_data_dir
 from backend.mobile_push import load_push_env
 from backend.public_snapshot import project_public_state
@@ -27,6 +27,9 @@ STATE_PATH = DATA_DIR / "cockpit_state.json"
 DEFAULT_JOURNAL_DB_PATH = DATA_DIR / "user_journal.db"
 MAX_ARTICLE_BYTES = 256 * 1024
 _MANAGED_SETTING_KEYS: tuple[str, ...] = ("watchlist", "currency", "default_account_id", "alert_prefs")
+
+
+_safe_article_name = safe_article_filename
 
 
 def collect_payload(
@@ -41,11 +44,11 @@ def collect_payload(
     blocked = private_article_filenames(raw_state.get("articles") or [])
     names: list[str] = []
     for article in raw_state.get("articles") or []:
-        name = _safe_article_name(article.get("filename")) if isinstance(article, dict) else None
+        name = safe_article_filename(article.get("filename")) if isinstance(article, dict) else None
         if name and name not in names:
             names.append(name)
     for kol in raw_state.get("kol_digest") or []:
-        name = _safe_article_name(kol.get("article_file")) if isinstance(kol, dict) else None
+        name = safe_article_filename(kol.get("article_file")) if isinstance(kol, dict) else None
         if name and name not in names:
             names.append(name)
 
@@ -54,7 +57,7 @@ def collect_payload(
         name
         for article in raw_state.get("articles") or []
         if isinstance(article, dict) and article.get("source") == "本地知识库"
-        and (name := _safe_article_name(article.get("filename")))
+        and (name := safe_article_filename(article.get("filename")))
     }
     allowed_dirs = [(state_path.parent.parent / "articles", "同步深度长文"), *get_allowed_article_dirs()]
     refreshed_inbox = {}
@@ -84,7 +87,7 @@ def collect_payload(
 
     if refreshed_inbox:
         raw_state["articles"] = [
-            refreshed_inbox.get(_safe_article_name(article.get("filename")), article)
+            refreshed_inbox.get(safe_article_filename(article.get("filename")), article)
             if isinstance(article, dict) else article
             for article in raw_state.get("articles") or []
         ]
@@ -983,7 +986,7 @@ def _public_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "state": pub_state,
         "articles": [
             a for a in articles if not has_private_article_content(a)
-            and (not isinstance(a, dict) or _safe_article_name(a.get("filename")) not in blocked)
+            and (not isinstance(a, dict) or safe_article_filename(a.get("filename")) not in blocked)
         ],
     }
 

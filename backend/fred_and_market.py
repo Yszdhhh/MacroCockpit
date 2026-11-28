@@ -113,7 +113,7 @@ _HEADERS = {
 }
 
 
-def _load_fred_api_key() -> str | None:
+def load_fred_api_key() -> str | None:
     env_key = (os.environ.get("FRED_API_KEY") or "").strip()
     if env_key:
         return env_key
@@ -262,7 +262,7 @@ def _merge_series(
     return sorted(merged.items(), key=lambda x: x[0])
 
 
-def _fetch_gold_tail() -> list[tuple[str, float]]:
+def fetch_gold_tail() -> list[tuple[str, float]]:
     """Fetch recent daily COMEX Gold (GC=F) closes via Yahoo Finance chart API or yfinance."""
     if requests is not None:
         try:
@@ -308,7 +308,7 @@ def _fetch_gold_tail() -> list[tuple[str, float]]:
 
 def refresh_fred_cache(include_gold: bool = True) -> dict[str, list[tuple[str, float]]]:
     """Refresh FRED series + Net Liquidity components into local data/fred_cache.json."""
-    api_key = _load_fred_api_key()
+    api_key = load_fred_api_key()
     cache_raw = _load_fred_cache()
     updated: dict[str, list[tuple[str, float]]] = {}
 
@@ -321,7 +321,7 @@ def refresh_fred_cache(include_gold: bool = True) -> dict[str, list[tuple[str, f
             updated[key] = merged
 
     if include_gold:
-        gold_obs = _fetch_gold_tail()
+        gold_obs = fetch_gold_tail()
         existing_gold = cache_raw.get("GOLD", [])
         merged_gold = _merge_series([(str(x[0]), float(x[1])) for x in existing_gold], gold_obs)
         if merged_gold:
@@ -344,7 +344,7 @@ def _load_macro_series_bundle(refresh_fred: bool = False) -> dict[str, list[tupl
 
     # Always attempt best-effort Net Liquidity cache seed if absent locally
     if not all(k in cache_data and cache_data[k] for k in ("WALCL", "RRPONTSYD", "WTREGEN")):
-        api_key = _load_fred_api_key()
+        api_key = load_fred_api_key()
         seeded = False
         for liq_key in ("WALCL", "RRPONTSYD", "WTREGEN"):
             if not cache_data.get(liq_key):
@@ -394,7 +394,7 @@ def _load_macro_series_bundle(refresh_fred: bool = False) -> dict[str, list[tupl
     return bundle
 
 
-def _infer_us_session(ts_str: str) -> str:
+def infer_us_session(ts_str: str) -> str:
     """Infer US equity trading session from a YYYY-MM-DD HH:MM:SS US/Eastern timestamp."""
     m = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})", str(ts_str or ""))
     if not m:
@@ -885,7 +885,7 @@ def _fetch_tencent_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]]
                 "market_at": market_at,
                 "received_at": received_at,
                 "source": "tencent_gtimg",
-                "session": _infer_us_session(ts_str),
+                "session": infer_us_session(ts_str),
             }
     return (parsed, quote_as_of)
 

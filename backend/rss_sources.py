@@ -63,7 +63,7 @@ ARTICLES_DIR = COCKPIT_ROOT / "articles"
 DEFAULT_OPML_PATH = COCKPIT_ROOT / "dist" / "macro_cockpit_feeds.opml"
 _FULLTEXT_CACHE_LOCK = threading.Lock()
 
-_HEADERS = {
+DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -655,10 +655,10 @@ def parse_feed_xml(
     return items_out
 
 
-def _fetch_one_feed(spec: dict[str, str], timeout: int = 7) -> list[dict[str, Any]]:
+def fetch_one_feed(spec: dict[str, str], timeout: int = 7) -> list[dict[str, Any]]:
     if requests is None:
         return []
-    headers = dict(_HEADERS)
+    headers = dict(DEFAULT_HEADERS)
     if spec.get("identity_encoding"):
         headers["Accept-Encoding"] = "identity"
     try:
@@ -716,7 +716,7 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
 
     # 1. Cailianpress (财联社电报): hk_us + red + watch (看盘)
-    cls_headers = {**_HEADERS, "Referer": "https://www.cls.cn/telegraph"}
+    cls_headers = {**DEFAULT_HEADERS, "Referer": "https://www.cls.cn/telegraph"}
     for cat, default_cat in (("hk_us", "equities"), ("red", "macro"), ("watch", "equities")):
         params: dict[str, Any] = {
             "appName": "CailianpressWeb",
@@ -802,7 +802,7 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
             resp = requests.get(
                 "https://api-one.wallstcn.com/apiv1/content/lives",
                 params={"channel": ch, "limit": 10},
-                headers=_HEADERS,
+                headers=DEFAULT_HEADERS,
                 timeout=timeout,
             )
             if resp.status_code != 200 or not resp.content:
@@ -1043,7 +1043,7 @@ def collect_equation_news_with_meta(
         old_fp = [(str(s.get("id") or ""), str(s.get("title") or ""), str(s.get("summary") or "")) for s in old_signals]
         old_ids = {str(s.get("id") or "") for s in old_signals if s.get("id")}
 
-        headers = {**_HEADERS, "Accept": "application/json"}
+        headers = {**DEFAULT_HEADERS, "Accept": "application/json"}
         if old_etag and old_signals:
             headers["If-None-Match"] = old_etag
 
@@ -1202,23 +1202,6 @@ def collect_equation_news_with_meta(
     )
 
 
-def collect_equation_news_signals(
-    *,
-    channels: tuple[str, ...] = EQUATION_DEFAULT_CHANNELS,
-    limit: int = 20,
-    timeout: int = 7,
-    cache_path: Path | str | None = None,
-) -> list[dict[str, Any]]:
-    """Collect EquationNews public REST signals using optional ETag cache."""
-    signals, _meta = collect_equation_news_with_meta(
-        channels=channels,
-        limit=limit,
-        timeout=timeout,
-        cache_path=cache_path,
-    )
-    return signals
-
-
 _DEPRECATED_FEED_IDS: frozenset[str] = frozenset({"aidaily"})
 _DEPRECATED_SOURCES: frozenset[str] = frozenset({"a.i. 日报", "a.i.日报", "aidaily", "aidaily.fyi"})
 
@@ -1274,7 +1257,7 @@ def collect_curated_rss_signals(*, force_refresh: bool = False, timeout: int = 7
 
     collected: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = [pool.submit(_fetch_one_feed, sp, timeout) for sp in specs]
+        futures = [pool.submit(fetch_one_feed, sp, timeout) for sp in specs]
         cn_future = pool.submit(collect_cn_finance_wires, timeout)
         for fut in as_completed(futures):
             try:
@@ -1303,11 +1286,11 @@ def collect_curated_rss_signals(*, force_refresh: bool = False, timeout: int = 7
     return []
 
 
-def _fetch_article_candidates_from_feed(spec: dict[str, str], timeout: int = 8) -> list[dict[str, Any]]:
+def fetch_article_candidates_from_feed(spec: dict[str, str], timeout: int = 8) -> list[dict[str, Any]]:
     if requests is None:
         return []
     try:
-        resp = requests.get(spec["url"], headers=_HEADERS, timeout=timeout)
+        resp = requests.get(spec["url"], headers=DEFAULT_HEADERS, timeout=timeout)
         if resp.status_code != 200 or not resp.content:
             return []
         xml_text = decode_http_text(resp)
@@ -1547,7 +1530,7 @@ def fetch_url_fulltext_markdown(
         try:
             resp = http_get_no_redirect(
                 fx_url,
-                headers={**_HEADERS, "Accept": "application/json"},
+                headers={**DEFAULT_HEADERS, "Accept": "application/json"},
                 timeout=timeout,
                 pinned_ip=fx_ips[0] if fx_ips else None,
                 requests_mod=requests,
@@ -1588,7 +1571,7 @@ def fetch_url_fulltext_markdown(
     try:
         cur_url = target_url
         resp = None
-        req_headers = {**_HEADERS, "Accept": "text/html,application/xhtml+xml"}
+        req_headers = {**DEFAULT_HEADERS, "Accept": "text/html,application/xhtml+xml"}
         for _hop in range(5):
             if _hop == 0:
                 safe_ok, resolved_ips = True, initial_ips
@@ -1652,7 +1635,7 @@ def fetch_url_fulltext_markdown(
             try:
                 resp_j = http_get_no_redirect(
                     jina_url,
-                    headers={**_HEADERS, "Accept": "text/markdown, text/plain"},
+                    headers={**DEFAULT_HEADERS, "Accept": "text/markdown, text/plain"},
                     timeout=timeout,
                     pinned_ip=j_ips[0] if j_ips else None,
                     requests_mod=requests,
@@ -1704,7 +1687,7 @@ def _fetch_cls_article_detail(
         resp = requests.get(
             "https://www.cls.cn/v3/article/detail",
             params=params,
-            headers={**_HEADERS, "Referer": f"https://www.cls.cn/detail/{clean_id}"},
+            headers={**DEFAULT_HEADERS, "Referer": f"https://www.cls.cn/detail/{clean_id}"},
             timeout=timeout,
         )
         if resp.status_code != 200 or not resp.content:
@@ -1726,7 +1709,7 @@ def _fetch_cls_article_detail(
     return ""
 
 
-def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
+def fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
     if requests is None:
         return []
     params: dict[str, Any] = {"appName": "CailianpressWeb", "os": "web", "sv": "8.7.9"}
@@ -1735,7 +1718,7 @@ def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
         resp = requests.get(
             "https://www.cls.cn/v3/depth/home/assembled/1000",
             params=params,
-            headers={**_HEADERS, "Referer": "https://www.cls.cn/depth?id=1000"},
+            headers={**DEFAULT_HEADERS, "Referer": "https://www.cls.cn/depth?id=1000"},
             timeout=timeout,
         )
         if resp.status_code != 200 or not resp.content:
@@ -1876,7 +1859,7 @@ def _fetch_wscn_article_detail(
         resp = requests.get(
             f"https://api-one.wallstcn.com/apiv1/content/articles/{urllib.parse.quote(clean_id)}",
             params={"extract": 0},
-            headers=_HEADERS,
+            headers=DEFAULT_HEADERS,
             timeout=timeout,
         )
         if resp.status_code != 200 or not resp.content:
@@ -1913,7 +1896,7 @@ def _fetch_wscn_article_detail(
         return None
 
 
-def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
+def fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
     """Fetch WallStreetCN daily hot articles (free fulltext only)."""
     if requests is None:
         return []
@@ -1921,7 +1904,7 @@ def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
         resp = requests.get(
             "https://api-one.wallstcn.com/apiv1/content/articles/hot",
             params={"period": "all"},
-            headers=_HEADERS,
+            headers=DEFAULT_HEADERS,
             timeout=timeout,
         )
         if resp.status_code != 200 or not resp.content:
@@ -2006,13 +1989,13 @@ def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
     return candidates
 
 
-def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
+def fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
     """Fetch fulltext articles from AIHOT hot-topics & selected AI items (skipping paywalls/WeChat)."""
     if requests is None:
         return []
     actor_id = (os.environ.get("AIHOT_ACTOR_ID") or "macrocockpit-agent-v2").strip()
     aihot_headers = {
-        **_HEADERS,
+        **DEFAULT_HEADERS,
         "User-Agent": f"aihot-skill/2.0.0 (+https://aihot.news/aihot-skill/) aihot-actor/{actor_id}",
         "Accept": "application/json",
     }
@@ -2145,7 +2128,7 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
     return candidates
 
 
-def _select_balanced_articles(
+def select_balanced_articles(
     deduped: list[dict[str, Any]],
     *,
     limit: int = 14,
@@ -2182,7 +2165,7 @@ def _select_balanced_articles(
     return picked
 
 
-def _write_curated_article_files(articles: list[dict[str, Any]], articles_dir: Path = ARTICLES_DIR) -> None:
+def write_curated_article_files(articles: list[dict[str, Any]], articles_dir: Path = ARTICLES_DIR) -> None:
     articles_dir.mkdir(parents=True, exist_ok=True)
     for old_file in articles_dir.glob("feed_*.md"):
         try:
@@ -2231,7 +2214,7 @@ def collect_curated_articles(
             arts = cached.get("articles") or []
             if cached.get("schema_tag") == "wave2_fulltext" and age <= ARTICLE_CACHE_TTL and isinstance(arts, list) and arts:
                 if not list(articles_dir.glob("feed_*.md")):
-                    _write_curated_article_files(arts, articles_dir=articles_dir)
+                    write_curated_article_files(arts, articles_dir=articles_dir)
                 return [dict(x) for x in arts if isinstance(x, dict)]
         except Exception:
             pass
@@ -2240,10 +2223,10 @@ def collect_curated_articles(
 
     raw_candidates: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futs = [pool.submit(_fetch_article_candidates_from_feed, sp, timeout) for sp in CURATED_ARTICLE_FEEDS]
-        cls_fut = pool.submit(_fetch_cls_depth_candidates, timeout)
-        wscn_fut = pool.submit(_fetch_wscn_hot_articles, timeout)
-        aihot_fut = pool.submit(_fetch_aihot_hot_articles, max(timeout, 10))
+        futs = [pool.submit(fetch_article_candidates_from_feed, sp, timeout) for sp in CURATED_ARTICLE_FEEDS]
+        cls_fut = pool.submit(fetch_cls_depth_candidates, timeout)
+        wscn_fut = pool.submit(fetch_wscn_hot_articles, timeout)
+        aihot_fut = pool.submit(fetch_aihot_hot_articles, max(timeout, 10))
         for fut in as_completed(futs):
             try:
                 raw_candidates.extend(fut.result())
@@ -2268,7 +2251,7 @@ def collect_curated_articles(
 
     if scored_candidates:
         deduped = cluster_and_dedup(scored_candidates)
-        balanced = _select_balanced_articles(deduped, limit=14, max_per_publisher=4)
+        balanced = select_balanced_articles(deduped, limit=14, max_per_publisher=4)
         top_articles = [
             {
                 "filename": "",
@@ -2282,7 +2265,7 @@ def collect_curated_articles(
             }
             for it in balanced
         ]
-        _write_curated_article_files(top_articles, articles_dir=articles_dir)
+        write_curated_article_files(top_articles, articles_dir=articles_dir)
         try:
             atomic_write_json(cache_path, {"schema_tag": "wave2_fulltext", "ts": time.time(), "articles": top_articles})
         except Exception:
@@ -2389,6 +2372,16 @@ def build_opml_export(output_path: Path | str | None = None) -> str:
     tmp.write_text(xml_str, encoding="utf-8")
     os.replace(tmp, out_path)
     return xml_str
+
+
+_HEADERS = DEFAULT_HEADERS
+_fetch_aihot_hot_articles = fetch_aihot_hot_articles
+_fetch_article_candidates_from_feed = fetch_article_candidates_from_feed
+_fetch_cls_depth_candidates = fetch_cls_depth_candidates
+_fetch_one_feed = fetch_one_feed
+_fetch_wscn_hot_articles = fetch_wscn_hot_articles
+_select_balanced_articles = select_balanced_articles
+_write_curated_article_files = write_curated_article_files
 
 
 if __name__ == "__main__":

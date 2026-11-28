@@ -21,7 +21,7 @@ from backend.runtime import BJT, DATA_DIR, DIST_DIR, UTC, atomic_write_json
 from backend.fred_and_market import (
     FRED_CACHE_PATH,
     PARQUET_MACRO_DIR,
-    _fetch_gold_tail,
+    fetch_gold_tail,
 )
 
 _BTC_ENV = (os.environ.get("MACROCOCKPIT_BTC_KLINES_PARQUET") or "").strip()
@@ -81,7 +81,7 @@ def _read_fred_cache_bundle(cache_path: Path = FRED_CACHE_PATH) -> dict[str, lis
         return {}
 
 
-def _save_series_to_fred_cache(
+def save_series_to_fred_cache(
     updates: dict[str, list[tuple[str, float]]],
     cache_path: Path = FRED_CACHE_PATH,
 ) -> None:
@@ -174,7 +174,7 @@ def _load_btc_daily_series(
         return cached
     fetched = fetch_btc_binance_daily(limit=120)
     if fetched:
-        _save_series_to_fred_cache({"BTC": fetched}, cache_path=cache_path)
+        save_series_to_fred_cache({"BTC": fetched}, cache_path=cache_path)
         return fetched
     return cached
 
@@ -202,12 +202,12 @@ def _load_macro_close_series(
                 pass
     cached = list((cache_bundle or {}).get(key) or [])
     if key == "GOLD" and len(cached) < 35 and allow_remote:
-        gold_tail = _fetch_gold_tail()
+        gold_tail = fetch_gold_tail()
         if gold_tail:
             merged = dict(cached)
             merged.update(gold_tail)
             cached = sorted(merged.items(), key=lambda x: x[0])
-            _save_series_to_fred_cache({"GOLD": cached}, cache_path=cache_path)
+            save_series_to_fred_cache({"GOLD": cached}, cache_path=cache_path)
     return cached
 
 

@@ -18,7 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from backend.runtime import COCKPIT_ROOT, resolve_data_dir
-from backend.mcp_server import MCP_PROTOCOL_VERSION, McpDispatcher, _load_rpc_json, _rpc_error
+from backend.mcp_server import MCP_PROTOCOL_VERSION, McpDispatcher, load_rpc_json, rpc_error
 from backend.mobile_push import load_push_env
 
 
@@ -121,14 +121,14 @@ def run_stdio_loop(
             continue
 
         try:
-            payload = _load_rpc_json(line)
+            payload = load_rpc_json(line)
         except ValueError as exc:
             _log(stderr, f"invalid JSON input: {exc}")
-            _write_json_line(stdout, _rpc_error(None, -32700, "Parse error"))
+            _write_json_line(stdout, rpc_error(None, -32700, "Parse error"))
             continue
 
         if not isinstance(payload, dict):
-            _write_json_line(stdout, _rpc_error(None, -32600, "Invalid Request"))
+            _write_json_line(stdout, rpc_error(None, -32600, "Invalid Request"))
             continue
 
         req_id = payload.get("id")
@@ -172,14 +172,14 @@ def run_stdio_loop(
                     pass
                 _write_json_line(
                     stdout,
-                    _rpc_error(req_id, -32000, f"Remote MCP HTTP {exc.code}", {"detail": err_body}),
+                    rpc_error(req_id, -32000, f"Remote MCP HTTP {exc.code}", {"detail": err_body}),
                 )
         except Exception as exc:
             _log(stderr, f"remote transport error: {type(exc).__name__}: {exc}")
             if not is_notification:
                 _write_json_line(
                     stdout,
-                    _rpc_error(req_id, -32000, f"Remote MCP error: {type(exc).__name__}"),
+                    rpc_error(req_id, -32000, f"Remote MCP error: {type(exc).__name__}"),
                 )
     return 0
 

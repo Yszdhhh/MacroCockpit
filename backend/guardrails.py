@@ -257,15 +257,15 @@ _PRIVATE_TRIGGER_NEUTRALIZERS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
-def _iter_strings(value: Any):
+def iter_strings(value: Any):
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
         for v in value.values():
-            yield from _iter_strings(v)
+            yield from iter_strings(v)
     elif isinstance(value, (list, tuple)):
         for item in value:
-            yield from _iter_strings(item)
+            yield from iter_strings(item)
 
 
 def has_private_article_text(text: str) -> bool:
@@ -282,7 +282,7 @@ def has_private_article_content(article: Any) -> bool:
     filename = article.get("filename")
     is_debate = isinstance(filename, str) and filename.lower().startswith("ta_")
     check = has_private_debate_text if is_debate else has_private_article_text
-    return any(check(text) for text in _iter_strings(article))
+    return any(check(text) for text in iter_strings(article))
 
 
 def neutralize_private_triggers(text: str) -> str:

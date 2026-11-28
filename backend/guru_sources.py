@@ -31,7 +31,7 @@ from backend.guardrails import (
 )
 from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json, file_lock
 from backend.kazike_engine import cluster_and_dedup, score_five_axes
-from backend.rss_sources import ARTICLES_DIR, GURU_ARTICLE_FEEDS as GURU_ARTICLE_FEEDS, _HEADERS
+from backend.rss_sources import ARTICLES_DIR, GURU_ARTICLE_FEEDS as GURU_ARTICLE_FEEDS, DEFAULT_HEADERS
 from backend.signal_text import (
     clean_feed_text,
     decode_http_text,
@@ -381,7 +381,7 @@ def _fetch_one_guru_feed(
         return (fid, [], "blocked_url")
 
     headers = {
-        **_HEADERS,
+        **DEFAULT_HEADERS,
         "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5",
     }
     try:

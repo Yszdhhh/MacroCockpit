@@ -23,13 +23,13 @@ from backend.runtime import (
 from backend.kazike_engine import (
     TIER_LABELS,
     TIER_PRIORITY,
-    _ROUNDUP_RE,
-    _extract_isolation_keys,
-    _extract_numeric_anchors,
-    _isolation_conflict,
+    ROUNDUP_RE,
+    extract_isolation_keys,
+    extract_numeric_anchors,
+    isolation_conflict,
     normalize_url,
 )
-from backend.zh_brief import _deterministic_zh_brief, is_primarily_english
+from backend.zh_brief import deterministic_zh_brief, is_primarily_english
 
 
 LEDGER_VERSION = 1
@@ -239,7 +239,7 @@ def _classify_event(item: dict[str, Any]) -> dict[str, Any]:
     text = f"{title} {summary}"
     low = text.lower()
 
-    if source == "美股盘面" or _ROUNDUP_RE.search(title) or _OPINION_OR_DIGEST_RE.search(title):
+    if source == "美股盘面" or ROUNDUP_RE.search(title) or _OPINION_OR_DIGEST_RE.search(title):
         return {
             "is_roundup": True,
             "event_type": "roundup",
@@ -279,9 +279,9 @@ def _classify_event(item: dict[str, Any]) -> dict[str, Any]:
                 entities.add(cap.upper())
 
     concepts = {name for name, pat in _CONCEPT_SLOTS if pat.search(text)}
-    iso_keys = _extract_isolation_keys(item)
+    iso_keys = extract_isolation_keys(item)
     macro_periods = _extract_macro_periods(text) if event_type == "macro_release" else set()
-    num_anchors = _extract_numeric_anchors(text)
+    num_anchors = extract_numeric_anchors(text)
 
     return {
         "is_roundup": False,
@@ -474,7 +474,7 @@ def _match_score(ev: dict[str, Any], item: dict[str, Any], meta: dict[str, Any],
         return 0.0, True
 
     ev_iso = {k: set(v) for k, v in (ev.get("iso_keys") or {}).items()}
-    if _isolation_conflict(meta.get("iso_keys") or {}, ev_iso):
+    if isolation_conflict(meta.get("iso_keys") or {}, ev_iso):
         return 0.0, True
 
     # Time separation guard
@@ -795,7 +795,7 @@ def _build_initial_event(item: dict[str, Any], meta: dict[str, Any], ev_record: 
     title_clean = _scrub_text(str(item.get("title") or ""))
     zh_brief = _scrub_text(str(item.get("zh_brief") or ""))
     if not zh_brief and is_primarily_english(title_clean):
-        zh_brief = _scrub_text(_deterministic_zh_brief(title_clean, str(item.get("summary") or "")))
+        zh_brief = _scrub_text(deterministic_zh_brief(title_clean, str(item.get("summary") or "")))
 
     first_summary = _scrub_text(title_clean)
     if facts:
@@ -937,11 +937,6 @@ def _try_load_ledger(path: Path) -> tuple[dict[str, Any], str]:
         return {"version": LEDGER_VERSION, "events": {}}, "error"
 
 
-def _load_ledger(path: Path) -> dict[str, Any]:
-    ledger, _status = _try_load_ledger(path)
-    return ledger
-
-
 def _trim_evidence_items(ev: dict[str, Any], max_items: int = 16) -> None:
     items = ev.get("evidence_items")
     if not isinstance(items, list) or len(items) <= max_items:
@@ -1047,7 +1042,7 @@ def ingest_events_into_ledger(
         facts = _extract_facts(raw, meta)
         zh_brief = _scrub_text(str(raw.get("zh_brief") or ""))
         if not zh_brief and is_primarily_english(title):
-            zh_brief = _scrub_text(_deterministic_zh_brief(title, str(raw.get("summary") or "")))
+            zh_brief = _scrub_text(deterministic_zh_brief(title, str(raw.get("summary") or "")))
 
         summary_clean = _scrub_text(str(raw.get("summary") or ""))[:160]
         eff_val = _extract_effective_at(f"{title} {raw.get('summary') or ''}")
@@ -1535,10 +1530,6 @@ def try_load_public_event_cards_from_ledger(data_dir: Path | str = DATA_DIR) -> 
         return project_event_cards(_rank_ledger_cards(events))
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
-
-
-def load_public_event_cards_from_ledger(data_dir: Path | str = DATA_DIR) -> list[dict[str, Any]]:
-    return try_load_public_event_cards_from_ledger(data_dir) or []
 
 
 def evaluate_event_notifications(

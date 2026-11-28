@@ -1,16 +1,16 @@
 """MCP (2025-11-25) Streamable HTTP dispatcher and 8 orthogonal financial cockpit tools."""
 from __future__ import annotations
 
-import hmac
 import json
+import logging
 import math
-import os
 import re
-import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.http_security import ROLE_PORTFOLIO_RW, ROLE_READ_ONLY, get_header, origin_allowed, resolve_bearer_auth
+from backend.valuation import bucket_leverage
 from backend.guardrails import has_private_article_text
 from backend.runtime import reject_json_constant, resolve_data_dir
 from backend.calendar_events import filter_calendar_events
@@ -19,6 +19,8 @@ from backend.import_positions import PreviewExpiredError, PreviewValidationError
 from backend.journal_store import RevisionConflictError
 from backend.portfolio_store import IdempotencyConflictError, PortfolioStore
 from backend.public_snapshot import load_published_generation, project_public_state
+
+logger = logging.getLogger(__name__)
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_MCP_VERSIONS: frozenset[str] = frozenset({"2025-11-25", "2025-06-18", "2025-03-26"})
@@ -68,65 +70,6 @@ _PUBLIC_SIGNAL_FIELDS: tuple[str, ...] = (
 )
 
 
-def _const_eq(a: str, b: str) -> bool:
-    return hmac.compare_digest(str(a or "").encode("utf-8"), str(b or "").encode("utf-8"))
-
-
-def _get_header(headers: Any, name: str) -> str:
-    if not headers:
-        return ""
-    target = name.lower()
-    if hasattr(headers, "items"):
-        for k, v in headers.items():
-            if str(k).lower() == target:
-                return str(v or "").strip()
-    elif hasattr(headers, "get"):
-        val = headers.get(name) or headers.get(target) or ""
-        return str(val).strip()
-    return ""
-
-
-def _parse_origin(url_str: str) -> tuple[str, str] | None:
-    raw = str(url_str or "").strip()
-    if not raw or raw.lower() == "null":
-        return None
-    try:
-        u = urllib.parse.urlparse(raw)
-    except ValueError:
-        return None
-    scheme = (u.scheme or "").lower()
-    netloc = (u.netloc or "").lower()
-    if scheme not in ("http", "https") or not netloc:
-        return None
-    return (scheme, netloc)
-
-
-def _is_loopback_origin(scheme: str, netloc: str) -> bool:
-    try:
-        parsed = urllib.parse.urlparse(f"{scheme}://{netloc}")
-        host = (parsed.hostname or "").lower()
-    except ValueError:
-        return False
-    return host in ("127.0.0.1", "localhost", "::1")
-
-
-def _origin_allowed(origin_header: str, *, host_header: str, public_url: str) -> bool:
-    if not origin_header:
-        return True
-    parsed = _parse_origin(origin_header)
-    if parsed is None:
-        return False
-    scheme, netloc = parsed
-    if _is_loopback_origin(scheme, netloc):
-        return True
-    pub = _parse_origin(public_url)
-    if pub is not None and (scheme, netloc) == pub:
-        return True
-    if host_header and netloc == host_header.strip().lower():
-        return True
-    return False
-
-
 def _bucket_pct_10(value: Any) -> str:
     if value is None or str(value).strip() == "":
         return "无法估算"
@@ -144,24 +87,6 @@ def _bucket_pct_10(value: Any) -> str:
     if neg and mag > 0:
         return f"-({band})"
     return band
-
-
-def _bucket_leverage(value: Any) -> str:
-    if value is None or str(value).strip() == "":
-        return "无法估算"
-    try:
-        val = abs(float(value))
-    except (TypeError, ValueError):
-        return "无法估算"
-    if val < 0.5:
-        return "0x-0.5x"
-    if val < 1.0:
-        return "0.5x-1x"
-    if val < 2.0:
-        return "1x-2x"
-    if val < 3.0:
-        return "2x-3x"
-    return ">=3x"
 
 
 def _bucket_liq_distance(value: Any) -> str:
@@ -194,7 +119,7 @@ def _parse_dt_prefix(raw: str | None) -> str:
         return s[:19]
 
 
-def _filter_by_time_window(items: list[dict[str, Any]], date_from: str | None, date_to: str | None) -> list[dict[str, Any]]:
+def filter_by_time_window(items: list[dict[str, Any]], date_from: str | None, date_to: str | None) -> list[dict[str, Any]]:
     f_str = _parse_dt_prefix(date_from)
     t_str = _parse_dt_prefix(date_to)
     if not f_str and not t_str:
@@ -527,7 +452,7 @@ def _validate_args(tool_def: dict[str, Any], raw_args: Any) -> tuple[dict[str, A
     return (args, None)
 
 
-def _tool_ok(text: str, structured: dict[str, Any]) -> dict[str, Any]:
+def tool_ok(text: str, structured: dict[str, Any]) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": text}],
         "structuredContent": structured,
@@ -535,7 +460,7 @@ def _tool_ok(text: str, structured: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _tool_err(text: str, *, code: int = 400, detail: dict[str, Any] | None = None) -> dict[str, Any]:
+def tool_err(text: str, *, code: int = 400, detail: dict[str, Any] | None = None) -> dict[str, Any]:
     sc = {"ok": False, "code": code, "error": text}
     if detail:
         sc.update(detail)
@@ -546,7 +471,7 @@ def _tool_err(text: str, *, code: int = 400, detail: dict[str, Any] | None = Non
     }
 
 
-def _load_rpc_json(raw: str) -> Any:
+def load_rpc_json(raw: str) -> Any:
     return json.loads(raw, parse_constant=reject_json_constant)
 
 
@@ -554,7 +479,7 @@ def _rpc_result(req_id: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
 
-def _rpc_error(req_id: Any, code: int, message: str, data: Any = None) -> dict[str, Any]:
+def rpc_error(req_id: Any, code: int, message: str, data: Any = None) -> dict[str, Any]:
     err: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
@@ -613,15 +538,15 @@ class McpDispatcher:
                 detail=detail,
             )
         except Exception:
-            pass
+            logger.warning("MCP audit event write failed", exc_info=True)
 
     def _visible_tools(self, role: str) -> list[dict[str, Any]]:
-        if role == "PORTFOLIO_RW":
+        if role == ROLE_PORTFOLIO_RW:
             tools = list(TOOL_DEFINITIONS)
             if self.desktop_pro:
                 tools.extend(DESKTOP_PRO_TOOL_DEFINITIONS)
             return tools
-        if role == "READ_ONLY":
+        if role == ROLE_READ_ONLY:
             return [t for t in TOOL_DEFINITIONS if t["name"] in RO_TOOL_NAMES]
         return []
 
@@ -640,7 +565,7 @@ class McpDispatcher:
         if not is_desktop_tool and name not in _TOOLS_BY_NAME:
             return ({}, -32602)
 
-        if (name in RW_ONLY_TOOL_NAMES or is_desktop_tool) and role != "PORTFOLIO_RW":
+        if (name in RW_ONLY_TOOL_NAMES or is_desktop_tool) and role != ROLE_PORTFOLIO_RW:
             self._audit(
                 actor_id=actor_id,
                 role=role,
@@ -649,9 +574,9 @@ class McpDispatcher:
                 outcome="denied",
                 detail={"reason": "insufficient_role"},
             )
-            return (_tool_err(f"权限不足 (403)：工具 {name} 仅限 PORTFOLIO_RW 调用", code=403), None)
+            return (tool_err(f"权限不足 (403)：工具 {name} 仅限 PORTFOLIO_RW 调用", code=403), None)
 
-        if role not in ("READ_ONLY", "PORTFOLIO_RW"):
+        if role not in (ROLE_READ_ONLY, ROLE_PORTFOLIO_RW):
             self._audit(
                 actor_id=actor_id,
                 role=role,
@@ -660,12 +585,12 @@ class McpDispatcher:
                 outcome="denied",
                 detail={"reason": "forbidden_role"},
             )
-            return (_tool_err("权限不足 (403)：当前角色禁止访问 MCP 工具", code=403), None)
+            return (tool_err("权限不足 (403)：当前角色禁止访问 MCP 工具", code=403), None)
 
         tool_def = _DESKTOP_PRO_TOOLS_BY_NAME[name] if is_desktop_tool else _TOOLS_BY_NAME[name]
         args, err_msg = _validate_args(tool_def, raw_args)
         if err_msg is not None or args is None:
-            return (_tool_err(err_msg or "参数校验失败", code=400), None)
+            return (tool_err(err_msg or "参数校验失败", code=400), None)
 
         # Dispatch each orthogonal tool
         if name == "market_snapshot":
@@ -689,7 +614,7 @@ class McpDispatcher:
         if name in ("desktop_status", "openbb_query", "deep_research_run"):
             handler = self.desktop_handlers.get(name)
             if handler is None:
-                return (_tool_err(f"桌面工具 {name} 未连接，请通过桌面专业端调用", code=501), None)
+                return (tool_err(f"桌面工具 {name} 未连接，请通过桌面专业端调用", code=501), None)
             return (handler(args), None)
         if name == "sync_to_cloud":
             return (self._tool_sync_to_cloud(args, role=role), None)
@@ -779,7 +704,7 @@ class McpDispatcher:
     def _tool_market_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
         raw_state, gen = self._load_public_state()
         if raw_state is None:
-            return _tool_err("当前暂无已发布的公开快照 (503)", code=503)
+            return tool_err("当前暂无已发布的公开快照 (503)", code=503)
         pub = project_public_state(raw_state, include_candidates=False)
         sections = args.get("include") or [
             "risk_gate",
@@ -816,7 +741,7 @@ class McpDispatcher:
         ma_stance = (pub.get("market_analysis") or {}).get("stance") if isinstance(pub.get("market_analysis"), dict) else ""
         ma_suffix = f" · 定调 {ma_stance}" if ma_stance else ""
         summary_txt = f"快照世代 gen={gen} · {rg.get('label', '风险门控')}{ma_suffix} · 宏观 {len(pub.get('macro_fred') or [])} 项"
-        return _tool_ok(summary_txt, out)
+        return tool_ok(summary_txt, out)
 
     def _tool_signal_search(self, args: dict[str, Any], *, role: str, actor_id: str) -> dict[str, Any]:
         scope = str(args.get("scope") or "all").strip().lower()
@@ -833,7 +758,7 @@ class McpDispatcher:
         limit = int(args.get("limit") or 25)
         cursor = args.get("cursor")
 
-        if role == "READ_ONLY":
+        if role == ROLE_READ_ONLY:
             if scope in ("held", "watch", "rules"):
                 self._audit(
                     actor_id=actor_id,
@@ -843,21 +768,21 @@ class McpDispatcher:
                     outcome="denied",
                     detail={"reason": "ro_private_scope_forbidden"},
                 )
-                return _tool_err(
+                return tool_err(
                     "权限不足 (403)：READ_ONLY 禁止查询持仓、自选或规则专属范围",
                     code=403,
                 )
 
         raw_state, gen = self._load_public_state()
         if raw_state is None:
-            return _tool_err("当前暂无已发布的公开快照 (503)", code=503)
+            return tool_err("当前暂无已发布的公开快照 (503)", code=503)
 
         pool = list(raw_state.get("signal_candidates") or raw_state.get("signals") or [])
-        pool = _filter_by_time_window(pool, date_from, date_to)
+        pool = filter_by_time_window(pool, date_from, date_to)
 
         rules: list[dict[str, Any]] | None = None
         workspace: dict[str, Any] | None = None
-        if role == "PORTFOLIO_RW" and self.store is not None:
+        if role == ROLE_PORTFOLIO_RW and self.store is not None:
             rules = self.store.list_curation_rules(enabled_only=True)
             if scope in ("held", "watch", "rules", "all"):
                 workspace = self.store.build_workspace(public_state=raw_state)
@@ -882,7 +807,7 @@ class McpDispatcher:
         sliced = all_matched[offset : offset + limit]
         next_cursor = str(offset + limit) if (offset + limit) < total else None
 
-        if role == "READ_ONLY":
+        if role == ROLE_READ_ONLY:
             sliced = [sanitize_public_signal(x) for x in sliced]
 
         structured = {
@@ -897,22 +822,22 @@ class McpDispatcher:
             "next_cursor": next_cursor,
             "signals": sliced,
         }
-        return _tool_ok(f"命中 {total} 条快讯，返回 {len(sliced)} 条（板块={category}）", structured)
+        return tool_ok(f"命中 {total} 条快讯，返回 {len(sliced)} 条（板块={category}）", structured)
 
     def _tool_research_get(self, args: dict[str, Any], *, role: str) -> dict[str, Any]:
         sym = str(args.get("symbol") or "").strip().upper()
         if not re.fullmatch(r"[A-Z0-9.]{1,10}", sym):
-            return _tool_err("股票代码格式无效", code=400)
+            return tool_err("股票代码格式无效", code=400)
         section = str(args.get("section") or "all").strip().lower()
 
         raw_state, gen = self._load_public_state()
         if raw_state is None:
-            return _tool_err("当前暂无已发布的公开快照 (503)", code=503)
+            return tool_err("当前暂无已发布的公开快照 (503)", code=503)
 
         profiles = raw_state.get("stock_profiles") or {}
         prof = profiles.get(sym)
         if not isinstance(prof, dict):
-            return _tool_err(f"暂未找到 {sym} 的已发布投研数据", code=404)
+            return tool_err(f"暂未找到 {sym} 的已发布投研数据", code=404)
 
         out: dict[str, Any] = {
             "ok": True,
@@ -951,7 +876,7 @@ class McpDispatcher:
             }
         if section in ("all", "checklist"):
             chk = dict(prof.get("pre_trade_checklist") or {})
-            if role == "PORTFOLIO_RW" and self.store is not None:
+            if role == ROLE_PORTFOLIO_RW and self.store is not None:
                 ws = self.store.build_workspace(public_state=raw_state)
                 spot_hit = [
                     {"account": s.get("account_name"), "sleeve": s.get("sleeve"), "weight_pct": s.get("weight_pct")}
@@ -966,7 +891,7 @@ class McpDispatcher:
                 chk["portfolio_overlap"] = {"spot": spot_hit, "derivatives": deriv_hit}
             out["checklist"] = chk
 
-        return _tool_ok(
+        return tool_ok(
             f"{sym} ({prof.get('name_cn', '')}) 现价 {prof.get('price')} · {prof.get('verdict') or (prof.get('health') or {}).get('label', '')}",
             out,
         )
@@ -975,7 +900,7 @@ class McpDispatcher:
         view = str(args.get("view") or "summary").strip().lower()
         currency = str(args.get("currency") or "USD").strip().upper()
 
-        if role == "READ_ONLY" and view == "detail":
+        if role == ROLE_READ_ONLY and view == "detail":
             self._audit(
                 actor_id=actor_id,
                 role=role,
@@ -984,16 +909,16 @@ class McpDispatcher:
                 outcome="denied",
                 detail={"reason": "ro_detail_forbidden"},
             )
-            return _tool_err("权限不足 (403)：READ_ONLY 角色仅可查询 10% 区间脱敏汇总 summary，禁止查看 detail 持仓明细", code=403)
+            return tool_err("权限不足 (403)：READ_ONLY 角色仅可查询 10% 区间脱敏汇总 summary，禁止查看 detail 持仓明细", code=403)
 
         raw_state, gen = self._load_public_state()
         rg = (raw_state or {}).get("risk_gate") or {}
 
         if self.store is None:
             # Pure --offline-public mode with zero local ledger created
-            if role == "PORTFOLIO_RW":
-                return _tool_err("离线只读模式未挂载本地账本", code=503)
-            return _tool_ok(
+            if role == ROLE_PORTFOLIO_RW:
+                return tool_err("离线只读模式未挂载本地账本", code=503)
+            return tool_ok(
                 "只读区间摘要（未挂载私人账本）：0%-10% 区间",
                 {
                     "ok": True,
@@ -1013,7 +938,7 @@ class McpDispatcher:
         ws = self.store.build_workspace(public_state=raw_state, currency=currency)
         summary = ws.get("summary") or {}
 
-        if role == "READ_ONLY":
+        if role == ROLE_READ_ONLY:
             strategy_bands = []
             for row in ws.get("strategy_comparison") or []:
                 rec_val = row.get("target_pct") if row.get("target_pct") is not None else row.get("recommended_pct")
@@ -1036,18 +961,18 @@ class McpDispatcher:
                 "risk_light": rg.get("light", "YELLOW"),
                 "long_risk_cap": rg.get("long_risk_cap", 1.0),
                 "net_direction_bucket": _bucket_pct_10(summary.get("net_direction_pct")),
-                "effective_leverage_bucket": _bucket_leverage(summary.get("effective_leverage")),
+                "effective_leverage_bucket": bucket_leverage(summary.get("effective_leverage")),
                 "min_liq_distance_bucket": _bucket_liq_distance(summary.get("min_liq_distance_pct")),
                 "strategy_bands": strategy_bands,
             }
-            return _tool_ok(
+            return tool_ok(
                 f"组合风险区间摘要（10% 脱敏）：净敞口 {structured['net_direction_bucket']} · 杠杆 {structured['effective_leverage_bucket']}",
                 structured,
             )
 
         # PORTFOLIO_RW
         if view == "summary":
-            return _tool_ok(
+            return tool_ok(
                 f"组合风控摘要 (rev={ws.get('revision')}) · 净值 {summary.get('net_equity')} {ws.get('display_currency')}",
                 {
                     "ok": True,
@@ -1066,7 +991,7 @@ class McpDispatcher:
                 },
             )
 
-        return _tool_ok(
+        return tool_ok(
             f"组合全量持仓与风控明细 (rev={ws.get('revision')}) · 现货 {len(ws.get('spot_balances') or [])} / 合约 {len(ws.get('derivative_positions') or [])}",
             {
                 "ok": True,
@@ -1086,7 +1011,7 @@ class McpDispatcher:
 
         raw_state, gen = self._load_public_state()
         if raw_state is None:
-            return _tool_err("当前暂无已发布的公开快照 (503)", code=503)
+            return tool_err("当前暂无已发布的公开快照 (503)", code=503)
 
         events = list(raw_state.get("calendar_events") or [])
         cal_event_type = None if ev_type in ("all", "macro") else ev_type
@@ -1102,7 +1027,7 @@ class McpDispatcher:
         if ev_type == "macro":
             filtered = [e for e in filtered if str(e.get("event_type") or "").lower() in ("fomc", "cpi", "nfp")]
         filtered = filtered[:limit]
-        return _tool_ok(
+        return tool_ok(
             f"日历事件 {len(filtered)} 条（类型={ev_type}）",
             {
                 "ok": True,
@@ -1116,12 +1041,12 @@ class McpDispatcher:
 
     def _tool_preferences_get(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.store is None:
-            return _tool_err("本地账户库未初始化", code=503)
+            return tool_err("本地账户库未初始化", code=503)
         inc_rules = args.get("include_rules", True)
         prefs = self.store.get_preferences()
         rules = self.store.list_curation_rules() if inc_rules else []
         rev = self.store.get_revision()
-        return _tool_ok(
+        return tool_ok(
             f"个人偏好与 {len(rules)} 条筛选规则 (rev={rev})",
             {
                 "ok": True,
@@ -1133,7 +1058,7 @@ class McpDispatcher:
 
     def _tool_import_preview(self, args: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
         if self.store is None:
-            return _tool_err("本地账户库未初始化", code=503)
+            return tool_err("本地账户库未初始化", code=503)
         try:
             res = preview_import(
                 self.store,
@@ -1144,15 +1069,15 @@ class McpDispatcher:
                 actor_id,
             )
         except ValueError as exc:
-            return _tool_err(str(exc), code=400)
-        return _tool_ok(
+            return tool_err(str(exc), code=400)
+        return tool_ok(
             f"解析完成 preview_id={res['preview_id']} · {res['ops_count']} 项操作 · errors={res['has_errors']}",
             {"ok": True, **res},
         )
 
     def _tool_workspace_commit(self, args: dict[str, Any], *, role: str, actor_id: str) -> dict[str, Any]:
         if self.store is None:
-            return _tool_err("本地账户库未初始化", code=503)
+            return tool_err("本地账户库未初始化", code=503)
         req_id = str(args["request_id"]).strip()
         exp_rev = int(args["expected_revision"])
         preview_id = args.get("preview_id")
@@ -1160,7 +1085,7 @@ class McpDispatcher:
         summary = str(args.get("summary") or "")
 
         if bool(preview_id) == bool(ops):
-            return _tool_err("preview_id 与 ops 须二选一且互斥", code=400)
+            return tool_err("preview_id 与 ops 须二选一且互斥", code=400)
 
         try:
             if preview_id:
@@ -1182,16 +1107,16 @@ class McpDispatcher:
                     summary=summary,
                 )
         except (RevisionConflictError, IdempotencyConflictError) as exc:
-            return _tool_err(str(exc), code=409)
+            return tool_err(str(exc), code=409)
         except (PreviewExpiredError, PreviewValidationError, ValueError) as exc:
-            return _tool_err(str(exc), code=400)
+            return tool_err(str(exc), code=400)
         except KeyError as exc:
-            return _tool_err(str(exc), code=404)
+            return tool_err(str(exc), code=404)
         except PermissionError as exc:
-            return _tool_err(str(exc), code=403)
+            return tool_err(str(exc), code=403)
 
         new_rev = res.get("new_revision", res.get("revision"))
-        return _tool_ok(
+        return tool_ok(
             f"提交成功 new_revision={new_rev}",
             {"ok": True, **res},
         )
@@ -1200,7 +1125,7 @@ class McpDispatcher:
         sym = str(args.get("symbol") or "").strip().upper()
         prompt = str(args.get("prompt") or "").strip()
         if not prompt and not sym:
-            return _tool_err("demolab 模式至少需要提供 prompt 或 symbol", code=400)
+            return tool_err("demolab 模式至少需要提供 prompt 或 symbol", code=400)
         try:
             from backend.deep_research_runner import run_demolab_deep_research
 
@@ -1218,26 +1143,27 @@ class McpDispatcher:
                 symbol=sym,
             )
         except ValueError as exc:
-            return _tool_err(str(exc), code=400)
+            return tool_err(str(exc), code=400)
         except Exception as exc:
-            return _tool_err(f"DemoLab 并行深研运行失败: {type(exc).__name__}: {exc}", code=500)
+            logger.warning("MCP research run failed", exc_info=True)
+            return tool_err(f"DemoLab 并行深研运行失败: {type(exc).__name__}: {exc}", code=500)
         if res.get("status") != "completed":
-            return _tool_err(str(res.get("error") or res.get("message") or "DemoLab 并行深研未完成"), code=500, detail=res)
+            return tool_err(str(res.get("error") or res.get("message") or "DemoLab 并行深研未完成"), code=500, detail=res)
         art = res.get("ingested_article") or {}
-        return _tool_ok(
+        return tool_ok(
             f"DemoLab 并行深研完成（{res.get('tracks_succeeded', 0)}/{res.get('tracks_total', 3)} 路收回 · 已入库 {art.get('filename', '')}）",
             {"ok": True, "mode": "demolab", **{k: v for k, v in res.items() if k != "markdown"}},
         )
 
-    def _tool_sync_to_cloud(self, args: dict[str, Any], *, role: str = "PORTFOLIO_RW") -> dict[str, Any]:
+    def _tool_sync_to_cloud(self, args: dict[str, Any], *, role: str = ROLE_PORTFOLIO_RW) -> dict[str, Any]:
         refresh_state = bool(args.get("refresh_state", False))
         max_articles = int(args.get("max_articles") if args.get("max_articles") is not None else 30)
         dry_run = bool(args.get("dry_run", False))
         sync_portfolio = bool(args.get("sync_portfolio", False))
         state_path = resolve_data_dir(self.base_dir) / "cockpit_state.json"
 
-        if sync_portfolio and role != "PORTFOLIO_RW":
-            return _tool_err("同步私密持仓需要 PORTFOLIO_RW 权限", code=403)
+        if sync_portfolio and role != ROLE_PORTFOLIO_RW:
+            return tool_err("同步私密持仓需要 PORTFOLIO_RW 权限", code=403)
 
         try:
             from backend.mobile_push import load_push_env
@@ -1249,33 +1175,34 @@ class McpDispatcher:
 
                 generate_cockpit_state(refresh_fred=False, output_path=state_path)
             if not state_path.is_file():
-                return _tool_err(f"未找到本地状态快照: {state_path}", code=404)
+                return tool_err(f"未找到本地状态快照: {state_path}", code=404)
             payload, stats = collect_payload(state_path, max_articles=max_articles)
             if dry_run:
-                return _tool_ok(
+                return tool_ok(
                     f"云端同步演练完成：{stats.get('articles_count', 0)} 篇长文，载荷 {stats.get('state_bytes', 0)} 字节",
                     {"ok": True, "dry_run": True, **stats},
                 )
             ok, info = publish_via_http(payload)
             if not ok:
-                return _tool_err(f"云端同步失败: {info.get('reason', 'unknown')}", code=502, detail={"info": info, **stats})
+                return tool_err(f"云端同步失败: {info.get('reason', 'unknown')}", code=502, detail={"info": info, **stats})
 
             pf_info: dict[str, Any] = {}
             if sync_portfolio:
                 pf_ok, pf_info = sync_portfolio_via_http(self.store.db_path)
                 if not pf_ok:
-                    return _tool_err(
+                    return tool_err(
                         f"公开快照已同步，但私密持仓同步失败: {pf_info.get('reason', 'unknown')}",
                         code=502,
                         detail={"info": info, "portfolio": pf_info, **stats},
                     )
-            return _tool_ok(
+            return tool_ok(
                 f"已同步至云端驾驶舱：{stats.get('articles_count', 0)} 篇长文"
                 + (f"（持仓：{pf_info.get('portfolio_action', 'ok')}）" if sync_portfolio else ""),
                 {"ok": True, "dry_run": False, "info": info, "portfolio": pf_info, **stats},
             )
         except Exception as exc:
-            return _tool_err(f"云端同步异常: {type(exc).__name__}: {exc}", code=500)
+            logger.warning("MCP cloud sync failed", exc_info=True)
+            return tool_err(f"云端同步异常: {type(exc).__name__}: {exc}", code=500)
 
     def dispatch_jsonrpc(
         self,
@@ -1286,7 +1213,7 @@ class McpDispatcher:
     ) -> tuple[int, dict[str, Any] | None]:
         """Dispatch one parsed JSON-RPC 2.0 request dict -> (http_status, response_dict_or_None)."""
         if not isinstance(payload, dict):
-            return (400, _rpc_error(None, -32600, "Invalid Request"))
+            return (400, rpc_error(None, -32600, "Invalid Request"))
         if "id" not in payload:
             return (202, None)
 
@@ -1296,14 +1223,14 @@ class McpDispatcher:
             or not isinstance(req_id, (str, int, float))
             or (isinstance(req_id, float) and not math.isfinite(req_id))
         ):
-            return (400, _rpc_error(None, -32600, "Invalid Request id"))
+            return (400, rpc_error(None, -32600, "Invalid Request id"))
         method = payload.get("method")
         if payload.get("jsonrpc") != "2.0" or not isinstance(method, str):
-            return (400, _rpc_error(req_id, -32600, "Invalid Request"))
+            return (400, rpc_error(req_id, -32600, "Invalid Request"))
 
         params = payload.get("params")
         if method in ("initialize", "ping", "tools/list") and "params" in payload and not isinstance(params, dict):
-            return (200, _rpc_error(req_id, -32602, "Invalid params: expected an object"))
+            return (200, rpc_error(req_id, -32602, "Invalid params: expected an object"))
 
         if method == "initialize":
             client_ver = str((params or {}).get("protocolVersion") or "").strip() if isinstance(params, dict) else ""
@@ -1329,17 +1256,17 @@ class McpDispatcher:
 
         if method == "tools/call":
             if not isinstance(params, dict) or not isinstance(params.get("name"), str):
-                return (200, _rpc_error(req_id, -32602, "Invalid params: missing tool name"))
+                return (200, rpc_error(req_id, -32602, "Invalid params: missing tool name"))
             t_name = str(params["name"]).strip()
             t_args = params.get("arguments", {})
             if not isinstance(t_args, dict):
-                return (200, _rpc_error(req_id, -32602, "Invalid params: arguments must be an object"))
+                return (200, rpc_error(req_id, -32602, "Invalid params: arguments must be an object"))
             result, rpc_err_code = self._call_tool(t_name, t_args, role=role, actor_id=actor_id)
             if rpc_err_code is not None:
-                return (200, _rpc_error(req_id, rpc_err_code, f"Unknown tool: {t_name}"))
+                return (200, rpc_error(req_id, rpc_err_code, f"Unknown tool: {t_name}"))
             return (200, _rpc_result(req_id, result))
 
-        return (200, _rpc_error(req_id, -32601, f"Method not found: {method}"))
+        return (200, rpc_error(req_id, -32601, f"Method not found: {method}"))
 
 
 def create_mcp_dispatcher(
@@ -1362,34 +1289,6 @@ def create_mcp_dispatcher(
     )
 
 
-def _resolve_bearer_auth(
-    token: str,
-    *,
-    store: PortfolioStore | None,
-    read_token: str = "",
-    rw_token: str = "",
-    sync_token: str = "",
-) -> dict[str, Any] | None:
-    cand = str(token or "").strip()
-    if not cand:
-        return None
-    if store is not None:
-        info = store.verify_token(cand)
-        if info is not None:
-            return info
-    # Also support explicit in-memory server tokens & environment tokens when store is absent/test-configured
-    candidates = [
-        (rw_token or os.environ.get("MACROCOCKPIT_RW_TOKEN", ""), "PORTFOLIO_RW", "config:portfolio_rw"),
-        (sync_token or os.environ.get("MACROCOCKPIT_SYNC_TOKEN", ""), "SYNC_PUBLISH", "config:sync_publish"),
-        (read_token or os.environ.get("MACROCOCKPIT_READ_TOKEN", ""), "READ_ONLY", "config:read_only"),
-    ]
-    for expected, role, actor in candidates:
-        exp_clean = str(expected or "").strip()
-        if exp_clean and _const_eq(cand, exp_clean):
-            return {"valid": True, "role": role, "actor_id": actor, "source": "config"}
-    return None
-
-
 def handle_mcp_http_request(
     headers: Any,
     body_bytes: bytes,
@@ -1410,16 +1309,16 @@ def handle_mcp_http_request(
         "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
     }
 
-    origin = _get_header(headers, "Origin")
-    host_hdr = _get_header(headers, "Host")
-    if origin and not _origin_allowed(origin, host_header=host_hdr, public_url=public_url):
+    origin = get_header(headers, "Origin")
+    host_hdr = get_header(headers, "Host")
+    if origin and not origin_allowed(origin, host_header=host_hdr, public_url=public_url):
         return (403, json_hdrs, json.dumps({"error": "Origin not allowed"}, ensure_ascii=False).encode("utf-8"))
 
-    auth_hdr = _get_header(headers, "Authorization")
+    auth_hdr = get_header(headers, "Authorization")
     if not auth_hdr.startswith("Bearer "):
         return (401, json_hdrs, json.dumps({"error": "Authorization: Bearer token required"}, ensure_ascii=False).encode("utf-8"))
     token = auth_hdr[7:].strip()
-    auth_info = _resolve_bearer_auth(
+    auth_info = resolve_bearer_auth(
         token,
         store=store,
         read_token=read_token,
@@ -1431,7 +1330,7 @@ def handle_mcp_http_request(
 
     role = str(auth_info.get("role") or "")
     actor_id = str(auth_info.get("actor_id") or "mcp:bearer")
-    if role == "SYNC_PUBLISH" or role not in ("READ_ONLY", "PORTFOLIO_RW"):
+    if role not in (ROLE_READ_ONLY, ROLE_PORTFOLIO_RW):
         if store is not None:
             try:
                 store.log_audit_event(
@@ -1443,17 +1342,17 @@ def handle_mcp_http_request(
                     detail={"reason": "sync_publish_forbidden_on_mcp"},
                 )
             except Exception:
-                pass
+                logger.warning("MCP authorization audit write failed", exc_info=True)
         return (403, json_hdrs, json.dumps({"error": "SYNC_PUBLISH role forbidden on MCP"}, ensure_ascii=False).encode("utf-8"))
 
-    ctype = _get_header(headers, "Content-Type").split(";", 1)[0].strip().lower()
+    ctype = get_header(headers, "Content-Type").split(";", 1)[0].strip().lower()
     if ctype != "application/json":
         return (415, json_hdrs, json.dumps({"error": "Content-Type must be application/json"}, ensure_ascii=False).encode("utf-8"))
 
     if len(body_bytes or b"") > 2_000_000:
         return (413, json_hdrs, json.dumps({"error": "MCP request body exceeds 2MB limit"}, ensure_ascii=False).encode("utf-8"))
 
-    proto_ver = _get_header(headers, "MCP-Protocol-Version")
+    proto_ver = get_header(headers, "MCP-Protocol-Version")
     if proto_ver and proto_ver not in SUPPORTED_MCP_VERSIONS:
         return (
             400,
@@ -1462,9 +1361,9 @@ def handle_mcp_http_request(
         )
 
     try:
-        payload = _load_rpc_json((body_bytes or b"").decode("utf-8"))
+        payload = load_rpc_json((body_bytes or b"").decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        err_body = _rpc_error(None, -32700, "Parse error")
+        err_body = rpc_error(None, -32700, "Parse error")
         return (400, json_hdrs, json.dumps(err_body, ensure_ascii=False).encode("utf-8"))
 
     dispatcher = create_mcp_dispatcher(

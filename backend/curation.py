@@ -7,7 +7,7 @@ from typing import Any
 
 from backend.guardrails import check_safe_regex as _check_safe_regex
 from backend.runtime import clamp as _clamp
-from backend.kazike_engine import _ROUNDUP_RE as _ROUNDUP_CURATION_RE
+from backend.kazike_engine import ROUNDUP_RE
 
 ALLOWED_RULE_KINDS: frozenset[str] = frozenset(
     {"instrument", "sector", "keyword", "regex", "topic", "source"}
@@ -548,7 +548,7 @@ def rank_curated_signals(
         h_raw_val = max(h_scores) if h_scores else 0.0
         item_title = str(item.get("title") or "")
         item_dir = str(item.get("direction") or "neutral").lower()
-        is_roundup_or_neutral = bool(_ROUNDUP_CURATION_RE.search(item_title)) or item_dir == "neutral"
+        is_roundup_or_neutral = bool(ROUNDUP_RE.search(item_title)) or item_dir == "neutral"
         h_val = round(h_raw_val * 0.45, 2) if (h_raw_val > 0.0 and is_roundup_or_neutral) else h_raw_val
 
         # W: watchlist (5*c_i) and sector (3*c_i) score

@@ -32,7 +32,7 @@ def resolve_agy_executable() -> Path | None:
     return Path(found) if found else None
 
 
-def _parse_mcp_list_output(raw_text: str) -> list[dict[str, str]]:
+def parse_mcp_list_output(raw_text: str) -> list[dict[str, str]]:
     servers: list[dict[str, str]] = []
     for raw_ln in (raw_text or "").splitlines():
         ln = raw_ln.strip()
@@ -103,7 +103,7 @@ def probe_agy(*, timeout: int | float = 6) -> dict[str, Any]:
             timeout=timeout,
         )
         if r_mcp.returncode == 0:
-            mcp_servers = _parse_mcp_list_output(r_mcp.stdout)
+            mcp_servers = parse_mcp_list_output(r_mcp.stdout)
     except Exception:
         mcp_servers = []
 

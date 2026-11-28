@@ -165,7 +165,7 @@ def _clean_brief_text(text: str, *, max_len: int = 92) -> str:
     return "" if has_private_article_text(s) else s
 
 
-def _deterministic_zh_brief(title: str, summary: str = "") -> str:
+def deterministic_zh_brief(title: str, summary: str = "") -> str:
     """Offline bilingual entity + action + numeric digest fallback when translation API is unavailable."""
     raw_t = _LIVE_PREFIX_RE.sub("", str(title or "")).strip()
     raw_s = _LIVE_PREFIX_RE.sub("", str(summary or "")).strip()
@@ -348,7 +348,7 @@ def _build_zh_brief_ex(
             brief = ""
 
     if not brief:
-        brief = _deterministic_zh_brief(t_str, s_str)
+        brief = deterministic_zh_brief(t_str, s_str)
 
     if brief and from_net and cache is not None:
         cache[key] = {"brief": brief, "ts": round(time.time(), 1), "src": "net"}
@@ -411,7 +411,7 @@ def attach_zh_briefs_batch(
         ):
             pending_net.append((it, t_str, s_str, key))
         else:
-            fb = _deterministic_zh_brief(t_str, s_str)
+            fb = deterministic_zh_brief(t_str, s_str)
             if fb:
                 it["zh_brief"] = fb
 
@@ -434,3 +434,6 @@ def attach_zh_briefs_batch(
             save_zh_brief_cache(cache, cache_path)
         except Exception:
             pass
+
+
+_deterministic_zh_brief = deterministic_zh_brief

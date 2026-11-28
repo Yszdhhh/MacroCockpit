@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.guardrails import has_private_debate_text
+from backend.valuation import bucket_leverage
 from backend.runtime import (
     COCKPIT_ROOT,
     DATA_DIR,
@@ -443,24 +444,6 @@ def _band_pct_10(value: Any) -> str:
     return f"-({band})" if (neg and mag > 0) else band
 
 
-def _band_leverage(value: Any) -> str:
-    if value is None or str(value).strip() == "":
-        return "无法估算"
-    try:
-        val = abs(float(value))
-    except (TypeError, ValueError):
-        return "无法估算"
-    if val < 0.5:
-        return "0x-0.5x"
-    if val < 1.0:
-        return "0.5x-1x"
-    if val < 2.0:
-        return "1x-2x"
-    if val < 3.0:
-        return "2x-3x"
-    return ">=3x"
-
-
 def get_obb_widget_data(
     widget_name: str,
     params: dict[str, str] | None = None,
@@ -543,7 +526,7 @@ def get_obb_widget_data(
         rows.append(
             {
                 "metric": "有效杠杆区间",
-                "band": _band_leverage(summary.get("effective_leverage")),
+                "band": bucket_leverage(summary.get("effective_leverage")),
                 "detail": "多空名义和 / 净值",
             }
         )

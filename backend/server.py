@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -34,6 +35,18 @@ from backend.article_store import (
     read_article_markdown,
 )
 from backend.guardrails import safe_article_filename
+from backend.http_security import (
+    HttpSecurityError as _HttpError,
+    LOOPBACK_HOSTS,
+    ROLE_PORTFOLIO_RW,
+    ROLE_READ_ONLY,
+    ROLE_SYNC_PUBLISH,
+    const_eq,
+    decompress_gzip_bounded,
+    is_loopback_client_ip,
+    origin_allowed,
+    resolve_bearer_auth,
+)
 from backend.runtime import (
     BJT,
     COCKPIT_ROOT,
@@ -48,22 +61,23 @@ from backend.event_feed import project_event_card
 from backend.import_positions import PreviewExpiredError, PreviewValidationError, commit_import, preview_import
 from backend.journal_store import RevisionConflictError
 from backend.mcp_server import (
-    _filter_by_time_window,
-    _origin_allowed,
+    filter_by_time_window,
     handle_mcp_http_request,
     sanitize_public_signal,
 )
 from backend.mobile_push import build_muse_markdown_digest, dispatch_mobile_push, load_push_env
 from backend.portfolio_store import ConstraintViolationError, IdempotencyConflictError, PortfolioStore
 from backend.public_snapshot import (
-    _PUBLISH_LOCK,
-    _current_manifest,
-    _generation_timestamp,
+    PUBLISH_LOCK,
+    current_manifest,
+    generation_timestamp,
     load_published_generation,
     lookup_published_article,
     project_public_state,
     publish_generation,
 )
+
+logger = logging.getLogger(__name__)
 
 WEB_DIR = COCKPIT_ROOT / "web"
 OFFLINE_HTML_PATH = DIST_DIR / "macro_cockpit_offline.html"
@@ -74,13 +88,6 @@ MAX_LOGIN_FORM_BYTES = 65_536
 
 _REFRESH_LOCK = threading.RLock()
 _INGEST_MERGE_LOCK = threading.Lock()
-
-
-class _HttpError(Exception):
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
 
 
 def _resolve_base_dir(state_path: Path) -> Path:
@@ -217,12 +224,10 @@ def _read_health_manifest_only(
 
 def _lookup_article_strict(filename: str) -> dict[str, Any] | tuple[int, str]:
     """Strict basename-only article lookup inside allowed directories."""
-    if not filename or "\x00" in filename:
-        return (HTTPStatus.BAD_REQUEST, "缺少有效文件名")
-    if "/" in filename or "\\" in filename or ".." in filename or Path(filename).name != filename:
-        return (HTTPStatus.FORBIDDEN, "非法文件路径请求")
-    if not filename.lower().endswith(".md") or "异常告警" in filename:
-        return (HTTPStatus.FORBIDDEN, "不支持访问该文件类型")
+    if safe_article_filename(filename) is None:
+        if not filename or "\x00" in filename:
+            return (HTTPStatus.BAD_REQUEST, "缺少有效文件名")
+        return (HTTPStatus.FORBIDDEN, "非法文件路径或文件名")
 
     for directory, src_label in get_allowed_article_dirs():
         if not directory.exists():
@@ -324,32 +329,8 @@ def build_static_bundle(
     return out_path
 
 
-def _const_eq(a: str, b: str) -> bool:
-    return hmac.compare_digest(str(a or "").encode("utf-8"), str(b or "").encode("utf-8"))
-
-
 def _xml_safe(value: Any) -> str:
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(value or ""))
-
-
-def _decompress_gzip_bounded(raw: bytes, max_bytes: int) -> bytes:
-    dec = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    chunks: list[bytes] = []
-    total = 0
-    view = memoryview(raw)
-    step = 65536
-    for idx in range(0, len(view), step):
-        part = dec.decompress(view[idx : idx + step], max_bytes - total + 1)
-        total += len(part)
-        if total > max_bytes:
-            raise _HttpError(413, "Decompressed payload exceeds 16 MiB limit")
-        chunks.append(part)
-    tail = dec.flush(max_bytes - total + 1)
-    total += len(tail)
-    if total > max_bytes:
-        raise _HttpError(413, "Decompressed payload exceeds 16 MiB limit")
-    chunks.append(tail)
-    return b"".join(chunks)
 
 
 class CockpitHTTPServer(ThreadingHTTPServer):
@@ -379,8 +360,8 @@ class CockpitHTTPServer(ThreadingHTTPServer):
             out_art["source"] = "周月度深研"
 
         manifest_path = resolve_data_dir(self.base_dir) / "current_generation.json"
-        with _REFRESH_LOCK, _PUBLISH_LOCK, file_lock(manifest_path):
-            cur_manifest = _current_manifest(manifest_path, recover_newer=True)
+        with _REFRESH_LOCK, PUBLISH_LOCK, file_lock(manifest_path):
+            cur_manifest = current_manifest(manifest_path, recover_newer=True)
             if cur_manifest is not None:
                 loaded_pub = load_published_generation(self.base_dir)
                 cur_state = dict(loaded_pub.get("state") or {})
@@ -407,14 +388,14 @@ class CockpitHTTPServer(ThreadingHTTPServer):
                 if not cand_ts:
                     cand_ts = now_iso
                 try:
-                    if _generation_timestamp(cand_ts) < _generation_timestamp(cur_manifest["generated_at"]):
+                    if generation_timestamp(cand_ts) < generation_timestamp(cur_manifest["generated_at"]):
                         cand_ts = str(cur_manifest["generated_at"])
                 except ValueError:
                     cand_ts = str(cur_manifest["generated_at"])
             else:
                 try:
                     if cand_ts:
-                        _generation_timestamp(cand_ts)
+                        generation_timestamp(cand_ts)
                     else:
                         cand_ts = now_iso
                 except ValueError:
@@ -538,7 +519,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
         if enc:
             if enc == "gzip" and allow_gzip:
                 try:
-                    return _decompress_gzip_bounded(raw, max_bytes)
+                    return decompress_gzip_bounded(raw, max_bytes)
                 except _HttpError:
                     raise
                 except zlib.error:
@@ -602,7 +583,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             host_name = raw_host.split(":", 1)[0]
         else:
             host_name = raw_host
-        allowed = {"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"}
+        allowed = {*LOOPBACK_HOSTS, "::ffff:127.0.0.1"}
         if local_only:
             return host_name in allowed
         allowed.add("testserver")
@@ -655,68 +636,49 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
         if exp <= now_i:
             return False
         expected_sig = hmac.new(self._key(), signed_payload.encode("utf-8"), hashlib.sha256).hexdigest()
-        if not _const_eq(sig, expected_sig):
+        if not const_eq(sig, expected_sig):
             return False
         tok_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         with self.server.journal_store._connect("read") as db:
             revoked = db.execute("SELECT 1 FROM auth_revoked_cookies WHERE tok_hash=?", (tok_hash,)).fetchone()
         return revoked is None
 
-    def _resolve_bearer_token(self, token: str) -> dict[str, Any] | None:
-        cand = str(token or "").strip()
-        if not cand:
-            return None
-        info = self.server.portfolio_store.verify_token(cand)
-        if info is not None:
-            return {
-                "kind": "bearer",
-                "role": str(info.get("role") or ""),
-                "actor_id": str(info.get("actor_id") or "cred:db"),
-            }
-        # Explicit server-configured tokens (constant-time)
-        specs = (
-            (self.server.rw_token, "PORTFOLIO_RW", "config:portfolio_rw"),
-            (self.server.sync_token, "SYNC_PUBLISH", "config:sync_publish"),
-            (self.server.read_token, "READ_ONLY", "config:read_only"),
-        )
-        for expected, role, actor in specs:
-            exp_s = str(expected or "").strip()
-            if exp_s and _const_eq(cand, exp_s):
-                return {"kind": "bearer", "role": role, "actor_id": actor}
-        return None
-
     def _authenticate(self, *, allow_query_token: bool = False) -> dict[str, Any] | None:
         auth_hdr = (self.headers.get("Authorization") or "").strip()
+        query_token = False
         if auth_hdr.startswith("Bearer "):
-            resolved = self._resolve_bearer_token(auth_hdr[7:].strip())
-            if resolved is not None:
-                return resolved
-            return None
-        if allow_query_token:
+            token = auth_hdr[7:].strip()
+        elif allow_query_token:
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            qtok = (q.get("token") or [""])[0].strip()
-            if qtok:
-                resolved = self._resolve_bearer_token(qtok)
-                if resolved is not None and resolved["role"] == "READ_ONLY":
-                    return resolved
+            token = (q.get("token") or [""])[0].strip()
+            query_token = bool(token)
+        else:
+            token = ""
+        if token:
+            resolved = resolve_bearer_auth(
+                token, store=self.server.portfolio_store, read_token=self.server.read_token,
+                rw_token=self.server.rw_token, sync_token=self.server.sync_token,
+            )
+            if resolved is None or (query_token and resolved.get("role") != ROLE_READ_ONLY):
                 return None
+            return {"kind": "bearer", "role": resolved["role"], "actor_id": resolved.get("actor_id") or "cred:db"}
         if self._cookie_ok():
-            return {"kind": "cookie", "role": "PORTFOLIO_RW", "actor_id": "owner:cookie"}
+            return {"kind": "cookie", "role": ROLE_PORTFOLIO_RW, "actor_id": "owner:cookie"}
         if (
             not self.server.access_password
             and not auth_hdr
-            and self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+            and is_loopback_client_ip(self.client_address[0])
             and self._host_allowed(local_only=True)
             and not any(header in self.headers for header in ("CF-Connecting-IP", "X-Forwarded-For"))
         ):
-            return {"kind": "local_open", "role": "PORTFOLIO_RW", "actor_id": "local:standalone"}
+            return {"kind": "local_open", "role": ROLE_PORTFOLIO_RW, "actor_id": "local:standalone"}
         return None
 
     def _check_same_origin_header(self) -> bool:
         host_hdr = (self.headers.get("Host") or "").strip()
         origin = (self.headers.get("Origin") or "").strip()
         if origin:
-            return _origin_allowed(origin, host_header=host_hdr, public_url=self.server.public_url)
+            return origin_allowed(origin, host_header=host_hdr, public_url=self.server.public_url)
         referer = (self.headers.get("Referer") or "").strip()
         if referer:
             try:
@@ -724,7 +686,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 ref_origin = f"{u.scheme}://{u.netloc}" if u.scheme and u.netloc else referer
             except ValueError:
                 return False
-            return _origin_allowed(ref_origin, host_header=host_hdr, public_url=self.server.public_url)
+            return origin_allowed(ref_origin, host_header=host_hdr, public_url=self.server.public_url)
         return True
 
     def _enforce_write_csrf(self, auth: dict[str, Any]) -> bool:
@@ -777,7 +739,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                         meta_entry = a
                         break
             except Exception:
-                pass
+                logger.warning("Published article metadata lookup failed", exc_info=True)
             fallback_src = "同步深度长文"
             lower_name = safe_name.lower()
             if lower_name.startswith(("weekly_", "monthly_", "dr_")):
@@ -813,7 +775,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                     if isinstance(a, dict) and a.get("filename") == safe_name:
                         return a
             except Exception:
-                pass
+                logger.warning("Consumer article metadata lookup failed", exc_info=True)
             return (HTTPStatus.NOT_FOUND, "未找到对应深度文章")
 
         # 3. Standalone fallback across local allowed article dirs
@@ -834,7 +796,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 if isinstance(a, dict) and a.get("filename") == safe_name:
                     return a
         except Exception:
-            pass
+            logger.warning("Standalone article metadata lookup failed", exc_info=True)
         return r
 
     def _is_cookie_secure(self) -> bool:
@@ -863,6 +825,9 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": exc.message})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
+        except Exception:
+            logger.warning("Unhandled GET request error", exc_info=True)
+            self._send_json(500, {"error": "internal_server_error"})
 
     def _handle_get(self) -> None:
         if not self._host_allowed():
@@ -950,7 +915,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(401, {"error": "需要登录或有效令牌"})
             return
 
-        if auth.get("role") == "SYNC_PUBLISH":
+        if auth.get("role") == ROLE_SYNC_PUBLISH:
             self._send_json(403, {"error": "SYNC_PUBLISH 令牌仅限发布同步接口"})
             return
 
@@ -966,8 +931,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v2/workspace":
-                if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
-                    self._send_json(403, {"error": "READ_ONLY 令牌无权访问私人持仓工作区"})
+                if not self._require_role(auth, (ROLE_PORTFOLIO_RW,)):
                     return
                 q = urllib.parse.parse_qs(u.query, keep_blank_values=True)
                 cur = (q.get("currency") or ["USD"])[0].strip().upper() or "USD"
@@ -979,8 +943,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v2/preferences":
-                if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
-                    self._send_json(403, {"error": "READ_ONLY 令牌无权读取个人偏好与规则"})
+                if not self._require_role(auth, (ROLE_PORTFOLIO_RW,)):
                     return
                 self._send_json(
                     200,
@@ -1016,7 +979,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": "invalid limit or cursor"})
                     return
 
-                is_ro_bearer = auth.get("role") == "READ_ONLY"
+                is_ro_bearer = auth.get("role") == ROLE_READ_ONLY
                 if is_ro_bearer and scope in ("held", "watch", "rules"):
                     self._send_json(
                         403,
@@ -1026,7 +989,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
 
                 st = self._state()
                 pool = list(st.get("signal_candidates") or st.get("signals") or [])
-                pool = _filter_by_time_window(pool, date_from, date_to)
+                pool = filter_by_time_window(pool, date_from, date_to)
 
                 rules = None
                 workspace = None
@@ -1095,7 +1058,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": "invalid limit or cursor"})
                     return
 
-                is_ro_bearer = auth.get("role") == "READ_ONLY"
+                is_ro_bearer = auth.get("role") == ROLE_READ_ONLY
                 if is_ro_bearer and scope in ("held", "watch", "rules"):
                     self._send_json(
                         403,
@@ -1105,7 +1068,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
 
                 st = self._state()
                 pool = list(st.get("event_cards") or [])
-                pool = _filter_by_time_window(pool, date_from, date_to)
+                pool = filter_by_time_window(pool, date_from, date_to)
 
                 rules = None
                 workspace = None
@@ -1208,15 +1171,13 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/journal":
-                if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
-                    self._send_json(403, {"error": "需要登录或 PORTFOLIO_RW 权限"})
+                if not self._require_role(auth, (ROLE_PORTFOLIO_RW,)):
                     return
                 self._send_json(200, self._snap())
                 return
 
             if path == "/api/research/capabilities":
-                if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
-                    self._send_json(403, {"error": "需要登录或 PORTFOLIO_RW 权限"})
+                if not self._require_role(auth, (ROLE_PORTFOLIO_RW,)):
                     return
                 if self.server.role == "consumer":
                     self._send_json(
@@ -1244,8 +1205,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/research/jobs":
-                if auth.get("role") != "PORTFOLIO_RW" and auth.get("kind") not in ("cookie", "local_open"):
-                    self._send_json(403, {"error": "需要登录或 PORTFOLIO_RW 权限"})
+                if not self._require_role(auth, (ROLE_PORTFOLIO_RW,)):
                     return
                 if self.server.role == "consumer":
                     self._send_json(403, {"error": "consumer_mode_deep_research_disabled"})
@@ -1301,6 +1261,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                         try:
                             prof = fetch_single_stock_profile(canon_sym, risk_gate=st.get("risk_gate"))
                         except Exception:
+                            logger.warning("Stock profile lookup failed", exc_info=True)
                             prof = None
                 if prof is None:
                     self._send_json(404, {"error": "暂未找到该标的投研数据"})
@@ -1362,7 +1323,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                         self._send_bytes(200, Path(res).read_bytes(), "application/xml; charset=utf-8")
                         return
                 except Exception:
-                    pass
+                    logger.warning("OPML export failed", exc_info=True)
                 self._send_json(503, {"error": "OPML feed export unavailable"})
                 return
 
@@ -1442,7 +1403,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
         if auth is None or auth.get("kind") != "bearer":
             self._send_json(401, {"error": "Authorization: Bearer sync token required"})
             return
-        if auth.get("role") != "SYNC_PUBLISH":
+        if auth.get("role") != ROLE_SYNC_PUBLISH:
             self.server.portfolio_store.log_audit_event(
                 actor_id=str(auth.get("actor_id") or "unknown"),
                 role=str(auth.get("role") or ""),
@@ -1516,7 +1477,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
 
         self.server.portfolio_store.log_audit_event(
             actor_id=str(auth.get("actor_id") or "sync"),
-            role="SYNC_PUBLISH",
+            role=ROLE_SYNC_PUBLISH,
             action="sync_publish",
             resource=f"gen:{manifest.get('generation')}",
             outcome="ok",
@@ -1539,7 +1500,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
         if auth is None or auth.get("kind") != "bearer":
             self._send_json(401, {"error": "Authorization: Bearer sync token required"})
             return
-        if auth.get("role") != "SYNC_PUBLISH":
+        if auth.get("role") != ROLE_SYNC_PUBLISH:
             self.server.portfolio_store.log_audit_event(
                 actor_id=str(auth.get("actor_id") or "unknown"),
                 role=str(auth.get("role") or ""),
@@ -1569,13 +1530,13 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                     try:
                         run_cn_merge_and_publish(base_dir)
                     except Exception:
-                        pass
+                        logger.warning("Background merge after international ingest failed", exc_info=True)
 
             threading.Thread(target=_bg_merge, daemon=True, name="mc-intl-merge").start()
 
         self.server.portfolio_store.log_audit_event(
             actor_id=str(auth.get("actor_id") or "sync"),
-            role="SYNC_PUBLISH",
+            role=ROLE_SYNC_PUBLISH,
             action="ingest_intl",
             resource=str(ingest_res.get("producer_id") or "intl-collector"),
             outcome="ok",
@@ -1647,7 +1608,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                         hist = [ts for ts in failures.get(ip, []) if now - ts < 300]
                         if len(hist) >= 10:
                             error = (429, "rate", "尝试过于频繁，请稍后再试")
-                        elif not _const_eq(pw, self.server.access_password):
+                        elif not const_eq(pw, self.server.access_password):
                             if ip not in failures and len(failures) >= 2048:
                                 del failures[next(iter(failures))]
                             failures[ip] = [*hist, now]
@@ -1708,7 +1669,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 return
 
             auth = self._authenticate(allow_query_token=False)
-            if not self._require_role(auth, ("PORTFOLIO_RW",)):
+            if not self._require_role(auth, (ROLE_PORTFOLIO_RW,)):
                 return
             assert auth is not None
             if not self._enforce_write_csrf(auth):
@@ -1728,7 +1689,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                         expected_revision=exp_rev,
                         ops=ops,
                         actor_id=actor_id,
-                        role="PORTFOLIO_RW",
+                        role=ROLE_PORTFOLIO_RW,
                         summary=str(b.get("summary") or ""),
                     )
                     self._send_json(200, res)
@@ -1761,7 +1722,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                         str(b.get("request_id") or ""),
                         int(b.get("expected_revision")),
                         actor_id,
-                        role="PORTFOLIO_RW",
+                        role=ROLE_PORTFOLIO_RW,
                     )
                     self._send_json(200, res)
                 except PermissionError as exc:
@@ -1908,6 +1869,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 try:
                     ws = self.server.portfolio_store.build_workspace(public_state=cur_state, currency="USD")
                 except Exception:
+                    logger.warning("Mobile push workspace lookup failed", exc_info=True)
                     ws = None
                 try:
                     res = dispatch_mobile_push(
@@ -1928,6 +1890,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
         except _HttpError as exc:
             self._send_json(exc.status, {"error": exc.message})
         except Exception:
+            logger.warning("Unhandled POST request error", exc_info=True)
             self._send_json(500, {"error": "internal_server_error"})
 
     def do_DELETE(self) -> None:
@@ -1941,7 +1904,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             return
 
         auth = self._authenticate(allow_query_token=False)
-        if not self._require_role(auth, ("PORTFOLIO_RW",)):
+        if not self._require_role(auth, (ROLE_PORTFOLIO_RW,)):
             return
         assert auth is not None
         if not self._enforce_write_csrf(auth):
@@ -1965,6 +1928,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             self._send_json(400, {"error": "invalid id"})
         except Exception:
+            logger.warning("Unhandled DELETE request error", exc_info=True)
             self._send_json(500, {"error": "internal_server_error"})
 
     def _serve_web_file(self, rel_path: str) -> None:
@@ -2103,7 +2067,7 @@ def main() -> None:
 
     access_pw = os.environ.get("MACROCOCKPIT_ACCESS_PASSWORD", "").strip()
     sync_tok = os.environ.get("MACROCOCKPIT_SYNC_TOKEN", "").strip()
-    is_loopback_bind = a.host in ("127.0.0.1", "localhost", "::1")
+    is_loopback_bind = a.host in LOOPBACK_HOSTS
     if a.role == "consumer" and (not access_pw or not sync_tok):
         print(
             "Refusing consumer startup without both MACROCOCKPIT_ACCESS_PASSWORD and MACROCOCKPIT_SYNC_TOKEN",

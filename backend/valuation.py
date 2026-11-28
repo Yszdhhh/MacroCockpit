@@ -20,6 +20,24 @@ CORE_SLEEVES: tuple[tuple[str, str], ...] = (
 CORE_SLEEVE_IDS = frozenset(s[0] for s in CORE_SLEEVES)
 
 
+def bucket_leverage(val: Any) -> str:
+    if val is None or str(val).strip() == "":
+        return "无法估算"
+    try:
+        leverage = abs(float(val))
+    except (TypeError, ValueError):
+        return "无法估算"
+    if leverage < 0.5:
+        return "0x-0.5x"
+    if leverage < 1.0:
+        return "0.5x-1x"
+    if leverage < 2.0:
+        return "1x-2x"
+    if leverage < 3.0:
+        return "2x-3x"
+    return ">=3x"
+
+
 def parse_decimal_str(v: Any) -> str:
     """Validate and normalize a strict decimal string (no NaN/Inf/exponent, -0 -> '0', <=38 sig / <=18 dec)."""
     if v is None or isinstance(v, (bool, float)):
@@ -262,7 +280,7 @@ def _resolve_instrument_price(
     return (None, "missing")
 
 
-def _derivative_quote_currency(instrument_id: str, contract_type: str) -> str:
+def derivative_quote_currency(instrument_id: str, contract_type: str) -> str:
     parts = instrument_id.strip().upper().rsplit("-", 2)
     if len(parts) == 3 and parts[-1] in ("SWAP", "PERP"):
         return parts[-2]
@@ -305,7 +323,7 @@ def compute_liquidation_price(
     margin_mode = str(position.get("margin_mode") or "cross").strip().lower()
     contract_type = str(position.get("contract_type") or "linear").strip().lower()
     instrument = str(position.get("instrument_id") or position.get("symbol") or "")
-    quote_ccy = str(position.get("quote_currency") or _derivative_quote_currency(instrument, contract_type)).strip().upper()
+    quote_ccy = str(position.get("quote_currency") or derivative_quote_currency(instrument, contract_type)).strip().upper()
     margin_ccy = str(position.get("margin_currency") or quote_ccy).strip().upper()
 
     mmr_raw = position.get("mmr")
@@ -588,7 +606,7 @@ def evaluate_portfolio(
 
             iid = str(row.get("instrument_id") or row.get("symbol") or "").strip()
             sym = str(row.get("symbol") or iid).strip()
-            quote_ccy = str(row.get("quote_currency") or _derivative_quote_currency(iid, contract_type)).strip().upper()
+            quote_ccy = str(row.get("quote_currency") or derivative_quote_currency(iid, contract_type)).strip().upper()
             margin_ccy = str(row.get("margin_currency") or quote_ccy).strip().upper()
             sleeve = str(row.get("sleeve") or "").strip()
             bucket = sleeve if sleeve in CORE_SLEEVE_IDS else "other"

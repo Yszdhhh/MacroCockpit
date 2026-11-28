@@ -552,38 +552,6 @@ def build_home_live_sections_data(state: dict[str, Any]) -> dict[str, dict[str, 
     return sections
 
 
-def _build_home_callout_texts(state: dict[str, Any]) -> tuple[str, list[str]]:
-    rg = state.get("risk_gate") or {}
-    macros = _macro_lookup(state)
-    gen_bjt = str(state.get("generated_at_bjt") or "")[:16]
-
-    pos_map = {str(p.get("id")): p for p in (state.get("positions") or [])}
-    btc_p = int(round(float((pos_map.get("btc_trend") or {}).get("recommended_pct") or 0)))
-    gold_p = int(round(float((pos_map.get("gold_hedge") or {}).get("recommended_pct") or 0)))
-    bear = pos_map.get("bear_basket") or {}
-    bear_p = int(round(float(bear.get("recommended_pct") or 0)))
-    bear_usd = int(round(float(bear.get("est_notional_usd") or 0)))
-    bounce_p = int(round(float((pos_map.get("crash_bounce") or {}).get("recommended_pct") or 0)))
-
-    cap_pct = int(round(float(rg.get("long_risk_cap") or 0.5) * 100))
-    header = f"今日决策总览（{gen_bjt} BJT）"
-    bullets = [
-        f"风险灯号：{rg.get('label', '黄灯')}（多头风险上限 {cap_pct}%）",
-        f"辅助仓位：核心趋势 {btc_p}% · 黄金避险 {gold_p}% · 熊市配对对冲 {bear_p}%（${bear_usd:,}） · 超跌短打 {bounce_p}%",
-        (
-            "美联储与市场温度："
-            f"联邦基金 {(macros.get('fedfunds') or {}).get('value_display', '--')} · "
-            f"美债10Y {(macros.get('us_10y') or {}).get('value_display', '--')} · "
-            f"美联储净流动性 {(macros.get('fed_net_liquidity') or {}).get('value_display', '--')} · "
-            f"CPI同比 {(macros.get('cpi_yoy') or {}).get('value_display', '--')} · "
-            f"VIX {(macros.get('vix') or {}).get('value_display', '--')} · "
-            f"标普500 {(macros.get('sp500') or {}).get('value_display', '--')} · "
-            f"BTC {(macros.get('btc_spot') or {}).get('value_display', '--')}"
-        ),
-    ]
-    return header, bullets
-
-
 def _chunk_markdown_blocks(md_text: str, max_blocks: int = 80) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     for raw_ln in str(md_text or "").splitlines():
@@ -850,10 +818,6 @@ class NotionSyncClient:
             if section_ok:
                 updated += 1
         return {"matched_sections": list(matched), "updated_count": updated, "dry_run": dry_run}
-
-    def sync_home_callout(self, state: dict[str, Any], *, dry_run: bool = False) -> bool:
-        result = self.sync_home_live_sections(state, dry_run=dry_run)
-        return bool(result["dry_run"] or result["updated_count"] > 0)
 
     def sync_all(self, state: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
         """Synchronize DB1-DB6 + home callout idempotently (never touches DB7 or user fields)."""

@@ -123,7 +123,7 @@ def _scrub_forbidden_text(text: str, *, preserve_newlines: bool = True) -> str:
     return scrub_quant_thesis(text, preserve_newlines=preserve_newlines)
 
 
-def _sanitize_state_value(val: Any, key_name: str = "") -> Any:
+def sanitize_state_value(val: Any, key_name: str = "") -> Any:
     return sanitize_public_value(val, key_name=key_name, scrub_text=scrub_quant_thesis)
 
 
@@ -147,7 +147,7 @@ _ASHARE_MATCH_RE = re.compile(
 )
 
 
-def _ensure_signal_topics(sig: dict[str, Any]) -> dict[str, Any]:
+def ensure_signal_topics(sig: dict[str, Any]) -> dict[str, Any]:
     out = dict(sig)
     cat = str(out.get("category") or "macro").lower()
     txt = f"{out.get('title') or ''} {out.get('summary') or ''}"
@@ -210,7 +210,7 @@ def _evaluate_cloud_risk_inputs(
     return synthesized_quant, synthesized_brief
 
 
-def _build_positions_and_risk_gate(
+def build_positions_and_risk_gate(
     quant_snap: dict[str, Any],
     decision_brief: dict[str, Any],
     *,
@@ -516,7 +516,7 @@ def _parse_aihot_hot_md(md_text: str) -> list[dict[str, Any]]:
     return items
 
 
-def _collect_aihot_signals() -> list[dict[str, Any]]:
+def collect_aihot_signals() -> list[dict[str, Any]]:
     headers = {"User-Agent": AIHOT_UA}
     latest_items: list[dict[str, Any]] = []
     hot_items: list[dict[str, Any]] = []
@@ -564,7 +564,7 @@ def _collect_aihot_signals() -> list[dict[str, Any]]:
     return [dict(x) for x in (cached.get("items") or []) if isinstance(x, dict)]
 
 
-def _collect_equity_signals(us_equities: dict[str, Any]) -> list[dict[str, Any]]:
+def collect_equity_signals(us_equities: dict[str, Any]) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     indices = us_equities.get("indices") or []
@@ -768,7 +768,7 @@ def _collect_articles(kol_scorecards: list[dict[str, Any]] | None = None) -> lis
     return _sort_and_balance_articles(articles)
 
 
-def _build_strategy_targets(
+def build_strategy_targets(
     positions: list[dict[str, Any]],
     risk_gate: dict[str, Any],
     quant_snap: dict[str, Any],
@@ -879,13 +879,13 @@ def generate_cockpit_state(
 
     macro_fred = build_macro_fred(quant_snap, refresh_fred=refresh_fred)
     us_equities = fetch_us_equities()
-    risk_gate, positions = _build_positions_and_risk_gate(
+    risk_gate, positions = build_positions_and_risk_gate(
         quant_snap,
         decision_brief,
         macro_fred=macro_fred,
         us_equities=us_equities,
     )
-    strategy_targets = _build_strategy_targets(positions, risk_gate, quant_snap, decision_brief)
+    strategy_targets = build_strategy_targets(positions, risk_gate, quant_snap, decision_brief)
 
     eqn_signals = _collect_eqn_signals(decision_brief)
     aihot_signals = _collect_aihot_signals()
@@ -895,7 +895,7 @@ def generate_cockpit_state(
         sec_signals = collect_recent_sec_signals(filings_map)
     except Exception:
         sec_signals = []
-    eq_signals = _collect_equity_signals(us_equities)
+    eq_signals = collect_equity_signals(us_equities)
 
     # (a) Guru longform articles ('大佬分享') & signals with exception isolation
     guru_articles: list[dict[str, Any]] = []
@@ -960,7 +960,7 @@ def generate_cockpit_state(
 
     # (c) Merge KOL actionable signals + Guru signals into Kazike signal pipeline
     raw_signals = [
-        _ensure_signal_topics(s)
+        ensure_signal_topics(s)
         for s in (
             eqn_signals
             + aihot_signals
@@ -1260,7 +1260,7 @@ def generate_cockpit_state(
         "crypto_quotes": crypto_quotes,
         "coverage": coverage,
     }
-    state = _sanitize_state_value(state)
+    state = sanitize_state_value(state)
 
     counter_path = output_path.with_name("producer_generation.json")
     if output_path.resolve() == counter_path.resolve():
@@ -1307,6 +1307,14 @@ def main() -> None:
         "output": str(args.out),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+_build_positions_and_risk_gate = build_positions_and_risk_gate
+_build_strategy_targets = build_strategy_targets
+_collect_aihot_signals = collect_aihot_signals
+_collect_equity_signals = collect_equity_signals
+_ensure_signal_topics = ensure_signal_topics
+_sanitize_state_value = sanitize_state_value
 
 
 if __name__ == "__main__":

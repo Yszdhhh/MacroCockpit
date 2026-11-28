@@ -15,7 +15,7 @@ from typing import Any
 
 from backend.guardrails import (
     PRIVATE_TOP_LEVEL_KEYS as _PRIVATE_TOP_LEVEL_KEYS,
-    _iter_strings,
+    iter_strings,
     has_private_article_content,
     has_private_article_text,
     has_private_debate_text as has_private_debate_text,
@@ -68,7 +68,7 @@ PUBLIC_STATE_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_PUBLISH_LOCK = threading.RLock()
+PUBLISH_LOCK = threading.RLock()
 
 
 def _bear_basket_legs(rec_pct: float, sample_capital: int) -> list[dict[str, Any]]:
@@ -344,7 +344,7 @@ def project_public_state(
             projected[sig_key] = [
                 sig for sig in raw_sigs
                 if isinstance(sig, dict)
-                and not any(has_private_article_text(txt) for txt in _iter_strings(sig))
+                and not any(has_private_article_text(txt) for txt in iter_strings(sig))
             ]
 
     raw_matrix = projected.get("asset_source_matrix")
@@ -364,7 +364,7 @@ def project_public_state(
                     k: v
                     for k, v in cat.items()
                     if k not in ("primary_venues", "top_kols", "guru_longforms", "crowd_warning_channel", "supply_chain_bridges")
-                    and not any(has_private_article_text(t) for t in _iter_strings(v))
+                    and not any(has_private_article_text(t) for t in iter_strings(v))
                 }
                 clean_cat["id"] = cid.strip()
                 for list_k in ("primary_venues", "top_kols", "guru_longforms", "supply_chain_bridges"):
@@ -373,12 +373,12 @@ def project_public_state(
                         clean_cat[list_k] = [
                             row for row in sub_v
                             if isinstance(row, dict)
-                            and not any(has_private_article_text(t) for t in _iter_strings(row))
+                            and not any(has_private_article_text(t) for t in iter_strings(row))
                         ]
                 warn_c = cat.get("crowd_warning_channel")
-                if isinstance(warn_c, dict) and not any(has_private_article_text(t) for t in _iter_strings(warn_c)):
+                if isinstance(warn_c, dict) and not any(has_private_article_text(t) for t in iter_strings(warn_c)):
                     clean_cat["crowd_warning_channel"] = warn_c
-                if not any(has_private_article_text(t) for t in _iter_strings(clean_cat)):
+                if not any(has_private_article_text(t) for t in iter_strings(clean_cat)):
                     clean_cats.append(clean_cat)
         if not clean_cats or has_private_article_text(str(raw_matrix.get("updated_at_bjt") or "")):
             projected.pop("asset_source_matrix", None)
@@ -386,7 +386,7 @@ def project_public_state(
             clean_matrix: dict[str, Any] = {"categories": clean_cats}
             if isinstance(raw_matrix.get("updated_at_bjt"), str):
                 clean_matrix["updated_at_bjt"] = raw_matrix["updated_at_bjt"]
-            if isinstance(raw_matrix.get("summary"), dict) and not any(has_private_article_text(t) for t in _iter_strings(raw_matrix["summary"])):
+            if isinstance(raw_matrix.get("summary"), dict) and not any(has_private_article_text(t) for t in iter_strings(raw_matrix["summary"])):
                 clean_matrix["summary"] = dict(raw_matrix["summary"])
                 clean_matrix["summary"]["categories_count"] = len(clean_cats)
             projected["asset_source_matrix"] = clean_matrix
@@ -602,7 +602,7 @@ def _prune_old_generations(gens_dir: Path, active_gen: int, keep: int = KEEP_GEN
     return removed
 
 
-def _generation_timestamp(value: Any) -> datetime:
+def generation_timestamp(value: Any) -> datetime:
     stamp = datetime.fromisoformat(str(value or ""))
     return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=BJT)
 
@@ -614,7 +614,7 @@ def _read_generation_state(folder: Path, generation: int) -> dict[str, Any]:
     return state
 
 
-def _current_manifest(manifest_path: Path, *, recover_newer: bool = False) -> dict[str, Any] | None:
+def current_manifest(manifest_path: Path, *, recover_newer: bool = False) -> dict[str, Any] | None:
     gens_dir = manifest_path.parent / "generations"
     active = None
     try:
@@ -626,8 +626,8 @@ def _current_manifest(manifest_path: Path, *, recover_newer: bool = False) -> di
             or any(not isinstance(a, dict) or not safe_article_filename(a.get("filename")) for a in manifest["articles"])
         ):
             raise ValueError("invalid generation manifest")
-        _generation_timestamp(manifest["generated_at"])
-        _generation_timestamp(manifest["published_at"])
+        generation_timestamp(manifest["generated_at"])
+        generation_timestamp(manifest["published_at"])
         state = _read_generation_state(gens_dir / f"gen_{gen}", gen)
         if manifest["state_sha256"] != _canonical_state_sha256(state):
             raise ValueError("invalid generation state checksum")
@@ -662,8 +662,8 @@ def _current_manifest(manifest_path: Path, *, recover_newer: bool = False) -> di
             saved = folder / "manifest.json"
             if saved.exists():
                 manifest = json.loads(saved.read_text(encoding="utf-8"))
-                _generation_timestamp(manifest["generated_at"])
-                _generation_timestamp(manifest["published_at"])
+                generation_timestamp(manifest["generated_at"])
+                generation_timestamp(manifest["published_at"])
                 entries = manifest["articles"]
                 if (
                     type(manifest["generation"]) is not int
@@ -678,7 +678,7 @@ def _current_manifest(manifest_path: Path, *, recover_newer: bool = False) -> di
 
             published_at = datetime.fromtimestamp(folder.stat().st_mtime, BJT).isoformat(timespec="seconds")
             generated_at = state.get("generated_at_bjt") or published_at
-            _generation_timestamp(generated_at)
+            generation_timestamp(generated_at)
             return {
                 "schema_version": 2,
                 "generation": gen,
@@ -729,8 +729,8 @@ def publish_generation(
         for a in norm_articles
     ]
 
-    with _PUBLISH_LOCK, file_lock(manifest_path):
-        cur_manifest = _current_manifest(manifest_path, recover_newer=True)
+    with PUBLISH_LOCK, file_lock(manifest_path):
+        cur_manifest = current_manifest(manifest_path, recover_newer=True)
         cur_gen = cur_manifest["generation"] if cur_manifest is not None else 0
 
         if generation is not None:
@@ -744,9 +744,9 @@ def publish_generation(
                 target_gen += 1
 
         generated_at = str(clean_state.get("generated_at_bjt") or _now_bjt_iso())
-        generated_stamp = _generation_timestamp(generated_at)
+        generated_stamp = generation_timestamp(generated_at)
         if cur_manifest is not None:
-            cur_stamp = _generation_timestamp(cur_manifest["generated_at"])
+            cur_stamp = generation_timestamp(cur_manifest["generated_at"])
             if generated_stamp < cur_stamp:
                 if clean_state.get("generated_at_bjt"):
                     raise ValueError("stale_generation")
@@ -920,7 +920,7 @@ def load_published_generation(base_dir: Path | str) -> dict[str, Any]:
     base = Path(base_dir)
     data_dir = resolve_data_dir(base)
     manifest_path = data_dir / "current_generation.json"
-    manifest = _current_manifest(manifest_path)
+    manifest = current_manifest(manifest_path)
     if manifest is not None:
         gen = manifest["generation"]
         raw_state = _read_generation_state(data_dir / "generations" / f"gen_{gen}", gen)
@@ -945,7 +945,7 @@ def lookup_published_article(base_dir: Path | str, filename: str) -> dict[str, A
     base = Path(base_dir)
     data_dir = resolve_data_dir(base)
     manifest_path = data_dir / "current_generation.json"
-    manifest = _current_manifest(manifest_path)
+    manifest = current_manifest(manifest_path)
     if manifest is not None:
         gen = manifest["generation"]
         entries = manifest["articles"]
