@@ -14,8 +14,8 @@
 | **Stage 2** | 权威基础设施归一（`runtime.py` & `guardrails.py`） | `已完成` | `4dd1f2d` | 消除 28 处 `BJT`、7 处 `_safe_home`、10 处违禁词表，补齐 `guru_sources` SSRF 漏洞与 `resolve_data_dir` 隔离，116/116 通过 |
 | **Stage 3** | 清零循环依赖与 `backend -> desktop` 反向依赖 | `已完成` | `6e38e93` | 46 模块 0 SCC 环路、0 `backend->desktop` 静态导入、消费端导入闭包 31->20、116/116 通过 |
 | **Stage 4** | HTTP 安全归一、跨模块私有耦合收口与死代码删除 | `已完成` | `f40eda0` | 抽出 L0 `http_security.py`（0 内部导入）、42 处跨模块 `_foo` 导入清零、删除 7 处零调用死函数、116/116 通过 + Kiro Opus 复审 0 BLOCKER |
-| **Stage 5** | UI 设计系统归一、脱敏漏洞修复与前端去重 | `已完成` | 即将提交 | 抽出 `web/tokens.css` 统一 Web/Desktop Pro 令牌、22 处 `@media` 断点收敛为 5 块、修复 `r.qty`/`d.qty` 与 `capitalInput` 静态值遮罩、删除 `formatMoney`、真机双端/双主题/移动端验收 + Kiro Sonnet 复审 0 BLOCKER |
-| **Stage 6** | AST 架构防回归门禁、CI 接入与终局物理验收 | `进行中` | — | `tests/test_architecture_governance.py` + `.github/workflows/ci_governance.yml` + 全量回归 |
+| **Stage 5** | UI 设计系统归一、脱敏漏洞修复与前端去重 | `已完成` | `27bc6b0` | 抽出 `web/tokens.css` 统一 Web/Desktop Pro 令牌、22 处 `@media` 断点收敛为 5 块、修复 `r.qty`/`d.qty` 与 `capitalInput` 静态值遮罩、删除 `formatMoney`、真机双端/双主题/移动端验收 + Kiro Sonnet 复审 0 BLOCKER |
+| **Stage 6** | AST 架构防回归门禁、CI 接入与终局物理验收 | `已完成` | 即将提交 | `tests/test_architecture_governance.py` + `.github/workflows/ci_governance.yml` + 治理文档与 `AGENTS.md` 同步 + 终局全量回归 |
 
 ## 优化任务池（按影响面与复杂度排序）
 

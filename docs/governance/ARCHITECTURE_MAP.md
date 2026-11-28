@@ -103,3 +103,19 @@ MacroCockpit 2.0 是一个跨市场（美股、A股·港股、AI 前沿、加密
 4. **违禁词统一译法与 `producer_generation.json` 退役窗口**：
    - `Regime`、`待补` 与方法论类提示词在旧代码中有多种近义译法（如 `市场周期`/`市场阶段`、`—`/`样本积累`）；本次在统一为直白中文的同时保持现有测试断言全绿，最终标准译法以产品审定为准。
    - 废弃 `producer_generation.json` 与 `cockpit_state.json` 兼容副本涉及云端 CAS 与外部 Hermes/Notion 读取方，列为后续单独演进项，不在本轮破坏现有外部契约。
+
+---
+
+## 6. 治理收口终局量化对比（Stages 1–6）
+
+| 治理维度 | 治理前基线 | 治理后终局 | 强制防回归门禁 |
+| :--- | :--- | :--- | :--- |
+| 模块间循环依赖（SCC） | 3 组（6 模块核心环 + 2 组双模块环） | **0 组**（顶层 + 函数内全量 AST） | `test_zero_import_cycles_across_backend_and_desktop` |
+| `backend -> desktop` 反向依赖 | 7 处函数内懒导入 | **0 处静态导入**（CLI `--desktop-pro` 仅 `mcp_stdio.py` 动态加载） | `test_strict_layering_and_zero_backend_to_desktop_imports` |
+| 生产跨模块 `_foo` 私有导入 | 48 处（全仓 53 处） | **0 处** | `test_zero_cross_module_private_imports_in_production` |
+| L0 底座模块内部依赖 | 零散反向依赖 `fred_and_market` / `public_snapshot` | `runtime.py`、`guardrails.py`、`http_security.py` **均 0 内部依赖** | `test_strict_layering_and_zero_backend_to_desktop_imports` |
+| 基础常量 / 工具重复定义 | `BJT` 28 处、`_safe_home` 7 处、违禁词表 10+ 处、`const_eq` 3 处 | **各唯一 1 处权威定义** | `test_ssot_authorities_in_python_and_ui_tokens` |
+| 前端设计令牌与断点 | 双 CSS 复制且 `--mast-bg` 漂移，22 个 `@media` 分散 12 宽度 | `web/tokens.css` 唯一来源，**5 个规范 `@media` 块**，桌面端防闪白 | `test_ssot_authorities_in_python_and_ui_tokens` |
+| 持仓数量掩码与静态值 | `r.qty`/`d.qty` 隐藏金额下明文泄露，`value="100000"` | `qtyHtml()` 统一遮罩为 `••••`，`#capitalInput` 静态 `value=""` | `test_six_module_web_ui_and_offline_bundle_invariants` + 浏览器实测 |
+| 已核实零调用死代码 | 7 处后端死函数 + 前端 `formatMoney` + 冗余离线守卫 | **全部删除并验证无外部调用** | Ruff + 全量回归测试 |
+| CI 自动化架构守卫 | 仅 2/14 测试文件 | 新增 `.github/workflows/ci_governance.yml`（Ruff + `node --check` + `--build-static` + AST 门禁） | GitHub Actions 自动执行 |
