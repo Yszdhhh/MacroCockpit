@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.discussion_temperature import SNAPSHOT_TAGS, project_discussion_trends
+
 BJT = timezone(timedelta(hours=8))
 MAX_ARTICLE_BYTES = 512 * 1024
 KEEP_GENERATIONS = 3
@@ -534,6 +536,8 @@ def project_public_state(
                     s for s in (_project_forum_sample(x, ("platform", "title", "zh_brief", "url")) for x in (div.get("street_samples") or []))
                     if s is not None
                 ]
+            if (tag := d_copy.get("divergence_tag")) in SNAPSHOT_TAGS:
+                d_copy.update(divergence_tag=SNAPSHOT_TAGS[tag], tone="neutral", action_hint="仅为当期样本，不代表持续趋势。")
             if has_private_article_text(str(d_copy.get("action_hint") or "")):
                 d_copy["action_hint"] = "按既定风控纪律跟踪市场波动。"
             clean_divs.append(d_copy)
@@ -544,6 +548,9 @@ def project_public_state(
         rebuilt_forum["channels_status"] = clean_channels
         rebuilt_forum["divergences"] = clean_divs
         rebuilt_forum["hot_discussions"] = clean_hot
+        trends = project_discussion_trends(forum_sentiment.get("discussion_trends"))
+        if trends:
+            rebuilt_forum["discussion_trends"] = trends
         if has_private_article_text(json.dumps(rebuilt_forum, ensure_ascii=False)):
             projected.pop("forum_sentiment", None)
         else:

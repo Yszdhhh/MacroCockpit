@@ -824,7 +824,7 @@ def test_vps_sync_spot_natural_key_chunk_resume_https_and_proxy_guard(
     """Verify (account_id, instrument_id) spot matching, >80-op chunk resume, HTTPS/redirect guard, and spot_proxy valuation guard."""
     import threading
     import urllib.request
-    from backend import market_quotes, public_snapshot, server, vps_sync
+    from backend import market_quotes, portfolio_store, public_snapshot, server, vps_sync
     from backend.portfolio_store import PortfolioStore
 
     # 1. Non-loopback HTTP & redirect guards
@@ -938,8 +938,14 @@ def test_vps_sync_spot_natural_key_chunk_resume_https_and_proxy_guard(
         assert ok_noop is True and info_noop["portfolio_action"] == "noop_in_sync"
 
         req_ws = urllib.request.Request(f"{base}/api/v2/workspace", headers={"Authorization": "Bearer tok_rw"})
-        with urllib.request.urlopen(req_ws, timeout=5) as r:
-            ws = json.loads(r.read().decode("utf-8"))
+        # Transport and valuation remain real; unrelated public data providers
+        # should not make this localhost request exceed its timeout.
+        with monkeypatch.context() as quotes:
+            quotes.setattr(portfolio_store, "fetch_crypto_quotes", lambda **kw: {"quotes": {}, "spot": {}, "swap": {}})
+            quotes.setattr(market_quotes, "fetch_hybrid_perp_quotes", lambda **kw: {})
+            quotes.setattr(portfolio_store, "fetch_fx_snapshot", lambda **kw: {"rate": "7.0", "status": "ok"})
+            with urllib.request.urlopen(req_ws, timeout=5) as r:
+                ws = json.loads(r.read().decode("utf-8"))
         assert len(ws["spot_balances"]) == 82
         assert any(s["instrument_id"] == "TKN000" and s["qty"] == "10" for s in ws["spot_balances"])
         assert ws["raw_portfolio"]["derivative_positions"][0]["mark_price"] == "39.19"
@@ -1004,6 +1010,7 @@ def test_vps_sync_round2_domain_isolation_dropped_ack_spot_rename_and_url_safety
     from backend.portfolio_store import PortfolioStore
 
     monkeypatch.setattr(portfolio_store, "fetch_crypto_quotes", lambda **kw: {"quotes": {}, "spot": {}, "swap": {}})
+    monkeypatch.setattr(portfolio_store, "fetch_fx_snapshot", lambda **kw: {"rate": "7.0", "status": "ok"})
     monkeypatch.setattr(market_quotes, "fetch_hybrid_perp_quotes", lambda **kw: {"ZHIPUUSDT": {"inst_id": "ZHIPUUSDT", "mark_price": "40.0", "price": "40.0"}})
 
     remote_dir = tmp_path / "r2_remote"

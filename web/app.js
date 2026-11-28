@@ -254,7 +254,7 @@
       "marketSynthesisPanel", "marketStanceBadge", "marketAsOf", "marketVerdict",
       "marketDimensions", "marketDivergenceAlerts", "crossSourceHead", "crossSourceCount",
       "crossSourceLinks",
-      "forumSentimentPanel", "forumContrarianBadge", "forumOverallBadge", "forumChannelsBar", "forumMacroStrip", "forumDivergenceGrid",
+      "forumSentimentPanel", "forumDiscussionTrend", "forumContrarianBadge", "forumOverallBadge", "forumChannelsBar", "forumMacroStrip", "forumDivergenceGrid",
       "forumHotWrap", "forumUpdatedAt", "forumHotList",
       "kolViewSwitch", "kolHighWinBtn", "kolToolbar", "kolTopicChips", "kolStanceChips", "kolSearchInput", "kolSearchBtn",
       "kolCrowdStrip", "kolTugPanel", "kolTug", "kolTopicBars", "kolTimeline",
@@ -1271,11 +1271,10 @@
         const fTemp = fs && typeof fs === "object" ? toNum(fs.overall_crowd_temp) : NaN;
         if (!Number.isFinite(fTemp)) return "";
         const fLabel = String(fs.overall_label || "查看分歧").trim();
-        const cls = fTemp >= 70 ? "is-bear" : fTemp <= 35 ? "is-bull" : "";
-        return '<button type="button" class="glance" data-jump="sentiment" title="查看全网舆论波动对照与小红书反指">' +
-          '<span class="glance-label">舆论热度</span>' +
+        return '<button type="button" class="glance" data-jump="sentiment" title="查看讨论趋势和当期观点对照">' +
+          '<span class="glance-label">当期舆论</span>' +
           '<span class="glance-value num-plain">' + escapeHtml(String(Math.round(fTemp))) + "</span>" +
-          '<span class="glance-change num-plain ' + cls + '">' + escapeHtml(fLabel) + "</span>" +
+          '<span class="glance-change num-plain">' + escapeHtml(fLabel) + "</span>" +
           "</button>";
       }
       const m = map[id];
@@ -3378,13 +3377,55 @@
     return "auth";
   }
 
-  function forumOverallBadgeTone(temp, label) {
-    const lbl = String(label || "");
-    if (lbl.indexOf("过热") !== -1 || lbl.indexOf("狂热") !== -1) return "badge-bear";
-    if (lbl.indexOf("恐慌") !== -1 || lbl.indexOf("见底") !== -1) return "badge-bull";
-    if (Number.isFinite(temp) && temp >= 70) return "badge-warn";
-    if (Number.isFinite(temp) && temp <= 30) return "badge-bull";
-    return "badge-accent";
+  function forumSnapshotContext(d) {
+    const legacy = {
+      "热度偏高": "当期关注较高", "散户过热": "当期看多分歧",
+      "出圈见顶": "当期关注较高", "恐慌见底": "当期看空分歧",
+    };
+    const tag = String((d && d.divergence_tag) || "");
+    return legacy[tag] ? Object.assign({}, d, {
+      divergence_tag: legacy[tag], tone: "neutral", action_hint: "仅为当期样本，不代表持续趋势。",
+    }) : d;
+  }
+
+  const DISCUSSION_ASSET_LABELS = {GOLD: "黄金", BTC: "比特币", QQQ: "QQQ", "02513.HK": "智谱", "00100.HK": "MiniMax"};
+  const DISCUSSION_STATES = {warming: "持续升温", cooling: "关注回落", stable: "暂无一致趋势", high: "持续高关注"};
+  const DISCUSSION_PLATFORM_LABELS = {
+    weibo: "微博", baidu: "百度", toutiao: "头条", douyin: "抖音", zhihu: "知乎", "bilibili-hot-search": "B站",
+  };
+
+  function currentDiscussionTrends(fs) {
+    const trends = fs && fs.discussion_trends;
+    if (!trends || !/^\d{4}-\d{2}-\d{2}$/.test(String(trends.as_of || ""))) return [];
+    const todayBjt = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+    const age = Date.parse(todayBjt) - Date.parse(trends.as_of);
+    if (!Number.isFinite(age) || age < 0 || age > 86400000) return [];
+    return arr(trends.assets).filter((a) => a && Object.hasOwn(DISCUSSION_ASSET_LABELS, a.asset));
+  }
+
+  function discussionWindows(a) {
+    return arr(a.windows).filter((w) => w && [7, 30, 90].includes(w.days) &&
+      Object.hasOwn(DISCUSSION_STATES, w.state) && w.platforms >= 2 &&
+      w.sample_days >= Math.ceil(Math.floor(w.days / 2) * .6) + Math.ceil(Math.ceil(w.days / 2) * .6));
+  }
+
+  function renderDiscussionTrendHtml(trends) {
+    const rows = trends.filter((a) => discussionWindows(a).length).map((a) => {
+      const labels = discussionWindows(a).map((w) => {
+        const copy = w.days + "天 " + DISCUSSION_STATES[w.state] + " · " + w.platforms + "平台 / " + w.sample_days + "天";
+        const platforms = arr(w.sources).filter((s) => s && Object.hasOwn(DISCUSSION_PLATFORM_LABELS, s.platform) &&
+          Object.hasOwn(DISCUSSION_STATES, s.state)).map((s) => DISCUSSION_PLATFORM_LABELS[s.platform] + " " +
+            DISCUSSION_STATES[s.state] + " " + s.sample_days + "天").join("；");
+        return '<details><summary class="badge ' + (w.state === "warming" ? "badge-warn" : "badge-outline") + '">' +
+          escapeHtml(copy) + "</summary>" + (platforms ? '<span class="panel-meta">' + escapeHtml(platforms) + "</span>" : "") + "</details>";
+      }).join("");
+      return '<div class="forum-sample-row"><b class="forum-sample-author">' +
+        escapeHtml(DISCUSSION_ASSET_LABELS[a.asset]) + '</b><div class="synth-head-left">' +
+        labels + "</div></div>";
+    }).join("");
+    return '<div class="forum-hot-wrap"><h3 class="subsec-title">持续讨论趋势</h3>' +
+      '<p class="panel-meta">公开热榜标题样本，不是全平台发帖量，也不是买卖信号。天数为可比平台中的最少观测天数。</p>' +
+      (rows || '<p class="panel-meta">可比样本积累中，暂不判断趋势。</p>') + "</div>";
   }
 
   function forumBarMetrics(score, opts) {
@@ -3467,33 +3508,29 @@
       return;
     }
     const channels = arr(fs.channels_status);
-    const divs = arr(fs.divergences);
+    const divs = arr(fs.divergences).filter(Boolean).map(forumSnapshotContext);
     const hots = arr(fs.hot_discussions);
-    if (!channels.length && !divs.length) {
+    const trends = currentDiscussionTrends(fs);
+    if (!channels.length && !divs.length && !trends.length) {
       dom.forumSentimentPanel.hidden = true;
       return;
     }
     dom.forumSentimentPanel.hidden = false;
 
     if (dom.forumContrarianBadge) {
-      const warnDivs = divs.filter((d) => d && (d.divergence_tag === "热度偏高" || d.divergence_tag === "散户过热" || d.divergence_tag === "出圈见顶"));
-      const temp = toNum(fs.overall_crowd_temp);
-      if (warnDivs.length) {
-        dom.forumContrarianBadge.innerHTML = '<span class="badge badge-warn">偏热提醒 · ' + escapeHtml(warnDivs.map((d) => d.topic).slice(0, 2).join(" / ")) + "</span>";
-      } else if (Number.isFinite(temp) && temp >= 68) {
-        dom.forumContrarianBadge.innerHTML = '<span class="badge badge-warn">情绪温度偏高</span>';
-      } else {
-        dom.forumContrarianBadge.innerHTML = '<span class="panel-meta">多平台讨论热度与专业观点对照</span>';
-      }
+      const warming = trends.filter((a) => discussionWindows(a).some((w) => w.state === "warming"));
+      dom.forumContrarianBadge.innerHTML = warming.length
+        ? '<span class="badge badge-warn">持续升温 · ' + escapeHtml(warming.map((a) => DISCUSSION_ASSET_LABELS[a.asset]).slice(0, 2).join(" / ")) + "</span>"
+        : '<span class="panel-meta">当期讨论与专业观点对照</span>';
     }
 
     if (dom.forumOverallBadge) {
       const temp = toNum(fs.overall_crowd_temp);
       const lbl = String(fs.overall_label || "").trim();
       if (Number.isFinite(temp)) {
-        const parts = ["散户温度 " + Math.round(temp)];
+        const parts = ["当期社区情绪 " + Math.round(temp)];
         if (lbl) parts.push(lbl);
-        dom.forumOverallBadge.innerHTML = '<span class="badge ' + forumOverallBadgeTone(temp, lbl) + ' num-plain">' + escapeHtml(parts.join(" · ")) + "</span>";
+        dom.forumOverallBadge.innerHTML = '<span class="badge badge-accent num-plain">' + escapeHtml(parts.join(" · ")) + "</span>";
       } else {
         dom.forumOverallBadge.innerHTML = '<span class="badge badge-outline">' + escapeHtml(lbl || "暂无样本") + "</span>";
       }
@@ -3589,6 +3626,10 @@
       }).join("");
     }
 
+    if (dom.forumDiscussionTrend) {
+      dom.forumDiscussionTrend.innerHTML = renderDiscussionTrendHtml(trends);
+    }
+
     if (dom.forumHotWrap && dom.forumHotList) {
       if (dom.forumUpdatedAt) dom.forumUpdatedAt.textContent = !isBlank(fs.updated_at_bjt) ? String(fs.updated_at_bjt) : "";
       if (hots.length) {
@@ -3630,9 +3671,10 @@
       return;
     }
     const channels = arr(fs.channels_status);
-    const divs = arr(fs.divergences);
+    const divs = arr(fs.divergences).filter(Boolean).map(forumSnapshotContext);
     const hots = arr(fs.hot_discussions);
-    if (!channels.length && !divs.length && !hots.length) {
+    const trends = currentDiscussionTrends(fs);
+    if (!channels.length && !divs.length && !hots.length && !trends.length) {
       dom.todaySentimentCard.hidden = true;
       dom.todaySentimentCard.innerHTML = "";
       return;
@@ -3642,12 +3684,12 @@
     const temp = toNum(fs.overall_crowd_temp);
     const lbl = String(fs.overall_label || "").trim();
     const tempBadge = Number.isFinite(temp)
-      ? '<span class="badge ' + forumOverallBadgeTone(temp, lbl) + ' num-plain">综合情绪指数 ' + Math.round(temp) + (lbl ? " · " + escapeHtml(lbl) : "") + "</span>"
+      ? '<span class="badge badge-accent num-plain">当期情绪指数 ' + Math.round(temp) + (lbl ? " · " + escapeHtml(lbl) : "") + "</span>"
       : '<span class="badge badge-outline">' + escapeHtml(lbl || "暂无样本") + "</span>";
 
-    const warnDivs = divs.filter((d) => d && (d.divergence_tag === "热度偏高" || d.divergence_tag === "散户过热" || d.divergence_tag === "出圈见顶"));
-    const contrarianHtml = warnDivs.length
-      ? '<span class="badge badge-warn">情绪偏热 · ' + escapeHtml(warnDivs[0].topic || "") + "</span>"
+    const warming = trends.find((a) => discussionWindows(a).some((w) => w.state === "warming"));
+    const contrarianHtml = warming
+      ? '<span class="badge badge-warn">持续升温 · ' + escapeHtml(DISCUSSION_ASSET_LABELS[warming.asset]) + "</span>"
       : "";
 
     const rankedDivs = divs.slice().sort((a, b) => {
@@ -3655,7 +3697,6 @@
       const rankOf = (d) => {
         if (!d) return 0;
         const base = hasSample(d) ? 200 : 0;
-        if (d.divergence_tag === "热度偏高" || d.divergence_tag === "散户过热" || d.divergence_tag === "出圈见顶") return base + 1000;
         if (d.divergence_tag && d.divergence_tag !== "情绪平稳" && d.divergence_tag !== "暂无样本") return base + 500;
         return base;
       };
@@ -3986,7 +4027,7 @@
       dom.kolCrowdStrip.hidden = true;
       return;
     }
-    const divs = arr(fs.divergences);
+    const divs = arr(fs.divergences).filter(Boolean).map(forumSnapshotContext);
     const temp = toNum(fs.overall_crowd_temp);
     if (!divs.length && !Number.isFinite(temp)) {
       dom.kolCrowdStrip.hidden = true;
@@ -4002,7 +4043,7 @@
       '<div class="kol-crowd-main">' +
       '<span class="kol-crowd-lbl">散户/机构温差</span>' +
       (Number.isFinite(temp)
-        ? '<span class="badge ' + forumOverallBadgeTone(temp, label) + ' num-plain">散户温度 ' + Math.round(temp) + (label ? " · " + escapeHtml(label) : "") + "</span>"
+        ? '<span class="badge badge-accent num-plain">当期社区情绪 ' + Math.round(temp) + (label ? " · " + escapeHtml(label) : "") + "</span>"
         : "") +
       shownDivs.map((d) =>
         '<span class="kol-crowd-chip">' +

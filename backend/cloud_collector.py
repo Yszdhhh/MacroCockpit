@@ -103,9 +103,13 @@ except ImportError:
     build_market_synthesis = None  # type: ignore[assignment]
 
 try:
-    from backend.forum_sentiment import build_sentiment_divergence
+    from backend.forum_sentiment import (
+        build_sentiment_divergence, collect_public_discussion_trends, trim_forum_sentiment,
+    )
 except ImportError:
     build_sentiment_divergence = None  # type: ignore[assignment]
+    collect_public_discussion_trends = None  # type: ignore[assignment]
+    trim_forum_sentiment = None  # type: ignore[assignment]
 
 try:
     from backend.source_matrix import build_asset_source_matrix
@@ -578,6 +582,13 @@ def run_cn_merge_and_publish(
 
     lock_path = data_dir / "cloud_merge.lock"
     with file_lock(lock_path):
+        discussion_trends: dict[str, Any] = {}
+        if collect_public_discussion_trends is not None:
+            try:
+                discussion_trends = collect_public_discussion_trends(data_dir)
+            except (OSError, ValueError):
+                pass
+
         cn_rss_specs = [sp for sp in CURATED_RSS_FEEDS if sp["id"] not in INTL_ONLY_RSS_IDS]
         rsshub_base = (os.environ.get("RSSHUB_BASE_URL") or "").strip().rstrip("/")
         if rsshub_base.startswith(("http://", "https://")):
@@ -1015,6 +1026,12 @@ def run_cn_merge_and_publish(
                 )
             ) and prior_forum_sentiment:
                 forum_sentiment = dict(prior_forum_sentiment)
+            # Recompute against today; never carry cached warning flags forward.
+            forum_sentiment.pop("discussion_trends", None)
+            if discussion_trends:
+                forum_sentiment["discussion_trends"] = discussion_trends
+                if trim_forum_sentiment is not None:
+                    forum_sentiment = trim_forum_sentiment(forum_sentiment)
 
             asset_source_matrix = {}
             if build_asset_source_matrix is not None:

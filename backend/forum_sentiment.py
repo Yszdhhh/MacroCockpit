@@ -44,6 +44,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.discussion_temperature import discussion_trends, refresh_discussion_history
 from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
 from backend.public_snapshot import has_private_article_text, project_market_pulse
 from backend.rss_sources import _norm_dup_key, strip_emojis
@@ -580,8 +581,6 @@ def _fetch_xueqiu_channel(*, user_home: Path, timeout: int = 6) -> dict[str, Any
             continue
         pct = s.get("percent")
         pct_num = float(pct) if isinstance(pct, (int, float)) else 0.0
-        sent_score = int(_clamp(pct_num * 10.0, -85.0, 85.0))
-        sent_label = "偏多" if sent_score >= 15 else ("偏空" if sent_score <= -15 else "中性")
         heat = int(_clamp(95 - (idx - 1) * 3, 45, 98))
         stock_title = f"雪球热股 #{idx} {name}({sym}) {pct_num:+.2f}%"
         tickers = extract_tickers(f"{sym} {name}")
@@ -607,8 +606,8 @@ def _fetch_xueqiu_channel(*, user_home: Path, timeout: int = 6) -> dict[str, Any
                     "channel": "xueqiu",
                     "title": stock_title,
                     "summary": stock_title,
-                    "sentiment": sent_label,
-                    "score": sent_score,
+                    "sentiment": "人气榜参考",
+                    "kind": "quote_rank",
                     "heat": heat,
                     "tickers": tickers[:4],
                     "topics": topics,
@@ -1789,8 +1788,6 @@ def _fetch_eastmoney_guba_channel(*, timeout: int = 6) -> dict[str, Any]:
         name = str(q["name"]).strip()
         pct = float(q.get("pct") or 0.0)
         amt_yi = round(float(q.get("amt_wan") or 0.0) / 10000.0, 1)
-        sent_score = int(_clamp(round(pct * 10.0), -85, 85))
-        sent_label = "偏多" if sent_score >= 15 else ("偏空" if sent_score <= -15 else "中性")
         heat = int(_clamp(round(94 - (rk - 1) * 2.4), 48, 96))
         title = f"东财热股 #{rk} {name}({sc}) {pct:+.2f}%"
         summary = f"{title} · 成交 {amt_yi:.1f} 亿" if amt_yi > 0 else title
@@ -1803,8 +1800,8 @@ def _fetch_eastmoney_guba_channel(*, timeout: int = 6) -> dict[str, Any]:
                 "channel": "eastmoney",
                 "title": _truncate(title, 76),
                 "summary": _truncate(summary, 140),
-                "sentiment": sent_label,
-                "score": sent_score,
+                "sentiment": "人气榜参考",
+                "kind": "quote_rank",
                 "heat": heat,
                 "tickers": tickers[:4],
                 "topics": _classify_topics(f"{name} {sc}", tickers),
@@ -2343,6 +2340,24 @@ def _extract_desk_entries(
     return entries
 
 
+def collect_public_discussion_trends(data_dir: Path) -> dict[str, Any]:
+    """Use only the existing unauthenticated public hotlists, not local account paths."""
+    def fetch(platform: str) -> dict[str, Any]:
+        return _http_get_json(f"{NEWSNOW_API_URL}?id={urllib.parse.quote(platform)}", timeout=5)
+
+    now = datetime.now(BJT)
+    return discussion_trends(refresh_discussion_history(data_dir, fetch, now=now), today=now.date())
+
+
+def _is_quote_rank(item: dict[str, Any]) -> bool:
+    # Old cached rankings lack the typed marker.
+    title = str(item.get("title") or "")
+    return (
+        item.get("kind") == "quote_rank" or item.get("channel") == "eastmoney"
+        or title.startswith(("雪球热股 #", "东财热股 #"))
+    )
+
+
 def _is_cn_mass_crowd_item(item: dict[str, Any]) -> bool:
     plat = str(item.get("platform") or "")
     ch = str(item.get("channel") or "")
@@ -2354,6 +2369,7 @@ def _judge_divergence(
     street_score: int | None,
     street_heat: int | None,
     *,
+    desk_count: int = 0,
     cn_crowd_count: int = 0,
     cn_platform_count: int = 0,
     xhs_count: int = 0,
@@ -2364,7 +2380,7 @@ def _judge_divergence(
     mass_penetration_pct: float = 0.0,
     mass_topic_hits: int = 0,
 ) -> tuple[str, str, str]:
-    """Determine (divergence_tag, tone, action_hint), requiring multi-platform density before emitting 热度偏高."""
+    """Describe the current sample only; never infer a top, bottom, or trend."""
     if street_score is None or street_heat is None:
         return (
             "暂无样本",
@@ -2372,45 +2388,38 @@ def _judge_divergence(
             "当前赛道暂未采集到有效社区讨论样本，暂参考专业层动向。",
         )
     gap = street_score - desk_score
-    # Single-snapshot high crowd heat requires strictly bullish retail sentiment plus >=2 distinct CN platforms;
-    # labeled neutrally as 热度偏高 until multi-day time-series divergence gates confirm exhaustion.
+    # These branches describe a single snapshot, independent from the history-based warning.
     if cn_platform_count >= 2 and street_score >= 30 and xhs_count >= 3 and xhs_heat >= 76 and xhs_score >= 35:
         return (
-            "热度偏高",
-            "warn",
-            "国内多个社交平台同向升温，情绪偏热，留意节奏分化避免情绪追高。",
+            "当期关注较高",
+            "neutral",
+            "本次样本关注度较高，不代表持续升温。",
         )
     if street_score >= 30 and (
         (cn_platform_count >= 2 and cn_crowd_count >= 4 and cn_crowd_heat >= 76 and cn_crowd_score >= 35)
         or (mass_topic_hits >= 6 and mass_penetration_pct >= 14.0 and street_score >= 32 and cn_crowd_heat >= 74)
     ):
         return (
-            "热度偏高",
-            "warn",
-            "全网与国内社交热榜多平台关注偏高，仅作参考提示避免情绪追高。",
+            "当期关注较高",
+            "neutral",
+            "本次样本关注度较高，不代表持续升温。",
         )
+    if desk_count == 0:
+        return ("仅社区样本", "neutral", "本次没有可作对照的专业样本。")
     if street_heat >= 62 and street_score >= 28 and (desk_score <= 15 or gap >= 25):
-        return (
-            "散户过热",
-            "warn",
-            "散户看多拥挤度偏高而专业层偏谨慎，避免情绪追高，优先等回踩确认。",
-        )
+        return ("当期看多分歧", "neutral", "本次社区样本偏多，专业样本未显示相同倾向。")
     if street_score <= -25 and street_heat >= 50 and (desk_score >= -5 or desk_score - street_score >= 25):
-        return (
-            "恐慌见底",
-            "bull",
-            "散户恐慌情绪集中释放但专业层未同步看空，留意分批试探或止跌信号。",
-        )
+        return ("当期看空分歧", "neutral", "本次社区样本偏空，专业样本未显示相同倾向。")
     if abs(desk_score) >= 22 and street_heat < 58 and (
         (desk_score > 0 and -15 < street_score < 22) or (desk_score < 0 and -20 < street_score < 15)
     ):
         tone = "bull" if desk_score > 0 else "warn"
         hint = (
-            "专业层率先看多且大众尚未拥挤，具备顺势跟踪空间。"
+            "本次专业样本偏多，社区样本倾向不明显。"
             if desk_score > 0
-            else "专业层提前提示风险而散户尚未警觉，留意防守与减仓保护。"
+            else "本次专业样本偏空，社区样本倾向不明显。"
         )
-        return ("机构抢跑", tone, hint)
+        return ("专业倾向较强", tone, hint)
     if (
         (desk_score >= 15 and street_score <= -15)
         or (desk_score <= -15 and street_score >= 15)
@@ -2419,24 +2428,24 @@ def _judge_divergence(
         return (
             "多空分歧",
             "warn",
-            "专业判断与散户预期方向明显背离，短期易反复震荡，控制单边仓位。",
+            "本次专业与社区样本倾向不同。",
         )
     if desk_score >= 18 and street_score >= 18:
         return (
             "多头共振",
             "bull",
-            "专业层与散户方向一致偏多，顺势持有同时盯紧热度是否过快升温。",
+            "本次专业与社区样本同向偏多。",
         )
     if desk_score <= -20 and street_score <= -20:
         return (
             "同步谨慎",
             "bear",
-            "专业与大众情绪同步偏谨慎，防守控仓等待流动性与催化拐点。",
+            "本次专业与社区样本同向偏空。",
         )
     return (
         "情绪平稳",
         "neutral",
-        "专业层与散户分歧有限、交投温度中性，按既定节奏跟踪核心催化。",
+        "本次样本未显示明显的方向分歧。",
     )
 
 
@@ -2461,6 +2470,8 @@ def build_sentiment_divergence(
                     x for x in (ch.get("items") or [])
                     if isinstance(x, dict) and not has_private_article_text(json.dumps(x, ensure_ascii=False))
                 )
+
+    street_items = [item for item in street_items if not _is_quote_rank(item)]
 
     raw_market_pulse = pulse.get("market_pulse") if isinstance(pulse.get("market_pulse"), dict) else {}
     clean_market_pulse = project_market_pulse(raw_market_pulse)
@@ -2546,6 +2557,7 @@ def build_sentiment_divergence(
             desk_score,
             street_score,
             street_heat,
+            desk_count=len(d_pool),
             cn_crowd_count=len(cn_pool),
             cn_platform_count=cn_platform_count,
             xhs_count=xhs_count,
@@ -2732,12 +2744,17 @@ def build_sentiment_divergence(
         }
     )
 
-    # Strict <= 40KB payload guard
-    while len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES and result["hot_discussions"]:
-        result["hot_discussions"].pop()
+    return trim_forum_sentiment(result)
+
+
+def trim_forum_sentiment(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep public trend summaries ahead of low-priority discussion examples."""
+    hot = result.get("hot_discussions") or []
+    while len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES and hot:
+        hot.pop()
     while len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_OUTPUT_BYTES:
         trimmed = False
-        for d in result["divergences"]:
+        for d in result.get("divergences") or []:
             if len(d["desk_samples"]) > 1:
                 d["desk_samples"].pop()
                 trimmed = True

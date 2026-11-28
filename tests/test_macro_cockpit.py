@@ -10,6 +10,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -196,12 +197,56 @@ def test_persisted_cockpit_state_contract() -> None:
     _assert_state_contract(state)
 
 
-def test_live_state_refresh_generation_and_zero_baseline_invariant(tmp_path: Path) -> None:
-    """Run live signal_aggregator generation into tmp_path and verify baseline_pct==0 invariant."""
+def test_state_refresh_generation_and_zero_baseline_invariant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the real aggregator with replayed public providers and isolated writes."""
+    public = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    # Keep replay inputs current so the real ranking pipeline doesn't age them out.
+    now_bjt = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S%z")
+    rss = [{**row, "time_bjt": now_bjt, "is_backfill": False} for row in public["signals"]]
+    providers = {
+        "build_macro_fred": public["macro_fred"],
+        "fetch_us_equities": public["us_equities"],
+        "_collect_eqn_signals": [],
+        "_collect_aihot_signals": [],
+        "collect_curated_rss_signals": rss,
+        "fetch_sec_filings_map": {},
+        "collect_guru_articles": [],
+        "collect_guru_signals": [],
+        "build_kol_scorecards": public["kol_scorecards"],
+        "_collect_kol_digest": public["kol_digest"],
+        "compute_cross_asset_correlations": public["correlations"],
+        "build_stock_profiles": public["stock_profiles"],
+        "fetch_fx_snapshot": public["fx_snapshot"],
+        "fetch_crypto_quotes": public["crypto_quotes"],
+        "fetch_hybrid_perp_quotes": {},
+        "collect_curated_articles": [],
+        "build_opml_export": None,
+        "_collect_articles": public["articles"],
+        "get_push_channels_status": public["push_channels"],
+        "collect_forum_pulse": {
+            "updated_at_bjt": now_bjt,
+            "items": [{"title": "关注现货金", "topics": ["黄金与大宗"], "heat": 60, "score": 0}],
+        },
+    }
+    for name, value in providers.items():
+        monkeypatch.setattr(signal_aggregator, name, lambda *args, _value=value, **kwargs: _value)
+    monkeypatch.setattr(signal_aggregator, "COCKPIT_ROOT", tmp_path)
+    (tmp_path / "articles").mkdir()
+    render = signal_aggregator.generate_notion_viz_html
+    viz_path = tmp_path / "notion_viz_embed.html"
+    monkeypatch.setattr(
+        signal_aggregator, "generate_notion_viz_html",
+        lambda state, correlations: render(state, correlations, out_path=viz_path),
+    )
+    for name in ("QUANT_LATEST_PATH", "DECISION_BRIEF_PATH", "KOL_ROOT"):
+        monkeypatch.setattr(signal_aggregator, name, tmp_path / name.lower())
     out_file = tmp_path / "cockpit_state_test.json"
     state = signal_aggregator.generate_cockpit_state(refresh_fred=False, output_path=out_file)
-    assert out_file.is_file()
+    assert out_file.is_file() and viz_path.is_file()
     _assert_state_contract(state)
+    assert state["forum_sentiment"]["hot_discussions"][0]["title"] == "关注现货金"
 
     # Synthetic edge-case check: even if decision_brief has non-zero recommended_weight, baseline=0 wins
     synth_quant = {
@@ -2131,7 +2176,7 @@ def test_cloud_collector_preserves_prior_forum_matrix_quotes_and_articles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify CN cloud merge preserves pushed forum_sentiment, asset_source_matrix, hybrid crypto_quotes, and curated articles."""
-    from backend import cloud_collector, public_snapshot
+    from backend import cloud_collector, discussion_temperature, public_snapshot
 
     base = tmp_path / "vps_cloud"
     (base / "data").mkdir(parents=True)
@@ -2207,11 +2252,23 @@ def test_cloud_collector_preserves_prior_forum_matrix_quotes_and_articles(
     monkeypatch.setattr(cloud_collector, "compute_cross_asset_correlations", lambda *a, **kw: {})
     monkeypatch.setattr(cloud_collector, "build_asset_source_matrix", lambda *a, **kw: {"categories": []})
 
+    trend = discussion_temperature.discussion_trends({})
+    trend["debug"] = {"raw_posts": ["should not leave collector"]}
+    observed_paths = []
+
+    def collect_trend(data_dir: Path) -> dict:
+        observed_paths.append(data_dir)
+        return trend
+
+    monkeypatch.setattr(cloud_collector, "collect_public_discussion_trends", collect_trend)
     res = cloud_collector.run_cn_merge_and_publish(base)
     assert res["ok"] is True
     loaded = public_snapshot.load_published_generation(base)
     st2 = loaded["state"]
     assert st2["forum_sentiment"]["overall_crowd_temp"] == 61
+    assert observed_paths == [base / "data"]
+    assert st2["forum_sentiment"]["discussion_trends"]["assets"][0]["windows"][0]["state"] == "insufficient"
+    assert "debug" not in st2["forum_sentiment"]["discussion_trends"]
     assert st2["forum_sentiment"]["channels_status"][0]["id"] == "xueqiu"
     assert st2["asset_source_matrix"]["categories"][0]["id"] == "us_ai"
     assert st2["crypto_quotes"]["swap"]["QQQUSDT"]["price"] == "635.2"
@@ -2308,6 +2365,7 @@ def test_cloud_collector_cas_matrix_richness_fresher_quotes_and_feed_preserve(
         generation=1,
     )
 
+    monkeypatch.setattr(cloud_collector, "collect_public_discussion_trends", lambda _path: {})
     monkeypatch.setattr(cloud_collector, "KOL_ROOT", tmp_path / "no_kol")
     monkeypatch.setattr(cloud_collector, "_fetch_one_feed", lambda *a, **kw: [])
     monkeypatch.setattr(cloud_collector, "collect_cn_finance_wires", lambda *a, **kw: [])

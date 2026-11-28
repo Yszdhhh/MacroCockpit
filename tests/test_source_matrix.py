@@ -54,8 +54,32 @@ def test_industry_chain_map_size_leaders_and_cleanliness() -> None:
     assert len(data["resource_bridges"]) >= 3
 
 
-def test_build_asset_source_matrix_live_cache_contract() -> None:
-    matrix = build_asset_source_matrix()
+def test_build_asset_source_matrix_cache_contract(tmp_path: Path) -> None:
+    # Exercise the real JSON reader without using an untracked live KOL archive.
+    tracks = [
+        ("macro", "美债与美元", ["US10Y", "DOLLAR"]),
+        ("us-stocks", "半导体产业", ["NVDA", "MU"]),
+        ("cn-hk", "港股中概", ["BABA", "0700.HK"]),
+        ("crypto", "比特币链上", ["BTC", "ETH"]),
+        ("commodities", "黄金与原油", ["GOLD", "WTI"]),
+        ("quant", "指数因子", ["SP500", "QQQ"]),
+    ]
+    cache = tmp_path / "scorecards.json"
+    scorecards = [
+        {
+            "handle": f"fixture_{track_idx}_{i}",
+            "category": category,
+            "focus": focus,
+            "best_tickers": tickers,
+            "verified_calls": MIN_VERIFIED_SAMPLE + i,
+            "reliability_score": 82,
+            "win_rate_20d": 62.5,
+        }
+        for track_idx, (category, focus, tickers) in enumerate(tracks)
+        for i in range(4)
+    ]
+    cache.write_text(json.dumps({"scorecards": scorecards}, ensure_ascii=False), encoding="utf-8")
+    matrix = build_asset_source_matrix(scorecard_cache_path=cache)
     _assert_no_forbidden_recursive(matrix, "matrix")
 
     assert isinstance(matrix.get("updated_at_bjt"), str) and "+08:00" in matrix["updated_at_bjt"]
@@ -102,6 +126,12 @@ def test_build_asset_source_matrix_live_cache_contract() -> None:
     us_ai = next(c for c in cats if c["id"] == "us_ai_semi")
     nvda_bridge = next(b for b in us_ai["supply_chain_bridges"] if b["us_leader"] == "NVDA")
     assert any(a["symbol"] == "300476.SZ" and a["name"] == "胜宏科技" for a in nvda_bridge["a_shares"])
+
+    cold = build_asset_source_matrix(scorecard_cache_path=tmp_path / "missing-scorecards.json")
+    assert cold["summary"]["verified_kols_linked"] == 0
+    assert any(cat["top_kols"] for cat in cold["categories"])
+    for cat in cold["categories"]:
+        assert all(kol["reliability_badge"] == "定性观察" and kol["win_rate_20d"] is None for kol in cat["top_kols"])
 
 
 def test_dynamic_kol_sorting_and_small_sample_guard(tmp_path: Path) -> None:
