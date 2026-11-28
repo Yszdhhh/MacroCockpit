@@ -455,13 +455,6 @@
     });
   }
 
-  function formatMoney(num, signed) {
-    const n = toNum(num);
-    if (!Number.isFinite(n)) return "";
-    const sign = n < 0 ? "-" : signed && n > 0 ? "+" : "";
-    return sign + "$" + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
-  }
-
   function formatAssetPrice(num, curSym) {
     const n = toNum(num);
     if (!Number.isFinite(n) || n <= 0) return "";
@@ -849,6 +842,12 @@
     if (persist) safeStorageSet(STORAGE_KEYS.theme, appState.theme);
   }
 
+  function ensureOnline(msg) {
+    if (!appState.offline) return true;
+    showToast(msg || "共享离线快照只读", "error");
+    return false;
+  }
+
   function amtHtml(usd, opts) {
     if (!appState.showAmounts) {
       return '<span class="amt num is-masked" aria-label="金额已隐藏">••••</span>';
@@ -862,6 +861,13 @@
       return '<span class="amt num tone-flat">人民币估值不可用</span>';
     }
     return '<span class="' + cls + '">' + escapeHtml(formatDisplayMoney(v, o)) + "</span>";
+  }
+
+  function qtyHtml(qty) {
+    if (!appState.showAmounts) {
+      return '<span class="amt num is-masked" aria-label="数量已隐藏">••••</span>';
+    }
+    return escapeHtml(String(qty ?? "0"));
   }
 
   function applyShowAmounts(show, persist) {
@@ -2420,7 +2426,7 @@
               "<td>" + escapeHtml(r.symbol) + "</td>" +
               "<td>" + escapeHtml(r.asset_class_cn || r.asset_class || "现货") + "</td>" +
               "<td>" + escapeHtml(r.account_name || r.account_id || "主账户") + "</td>" +
-              '<td class="num">' + escapeHtml(String(r.qty ?? "0")) + "</td>" +
+              '<td class="num">' + qtyHtml(r.qty) + "</td>" +
               '<td class="num">' + escapeHtml(pxText) + "</td>" +
               '<td class="num">' + (mv != null ? amtHtml(mv) : "—") + "</td>" +
               '<td class="num">' + (upl != null ? amtHtml(upl, { signed: true, cls: toneClass(upl) }) : "—") + "</td>" +
@@ -2462,7 +2468,7 @@
               "<td>" + escapeHtml(d.symbol) + "</td>" +
               '<td><span class="badge ' + sideCls + '">' + sideLabel + "</span></td>" +
               "<td>" + modeLabel + "</td>" +
-              '<td class="num">' + escapeHtml(String(d.qty ?? "0")) + "</td>" +
+              '<td class="num">' + qtyHtml(d.qty) + "</td>" +
               '<td class="num">' + escapeHtml(formatPrice(d.entry_price)) + "</td>" +
               '<td class="num">' + escapeHtml(markText) + "</td>" +
               '<td class="num ' + (liqText === "无法估算" ? "tone-flat" : (Number.isFinite(buf) && buf < 15 ? "tone-down" : "")) + '">' + escapeHtml(liqText) + "</td>" +
@@ -2584,7 +2590,7 @@
   }
 
   function openPositionDrawer(kind, row) {
-    if (appState.offline) return showToast("共享离线快照只读，禁止录入持仓", "error");
+    if (!ensureOnline("共享离线快照只读，禁止录入持仓")) return;
     const r = row || {};
     dom.positionForm.reset();
     applyPositionFormKind(kind || "spot");
@@ -2611,7 +2617,7 @@
 
   async function submitPosition(e) {
     e.preventDefault();
-    if (appState.offline) return showToast("共享离线快照只读，禁止提交", "error");
+    if (!ensureOnline("共享离线快照只读，禁止提交")) return;
     if (!appState.showAmounts) return showToast("请先显示金额，再保存持仓", "error");
     const data = positionFormData();
     if (!data.symbol) return showToast("请填写资产代码", "error");
@@ -2648,7 +2654,7 @@
   }
 
   async function deletePortfolioRow(entity, id) {
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     if (!window.confirm("确定删除该条持仓记录？")) return;
     try {
       const rev = toNum((appState.workspace || {}).revision) || 0;
@@ -2676,7 +2682,7 @@
   }
 
   async function runImportPreview() {
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     const text = dom.impBody.value.trim();
     if (!text) return showToast("请先粘贴持仓文本或 CSV", "error");
     invalidateImportPreview();
@@ -2803,7 +2809,7 @@
   }
 
   async function saveCurationRule(opKind, data, idToDelete) {
-    if (appState.offline) return showToast("共享离线快照只读，禁止修改筛选规则", "error");
+    if (!ensureOnline("共享离线快照只读，禁止修改筛选规则")) return false;
     const ruleObj = opKind === "put" ? Object.assign({ id: "rule-" + Date.now() }, data) : null;
     try {
       const rev = toNum((appState.workspace || {}).revision) || 0;
@@ -4723,7 +4729,7 @@
   }
 
   async function setArticleStatus(status, withNote) {
-    if (appState.offline) return showToast("共享离线快照只读，禁止写入私人笔记", "error");
+    if (!ensureOnline("共享离线快照只读，禁止写入私人笔记")) return;
     const cur = appState.drawerArticle;
     if (!cur || !ARTICLE_STATUS_LABELS[status]) return;
     const payload = { filename: cur.filename, status };
@@ -4900,7 +4906,7 @@
 
   async function submitIngestDr(e) {
     e.preventDefault();
-    if (appState.offline) return showToast("共享离线快照只读，无法导入深研", "error");
+    if (!ensureOnline("共享离线快照只读，无法导入深研")) return;
     if (appState.busy.ingestDr) return;
     const title = dom.drTitleInput ? dom.drTitleInput.value.trim() : "";
     const tickers = dom.drTickersInput ? dom.drTickersInput.value.trim() : "";
@@ -5192,7 +5198,7 @@
   }
 
   function openReviewForm(row) {
-    if (appState.offline) return showToast("共享离线快照只读，禁止新建或编辑实操备忘", "error");
+    if (!ensureOnline("共享离线快照只读，禁止新建或编辑实操备忘")) return;
     const r = row || appState.drafts.review || {};
     dom.rvId.value = r.id ? String(r.id) : "";
     if (dom.rvRev) dom.rvRev.value = r.rev != null ? String(r.rev) : "";
@@ -5218,7 +5224,7 @@
 
   async function submitReview(event) {
     event.preventDefault();
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     const symbol = dom.rvSymbol.value.trim();
     const date = dom.rvDate.value;
     const size = Number(dom.rvSize.value || 0);
@@ -5261,7 +5267,7 @@
   }
 
   async function deleteReview(id) {
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     const row = arr(appState.journal.trade_reviews).find((r) => String(r.id) === String(id));
     if (!row) return;
     if (!window.confirm("确定删除这条复盘记录吗？删除后无法恢复。")) return;
@@ -5310,7 +5316,7 @@
   }
 
   function openEssayForm(row) {
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     const e = row || appState.drafts.essay || {};
     dom.esId.value = e.id ? String(e.id) : "";
     if (dom.esRev) dom.esRev.value = e.rev != null ? String(e.rev) : "";
@@ -5341,7 +5347,7 @@
 
   async function submitEssay(event) {
     event.preventDefault();
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     const title = dom.esTitle.value.trim();
     const body = dom.esBody.value.trim();
     if (!title) { dom.esTitle.focus(); return showToast("请填写标题", "error"); }
@@ -5373,7 +5379,7 @@
   }
 
   async function togglePinEssay(id) {
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     const e = findEssay(id);
     if (!e) return;
     try {
@@ -5383,7 +5389,7 @@
   }
 
   async function deleteEssay(id) {
-    if (appState.offline) return showToast("共享离线快照只读", "error");
+    if (!ensureOnline()) return;
     if (!findEssay(id)) return;
     if (!window.confirm("确定删除这篇随笔吗？删除后无法恢复。")) return;
     try {
@@ -5621,7 +5627,7 @@
   }
 
   async function refreshState() {
-    if (appState.offline) return showToast("共享离线快照只读，请在本地服务刷新数据");
+    if (!ensureOnline("共享离线快照只读，请在本地服务刷新数据")) return;
     if (appState.busy.refresh) return;
     appState.busy.refresh = true;
     dom.refreshBtn.classList.add("is-busy");
@@ -6056,7 +6062,7 @@
     if (hit("#closePosDrawerBtn") || hit("#pfCancelBtn")) return closeDrawer("position");
     if ((el = hit("#pfKindSeg [data-pfkind]"))) return applyPositionFormKind(el.getAttribute("data-pfkind"));
     if (hit("#openImportBtn")) {
-      if (appState.offline) return showToast("共享离线快照只读", "error");
+      if (!ensureOnline()) return;
       invalidateImportPreview();
       return openDrawer(dom.importDrawer, dom.impBody);
     }
@@ -6165,7 +6171,7 @@
     }
     if (hit("#articleSearchBtn")) return commitArticleKeyword();
     if (hit("#openIngestDrBtn")) {
-      if (appState.offline) return showToast("共享离线快照只读", "error");
+      if (!ensureOnline()) return;
       return openDrWorkbench();
     }
     if ((el = hit("#drModeSwitch [data-drmode]"))) {

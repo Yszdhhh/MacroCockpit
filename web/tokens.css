@@ -1,0 +1,109 @@
+/* 宏观决策情报站 · 权威设计令牌（Web 与 Desktop Pro 共用唯一来源）
+   亮色暖纸为默认，[data-theme="dark"] 为暖炭深色 */
+
+:root {
+  color-scheme: light;
+  --bg: #FAFAF9;
+  --surface: #FFFFFF;
+  --surface-2: #F4F3F0;
+  --paper-read: #FBFAF7;
+  --ink: #16140F;
+  --ink-2: #3A3733;
+  --sub: #6E675B;
+  --faint: #9A9284;
+  --rule: #E9E5DC;
+  --rule-strong: #D8D2C6;
+  --accent: #0E6E6E;
+  --accent-ink: #FFFFFF;
+  --accent-soft: rgba(14, 110, 110, 0.09);
+  --bull: #1F9D55;
+  --bull-soft: #E7F4EC;
+  --on-bull: #FFFFFF;
+  --bear: #D6453D;
+  --bear-soft: #FBEAE8;
+  --on-bear: #FFFFFF;
+  --warn: #B8873A;
+  --warn-soft: #FEF3C7;
+  --on-warn: #16140F;
+  --on-strong: #FFFFFF;
+  --neutral: #6B6459;
+  --neutral-soft: #F0EEE9;
+
+  --corr-pos: #0E6E6E;
+  --corr-pos-mid: #1F9D55;
+  --corr-mid: #F4F3F0;
+  --corr-neg: #D6453D;
+
+  --serif: "Instrument Serif", "LXGW WenKai", "Source Serif 4", "Noto Serif SC", Georgia, "Songti SC", serif;
+  --sans: "DM Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+  --maxw: 1380px;
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow-card: 0 1px 2px rgba(22, 20, 15, 0.04);
+  --shadow-control: 0 1px 2px rgba(22, 20, 15, 0.12);
+  --shadow-tab: 0 1px 2px rgba(22, 20, 15, 0.06);
+  --shadow-btn: 0 1px 2px rgba(22, 20, 15, 0.08);
+  --shadow-popover: 0 8px 24px rgba(22, 20, 15, 0.14);
+  --shadow-float: 0 12px 32px rgba(22, 20, 15, 0.16);
+  --shadow-toast: 0 8px 28px rgba(0, 0, 0, 0.18);
+  --shadow-undo: 0 10px 28px rgba(0, 0, 0, 0.22);
+  --shadow-sheet: 0 -12px 40px rgba(0, 0, 0, 0.22);
+  --shadow-thumb: 0 1px 4px rgba(0, 0, 0, 0.28);
+  --shadow-drawer: -18px 0 48px rgba(22, 20, 15, 0.16);
+  --chip-mkt-active-bg: rgba(255, 255, 255, 0.18);
+  --mast-bg: rgba(250, 250, 249, 0.90);
+  --tabbar-bg: rgba(250, 250, 249, 0.92);
+  --backdrop: rgba(22, 20, 15, 0.34);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #100F09;
+  --surface: #1A1915;
+  --surface-2: #22211B;
+  --paper-read: #171611;
+  --ink: #F5F4EF;
+  --ink-2: #DCDAD0;
+  --sub: #A39B8B;
+  --faint: #757268;
+  --rule: rgba(255, 255, 255, 0.09);
+  --rule-strong: rgba(255, 255, 255, 0.18);
+  --accent: #12CCD8;
+  --accent-ink: #071416;
+  --accent-soft: rgba(18, 204, 216, 0.12);
+  --bull: #34D399;
+  --bull-soft: rgba(52, 211, 153, 0.14);
+  --on-bull: #100F09;
+  --bear: #F87171;
+  --bear-soft: rgba(248, 113, 113, 0.14);
+  --on-bear: #100F09;
+  --warn: #FBBF24;
+  --warn-soft: rgba(251, 191, 36, 0.14);
+  --on-warn: #16140F;
+  --on-strong: #FFFFFF;
+  --neutral: #A8A59B;
+  --neutral-soft: rgba(168, 165, 155, 0.14);
+
+  --corr-pos: #19A7A0;
+  --corr-pos-mid: #2E9F6B;
+  --corr-mid: #22211B;
+  --corr-neg: #E0524A;
+
+  --shadow-card: none;
+  --shadow-control: none;
+  --shadow-tab: none;
+  --shadow-btn: none;
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.52);
+  --shadow-toast: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-undo: 0 10px 28px rgba(0, 0, 0, 0.50);
+  --shadow-sheet: 0 -12px 40px rgba(0, 0, 0, 0.55);
+  --shadow-thumb: 0 1px 4px rgba(0, 0, 0, 0.50);
+  --shadow-drawer: -18px 0 48px rgba(0, 0, 0, 0.5);
+  --chip-mkt-active-bg: rgba(16, 15, 9, 0.16);
+  --mast-bg: rgba(16, 15, 9, 0.88);
+  --tabbar-bg: rgba(16, 15, 9, 0.90);
+  --backdrop: rgba(0, 0, 0, 0.55);
+}

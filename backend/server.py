@@ -249,8 +249,9 @@ def build_static_bundle(
     state_path: Path = STATE_OUTPUT_PATH,
     out_path: Path = OFFLINE_HTML_PATH,
 ) -> Path:
-    """Bundle web/index.html, styles.css, app.js, and public-only state into single offline HTML (never includes journal)."""
+    """Bundle web/index.html, tokens.css, styles.css, app.js, and public-only state into single offline HTML (never includes journal)."""
     index_path = web_dir / "index.html"
+    tokens_path = web_dir / "tokens.css"
     css_path = web_dir / "styles.css"
     js_path = web_dir / "app.js"
     if not index_path.exists():
@@ -259,6 +260,7 @@ def build_static_bundle(
     raw_state = _load_or_build_state(state_path, role="standalone")
     state = project_public_state(raw_state, include_candidates=False)
     html_src = index_path.read_text(encoding="utf-8")
+    tokens_src = tokens_path.read_text(encoding="utf-8") if tokens_path.exists() else ""
     css_src = css_path.read_text(encoding="utf-8") if css_path.exists() else ""
     js_src = js_path.read_text(encoding="utf-8") if js_path.exists() else ""
 
@@ -271,7 +273,14 @@ def build_static_bundle(
     )
     init_script = f"<script>\nwindow.__INITIAL_COCKPIT_STATE__ = {state_json};\n</script>"
 
-    css_block = f"<style>\n{css_src}\n</style>"
+    html_src = re.sub(
+        r'<link[^>]+href=["\'](?:\./)?tokens\.css(?:\?[^"\']*)?["\'][^>]*>\s*',
+        "",
+        html_src,
+        flags=re.IGNORECASE,
+    )
+    merged_css = f"{tokens_src}\n{css_src}".strip()
+    css_block = f"<style>\n{merged_css}\n</style>"
     if "<!-- INLINE_CSS -->" in html_src:
         html_src = html_src.replace("<!-- INLINE_CSS -->", css_block, 1)
     elif re.search(r'<link[^>]+href=["\'](?:\./)?styles\.css(?:\?[^"\']*)?["\'][^>]*>', html_src, flags=re.IGNORECASE):

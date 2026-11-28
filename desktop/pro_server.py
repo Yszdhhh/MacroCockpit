@@ -170,6 +170,14 @@ class DesktopProHandler(BaseHTTPRequestHandler):
             self._send_bytes(200, html_txt.encode("utf-8"), "text/html; charset=utf-8")
             return
 
+        if clean == "tokens.css":
+            tokens_file = (_REPO_ROOT / "web" / "tokens.css").resolve()
+            if not tokens_file.is_file():
+                self._send_json(404, {"error": "not found"})
+                return
+            self._send_bytes(200, tokens_file.read_bytes(), "text/css; charset=utf-8")
+            return
+
         target = (ui_root / clean).resolve()
         try:
             target.relative_to(ui_root)
