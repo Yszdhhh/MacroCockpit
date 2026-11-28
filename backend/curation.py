@@ -5,6 +5,8 @@ import math
 import re
 from typing import Any
 
+from backend.kazike_engine import _ROUNDUP_RE as _ROUNDUP_CURATION_RE
+
 ALLOWED_RULE_KINDS: frozenset[str] = frozenset(
     {"instrument", "sector", "keyword", "regex", "topic", "source"}
 )
@@ -289,12 +291,20 @@ _INSTRUMENT_ALIASES: dict[str, tuple[str, ...]] = {
     "600519": ("贵州茅台", "茅台"),
     "300750": ("宁德时代",),
     "BTC": ("比特币", "bitcoin"),
+    "BTCUSDT": ("比特币", "bitcoin", "btc"),
+    "BNB": ("币安", "binance"),
     "ETH": ("以太坊", "ethereum"),
     "SOL": ("solana",),
     "XAU": ("黄金", "现货黄金", "金价"),
+    "PAXG": ("黄金", "现货黄金", "伦敦金", "金价", "gold", "xau", "gld"),
     "GLD": ("黄金", "现货黄金", "金价"),
     "IAU": ("黄金", "现货黄金", "金价"),
     "GC": ("黄金", "现货黄金", "金价"),
+    "QQQ": ("纳指", "纳斯达克", "纳斯达克100", "nasdaq", "ndx"),
+    "QQQUSDT": ("qqq", "纳指", "纳斯达克", "纳斯达克100", "nasdaq", "ndx"),
+    "ZHIPU": ("智谱", "智谱ai", "2513.hk", "02513", "glm", "chatglm", "autoglm"),
+    "ZHIPUUSDT": ("智谱", "智谱ai", "zhipu", "2513.hk", "02513", "glm", "chatglm", "autoglm"),
+    "2513": ("智谱", "智谱ai", "zhipu", "glm", "chatglm", "autoglm"),
 }
 
 _GENERIC_ALIAS_STOPWORDS: frozenset[str] = frozenset(
@@ -467,6 +477,8 @@ def _match_instrument_c(
     tickers = {str(t).upper() for t in (item.get("tickers") or []) if t}
     if s_up in tickers:
         return 1.0
+    if s_up in ("QQQ", "QQQUSDT", "SPY", "DIA", "IWM") and str(item.get("category") or "").strip().lower() == "crypto":
+        return 0.0
     title = str(item.get("title") or "")
     title_up = title.upper()
     title_low = title.lower()
@@ -683,7 +695,11 @@ def rank_curated_signals(
             if c_i > 0.0:
                 h_scores.append(h_info["w"] * c_i)
                 matched_holdings.append((sym, h_info["direction"], c_i))
-        h_val = max(h_scores) if h_scores else 0.0
+        h_raw_val = max(h_scores) if h_scores else 0.0
+        item_title = str(item.get("title") or "")
+        item_dir = str(item.get("direction") or "neutral").lower()
+        is_roundup_or_neutral = bool(_ROUNDUP_CURATION_RE.search(item_title)) or item_dir == "neutral"
+        h_val = round(h_raw_val * 0.45, 2) if (h_raw_val > 0.0 and is_roundup_or_neutral) else h_raw_val
 
         # W: watchlist (5*c_i) and sector (3*c_i) score
         w_scores: list[float] = []
@@ -812,6 +828,35 @@ def rank_curated_signals(
             ),
             reverse=True,
         )
+        # Enforce Top-15 category balance on un-filtered importance feed so crypto cannot flood head rows even on shorter pools
+        if (
+            scope_norm == "all"
+            and (not cat_norm or cat_norm == "all")
+            and not sub_norm
+            and not dir_norm
+            and not inst_norm
+            and not ev_norm
+            and len(ranked) > 2
+        ):
+            head_cap = 2
+            head_kept: list[dict[str, Any]] = []
+            non_crypto_tail: list[dict[str, Any]] = []
+            deferred_crypto: list[dict[str, Any]] = []
+            crypto_in_head = 0
+            for item in ranked:
+                is_cr = str(item.get("category") or "").lower() == "crypto"
+                if len(head_kept) < 15:
+                    if is_cr and crypto_in_head >= head_cap:
+                        deferred_crypto.append(item)
+                    else:
+                        head_kept.append(item)
+                        if is_cr:
+                            crypto_in_head += 1
+                elif is_cr:
+                    deferred_crypto.append(item)
+                else:
+                    non_crypto_tail.append(item)
+            ranked = head_kept + non_crypto_tail + deferred_crypto
 
     start = 0
     if cursor is not None and str(cursor).strip() != "":

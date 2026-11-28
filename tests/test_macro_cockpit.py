@@ -61,6 +61,8 @@ def _assert_state_contract(state: dict[str, Any]) -> None:
         "us_equities",
         "signals",
         "kol_digest",
+        "kol_scorecards",
+        "market_analysis",
         "articles",
         "push_channels",
     }
@@ -123,10 +125,37 @@ def _assert_state_contract(state: dict[str, Any]) -> None:
         assert str(sig["title"]).strip() != ""
 
     assert isinstance(state["kol_digest"], list) and len(state["kol_digest"]) >= 1
+    assert isinstance(state["kol_scorecards"], list)
+    for sc in state["kol_scorecards"]:
+        assert str(sc.get("handle") or "").strip() != ""
+        assert 0 <= int(sc.get("reliability_score") or 0) <= 100
+        assert sc.get("reliability_badge") in {"高胜率", "稳健参考", "观点敏锐", "样本积累", "定性观察", "反向警示"}
+        if int(sc.get("verified_calls") or 0) < 5:
+            assert sc.get("win_rate_5d") is None
+            assert sc.get("win_rate_20d") is None
+            assert sc.get("avg_edge_20d_pct") is None
+
+    ma = state["market_analysis"]
+    assert isinstance(ma, dict)
+    assert ma.get("stance") in {"偏多", "偏空", "中性"}
+    assert str(ma.get("headline_verdict") or "").strip() != ""
+    dims = ma.get("market_dimensions") or []
+    assert len(dims) == 4
+    for d in dims:
+        assert d.get("tone") in {"bull", "bear", "warn", "neutral"}
+        assert str(d.get("status") or "").strip() != ""
+        assert str(d.get("metric") or "").strip() != ""
+    links = ma.get("cross_source_links") or []
+    assert 5 <= len(links) <= 10
+
     assert isinstance(state["articles"], list)
     for art in state["articles"]:
         assert "异常告警" not in art["filename"]
         assert str(art["body_md"]).strip() != ""
+
+    cov = state.get("coverage") or {}
+    for cov_k in ("kol_digest_count", "kol_verified_authors_count", "guru_articles_count", "cross_links_count"):
+        assert isinstance(cov.get(cov_k), int) and cov[cov_k] >= 0
 
     expected_channels = {
         "feishu_dm",
@@ -142,12 +171,12 @@ def _assert_state_contract(state: dict[str, Any]) -> None:
         assert isinstance(ch_info["configured"], bool)
         assert isinstance(ch_info["label"], str) and ch_info["label"].strip()
 
-    # Forbidden internal jargon check on serialized state text
+    # Forbidden internal jargon & placeholder check on serialized state text
     serialized = json.dumps(state, ensure_ascii=False)
     for pat in FORBIDDEN_JARGON:
         assert not re.search(pat, serialized, flags=re.IGNORECASE), f"Forbidden jargon matched {pat} in state"
-    assert "待补" not in serialized
-    assert not re.search(r"\bN/A\b", serialized)
+    for term in FORBIDDEN_PLACEHOLDERS_AND_BANNERS:
+        assert term not in serialized, f"Forbidden placeholder/banner {term!r} found in state"
 
 
 def test_research_docs_exist_and_valid_utf8() -> None:
@@ -1493,7 +1522,12 @@ def test_opml_and_caffeine_brief_endpoints_and_ui_markers(tmp_path: Path) -> Non
             root = ET.fromstring(opml_xml)
             assert root.tag == "opml"
             rss_outlines = [el for el in root.iter("outline") if el.attrib.get("type") == "rss"]
-            assert len(rss_outlines) == 29
+            from backend.guru_sources import GURU_ARTICLE_FEEDS
+            assert len(rss_outlines) == 29 + len(GURU_ARTICLE_FEEDS)
+            xml_urls = [el.attrib.get("xmlUrl") for el in rss_outlines]
+            assert len(xml_urls) == len(set(xml_urls))
+            folder_titles = [el.attrib.get("title") for el in root.findall("./body/outline")]
+            assert "大佬分享与深度访谈" in folder_titles
 
         with urllib.request.urlopen(f"{base}/api/caffeine-brief.md?token=tok-opml-123", timeout=5) as resp:
             assert resp.status == 200
@@ -1767,4 +1801,657 @@ def test_eqn_fast_sync_skips_304_and_preserves_articles_on_200(tmp_path: Path) -
     assert [a.get("filename") for a in (st.get("articles") or [])] == ["feed_demo.md"]
     art = lookup_published_article(tmp_path, "feed_demo.md")
     assert art is not None and "Deep analysis body preserved across fast sync." in art["content"]
+
+
+def test_integrated_kol_scorecards_market_analysis_guru_articles_and_mcp(tmp_path: Path) -> None:
+    """Verify integrated guru_*.md source parsing, public_snapshot passthrough, live state, and MCP market_snapshot."""
+    from backend import mcp_server
+    from backend.public_snapshot import project_public_state, publish_generation
+
+    # 1. guru_*.md parses with source='大佬分享', author_role, and tickers
+    guru_md = tmp_path / "guru_sample_1234abcd.md"
+    guru_md.write_text(
+        "---\n"
+        'title: "Semiconductor Capex & AI Memory Outlook"\n'
+        'summary: "HBM and CoWoS capacity remain constrained across 2026."\n'
+        'publisher: "SemiAnalysis · 半导体深研"\n'
+        'author_role: "AI算力与半导体供应链"\n'
+        'tickers: ["NVDA", "TSM", "MU"]\n'
+        'url: "https://www.semianalysis.com/p/sample"\n'
+        "score: 91\n"
+        "---\n\n"
+        "# Semiconductor Capex & AI Memory Outlook\n\n"
+        "Detailed supply chain check for NVDA and TSMC.\n",
+        encoding="utf-8",
+    )
+    parsed_guru = signal_aggregator.parse_markdown_article(guru_md, "同步深度长文")
+    assert parsed_guru is not None
+    assert parsed_guru["source"] == "大佬分享"
+    assert parsed_guru["author_role"] == "AI算力与半导体供应链"
+    assert parsed_guru["tickers"] == ["NVDA", "TSM", "MU"]
+    assert parsed_guru["score"] == 91
+
+    # 2. Live cockpit_state.json contains 大佬分享 articles, verified kol_scorecards, and market_analysis
+    state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    _assert_state_contract(state)
+    guru_articles = [a for a in (state.get("articles") or []) if a.get("source") == "大佬分享"]
+    assert len(guru_articles) >= 1
+    assert any(a.get("filename", "").startswith("guru_") for a in guru_articles)
+    assert any(int(c.get("verified_calls") or 0) >= 5 for c in (state.get("kol_scorecards") or []))
+
+    # 3. public_snapshot safely passes through kol_scorecards and market_analysis while stripping private keys
+    proj = project_public_state({**state, "journal": {"secret": "PRIVATE_X"}})
+    assert "journal" not in proj
+    assert len(proj.get("kol_scorecards") or []) == len(state["kol_scorecards"])
+    assert (proj.get("market_analysis") or {}).get("stance") == state["market_analysis"]["stance"]
+
+    # 4. MCP market_snapshot exposes market_analysis & kol_consensus for READ_ONLY callers
+    publish_generation(tmp_path, state, [], generation=1)
+    disp = mcp_server.McpDispatcher(store=None, base_dir=tmp_path)
+    res, err = disp._call_tool("market_snapshot", {}, role="READ_ONLY", actor_id="test-ro")
+    assert err is None and res["isError"] is False
+    sc = res["structuredContent"]
+    assert isinstance(sc.get("market_analysis"), dict)
+    assert sc["market_analysis"]["stance"] in {"偏多", "偏空", "中性"}
+    assert len(sc["market_analysis"]["market_dimensions"]) == 4
+    assert isinstance(sc.get("kol_consensus"), dict)
+    assert sc["kol_consensus"]["verified_authors_count"] >= 1
+    assert len(sc["kol_consensus"]["top_kols"]) >= 1
+    serialized_sc = json.dumps(sc, ensure_ascii=False)
+    for pat in FORBIDDEN_JARGON:
+        assert not re.search(pat, serialized_sc, flags=re.IGNORECASE)
+    for term in FORBIDDEN_PLACEHOLDERS_AND_BANNERS:
+        assert term not in serialized_sc
+
+
+def test_phase2_integration_contract_ingest_and_mcp(tmp_path: Path) -> None:
+    """Verify Phase 2 integration: PUBLIC_STATE_KEYS, 周月度深研 sorting, /api/research/ingest, live state, and MCP."""
+    from backend import mcp_server
+    from backend.public_snapshot import PUBLIC_STATE_KEYS, project_public_state, publish_generation
+
+    # 1. PUBLIC_STATE_KEYS exposes forum_sentiment and asset_source_matrix
+    assert "forum_sentiment" in PUBLIC_STATE_KEYS
+    assert "asset_source_matrix" in PUBLIC_STATE_KEYS
+
+    # 2. parse_markdown_article & _sort_and_balance_articles classify and prioritize 周月度深研 without false dedup
+    weekly_md = tmp_path / "weekly_2026-W48.md"
+    weekly_md.write_text(
+        "---\n"
+        'title: "2026年第48周宏观与多资产深研决策周报（2026-11-26）"\n'
+        'summary: "本周风控偏谨慎，优先保留趋势确认后的右侧仓位。"\n'
+        'publisher: "本地深研周报"\n'
+        'report_kind: "weekly"\n'
+        "score: 94\n"
+        "---\n\n"
+        "# 2026年第48周宏观与多资产深研决策周报（2026-11-26）\n\n"
+        "本周核心策略与跨资产观察。\n",
+        encoding="utf-8",
+    )
+    monthly_md = tmp_path / "monthly_2026-11.md"
+    monthly_md.write_text(
+        "---\n"
+        'title: "2026年11月宏观与多资产深研决策月报（2026-11-26）"\n'
+        'summary: "本月流动性中性偏紧，黄金与美股算力龙头保持结构分化。"\n'
+        'publisher: "本地深研月报"\n'
+        'report_kind: "monthly"\n'
+        "score: 95\n"
+        "---\n\n"
+        "# 2026年11月宏观与多资产深研决策月报（2026-11-26）\n\n"
+        "本月跨市场配置与追踪。\n",
+        encoding="utf-8",
+    )
+    custom_dr_md = tmp_path / "custom_report_note.md"
+    custom_dr_md.write_text(
+        "---\n"
+        'title: "算力资本开支补充深研"\n'
+        'report_kind: "deep_research"\n'
+        "score: 90\n"
+        "---\n\n"
+        "# 算力资本开支补充深研\n\n"
+        "AI 推理需求持续扩张。\n",
+        encoding="utf-8",
+    )
+    p_w = signal_aggregator.parse_markdown_article(weekly_md, "同步深度长文")
+    p_m = signal_aggregator.parse_markdown_article(monthly_md, "同步深度长文")
+    p_d = signal_aggregator.parse_markdown_article(custom_dr_md, "同步深度长文")
+    assert p_w is not None and p_w["source"] == "周月度深研"
+    assert p_m is not None and p_m["source"] == "周月度深研"
+    assert p_d is not None and p_d["source"] == "周月度深研"
+
+    balanced = signal_aggregator._sort_and_balance_articles(
+        [
+            {"filename": "guru_x.md", "title": "Guru Essay", "source": "大佬分享", "score": 98, "mtime": "2026-11-26 10:00"},
+            p_w,
+            p_m,
+            p_d,
+        ]
+    )
+    assert balanced[0]["source"] == "周月度深研"
+    periodic_names = {a["filename"] for a in balanced if a.get("source") == "周月度深研"}
+    assert periodic_names == {"weekly_2026-W48.md", "monthly_2026-11.md", "custom_report_note.md"}
+
+    # 3. Live cockpit_state.json contains Phase 2 sections, bounded size, and zero forbidden terms
+    state_bytes = STATE_PATH.read_bytes()
+    assert len(state_bytes) <= int(1.8 * 1024 * 1024), f"cockpit_state.json too large: {len(state_bytes)} bytes"
+    state = json.loads(state_bytes.decode("utf-8"))
+    _assert_state_contract(state)
+    assert isinstance(state.get("forum_sentiment"), dict)
+    assert len(state["forum_sentiment"].get("divergences") or []) == 6
+    assert isinstance(state.get("asset_source_matrix"), dict)
+    assert len(state["asset_source_matrix"].get("categories") or []) == 6
+    cov = state.get("coverage") or {}
+    for k in ("forum_items_count", "source_matrix_count", "periodic_reports_count"):
+        assert isinstance(cov.get(k), int) and cov[k] >= 0
+    assert cov["source_matrix_count"] == 6
+    assert cov["periodic_reports_count"] >= 2
+    assert any(a.get("source") == "周月度深研" for a in (state.get("articles") or []))
+
+    # 4. public_snapshot passes through Phase 2 sections
+    proj = project_public_state({**state, "journal": {"secret": "PRIVATE_X"}})
+    assert "journal" not in proj
+    assert len((proj.get("forum_sentiment") or {}).get("divergences") or []) == 6
+    assert len((proj.get("asset_source_matrix") or {}).get("categories") or []) == 6
+
+    # 5. MCP market_snapshot schema enum & output include forum_sentiment & asset_source_matrix
+    ms_tool = next(t for t in mcp_server.TOOL_DEFINITIONS if t["name"] == "market_snapshot")
+    ms_enum = ms_tool["inputSchema"]["properties"]["include"]["items"]["enum"]
+    assert "forum_sentiment" in ms_enum
+    assert "asset_source_matrix" in ms_enum
+
+    mcp_dir = tmp_path / "mcp_root"
+    publish_generation(mcp_dir, state, [], generation=1)
+    disp = mcp_server.McpDispatcher(store=None, base_dir=mcp_dir)
+    res, err = disp._call_tool(
+        "market_snapshot",
+        {"include": ["forum_sentiment", "asset_source_matrix"]},
+        role="READ_ONLY",
+        actor_id="test-ro",
+    )
+    assert err is None and res["isError"] is False
+    sc = res["structuredContent"]
+    assert len((sc.get("forum_sentiment") or {}).get("divergences") or []) == 6
+    assert len((sc.get("asset_source_matrix") or {}).get("categories") or []) == 6
+
+    # 6. HTTP POST /api/research/ingest: consumer 403, empty 400, private 400, valid 200 + GET /api/article
+    def _post_json(base_url: str, route: str, payload: dict[str, Any], token: str) -> tuple[int, dict[str, Any]]:
+        req = urllib.request.Request(
+            f"{base_url}{route}",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    # 6a. Consumer mode disabled
+    cons_dir = tmp_path / "cons_srv"
+    (cons_dir / "data").mkdir(parents=True)
+    (cons_dir / "data" / "cockpit_state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    cons_srv = server.create_server(
+        "127.0.0.1",
+        0,
+        state_path=cons_dir / "data" / "cockpit_state.json",
+        db_path=cons_dir / "data" / "user_journal.db",
+        articles_dir=cons_dir / "articles",
+        role="consumer",
+        access_password="pw",
+        rw_token="rw-tok",
+        sync_token="sync-tok",
+    )
+    cons_t = threading.Thread(target=cons_srv.serve_forever, daemon=True)
+    cons_t.start()
+    try:
+        cons_url = f"http://127.0.0.1:{cons_srv.server_port}"
+        st_code, body = _post_json(cons_url, "/api/research/ingest", {"body_md": "# Hello\n\nValid text"}, "rw-tok")
+        assert st_code == 403 and body.get("error") == "consumer_mode_ingest_disabled"
+    finally:
+        cons_srv.shutdown()
+        cons_srv.server_close()
+
+    # 6b. Standalone mode validation, privacy block, and full ingest -> GET /api/article + /api/state
+    st_dir = tmp_path / "standalone_srv"
+    (st_dir / "data").mkdir(parents=True)
+    (st_dir / "articles").mkdir(parents=True)
+    st_path = st_dir / "data" / "cockpit_state.json"
+    st_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    srv = server.create_server(
+        "127.0.0.1",
+        0,
+        state_path=st_path,
+        db_path=st_dir / "data" / "user_journal.db",
+        articles_dir=st_dir / "articles",
+        role="standalone",
+        rw_token="rw-tok",
+    )
+    srv_t = threading.Thread(target=srv.serve_forever, daemon=True)
+    srv_t.start()
+    try:
+        base_url = f"http://127.0.0.1:{srv.server_port}"
+        c_empty, _ = _post_json(base_url, "/api/research/ingest", {"body_md": "   "}, "rw-tok")
+        assert c_empty == 400
+
+        c_priv, b_priv = _post_json(
+            base_url,
+            "/api/research/ingest",
+            {"title": "Leak", "body_md": "实际持仓明细 sk-1234567890abcdef"},
+            "rw-tok",
+        )
+        assert c_priv == 400 and "拦截" in str(b_priv.get("error") or "")
+        assert list((st_dir / "articles").glob("dr_*.md")) == []
+
+        c_ok, b_ok = _post_json(
+            base_url,
+            "/api/research/ingest",
+            {
+                "title": "NVDA 与算力链深度研报",
+                "tickers": ["NVDA", "TSM"],
+                "related_period": "2026-W48",
+                "body_md": "# NVDA 与算力链深度研报\n\nCoWoS 产能与数据中心网络交换机需求维持景气。",
+            },
+            "rw-tok",
+        )
+        assert c_ok == 200 and b_ok.get("ok") is True
+        art = b_ok["article"]
+        fname = art["filename"]
+        assert fname.startswith("dr_") and art["source"] == "周月度深研"
+        assert (st_dir / "articles" / fname).is_file()
+
+        with urllib.request.urlopen(f"{base_url}/api/article?file={urllib.parse.quote(fname)}", timeout=5) as resp:
+            got_art = json.loads(resp.read().decode("utf-8"))
+        assert got_art["filename"] == fname
+        assert got_art["source"] == "周月度深研"
+        assert "CoWoS" in got_art["body_md"]
+
+        with urllib.request.urlopen(f"{base_url}/api/state", timeout=5) as resp:
+            got_state = json.loads(resp.read().decode("utf-8"))
+        assert got_state["articles"][0]["filename"] == fname
+        assert got_state["articles"][0]["source"] == "周月度深研"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_local_passwordless_standalone_and_login_redirect(tmp_path: Path) -> None:
+    """Verify loopback standalone passwordless mode allows /, /api/state, /api/v2/workspace and redirects /login -> /."""
+    st_dir = tmp_path / "open_srv"
+    (st_dir / "data").mkdir(parents=True)
+    st_path = st_dir / "data" / "cockpit_state.json"
+    st_path.write_text(STATE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+
+    srv = server.create_server(
+        "127.0.0.1",
+        0,
+        web_dir=WEB_DIR,
+        state_path=st_path,
+        db_path=st_dir / "data" / "user_journal.db",
+        articles_dir=st_dir / "articles",
+        access_password="",
+        role="standalone",
+    )
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_port}"
+        with urllib.request.urlopen(f"{base}/api/health", timeout=5) as resp:
+            health = json.loads(resp.read().decode("utf-8"))
+        assert health["auth_enabled"] is False
+
+        with urllib.request.urlopen(f"{base}/api/state", timeout=5) as resp:
+            assert resp.status == 200
+            st_body = json.loads(resp.read().decode("utf-8"))
+        assert "positions" in st_body and "journal" in st_body
+
+        with urllib.request.urlopen(f"{base}/api/v2/workspace", timeout=5) as resp:
+            assert resp.status == 200
+            ws = json.loads(resp.read().decode("utf-8"))
+        assert "spot_balances" in ws and "derivative_positions" in ws
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedirect())
+        with pytest.raises(urllib.error.HTTPError) as exc_302:
+            opener.open(f"{base}/login", timeout=5)
+        assert exc_302.value.code == 302
+        assert exc_302.value.headers.get("Location") == "/"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=3)
+
+
+def test_cloud_collector_preserves_prior_forum_matrix_quotes_and_articles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify CN cloud merge preserves pushed forum_sentiment, asset_source_matrix, hybrid crypto_quotes, and curated articles."""
+    from backend import cloud_collector, public_snapshot
+
+    base = tmp_path / "vps_cloud"
+    (base / "data").mkdir(parents=True)
+    seed_state = {
+        "schema_version": 2,
+        "generation": 1,
+        "generated_at_bjt": "2026-11-27 12:00:00+08:00",
+        "risk_gate": {"light": "YELLOW", "long_risk_cap": 1.0, "label": "均衡控险"},
+        "positions": [],
+        "strategy_targets": {"sample_capital_usd": 100000, "long_risk_cap": 1.0, "targets": [], "by_id": {}},
+        "macro_fred": [],
+        "us_equities": {"indices": [], "mag7_and_ai": [], "sectors": []},
+        "stock_profiles": {},
+        "signals": [],
+        "signal_candidates": [],
+        "kazike_stats": {"source_count": 1},
+        "correlations": {},
+        "kol_digest": [],
+        "kol_scorecards": [],
+        "market_analysis": {},
+        "forum_sentiment": {
+            "updated_at_bjt": "2026-11-27 12:00",
+            "overall_crowd_temp": 61,
+            "overall_label": "偏暖活跃",
+            "channels_status": [{"id": "xueqiu", "name": "雪球社区", "status": "实时在线", "count": 20}],
+            "divergences": [{"topic": "美股AI与科技", "crowd_temp": 62, "divergence_label": "情绪一致"}],
+            "hot_discussions": [{"channel": "雪球", "title": "英伟达财报后分歧", "url": "https://xueqiu.com"}],
+        },
+        "asset_source_matrix": {
+            "categories": [{"id": "us_ai", "name": "美股 AI 与科技", "sources": []}],
+        },
+        "crypto_quotes": {
+            "status": "ok",
+            "quotes": {"QQQUSDT": {"inst_id": "QQQUSDT", "price": "635.2"}},
+            "spot": {"BTC-USDT": {"inst_id": "BTC-USDT", "price": "61500"}},
+            "swap": {"QQQUSDT": {"inst_id": "QQQUSDT", "price": "635.2"}},
+        },
+        "articles": [
+            {
+                "filename": "weekly_2026-W48.md",
+                "title": "第48周投资辅助决策报告",
+                "source": "周月度深研",
+                "mtime": "2026-11-27 12:00",
+                "excerpt": "第48周摘要",
+            }
+        ],
+        "push_channels": {},
+        "calendar_events": [],
+        "fx_snapshot": {"pair": "USD/CNH", "rate": "6.69", "status": "ok"},
+        "coverage": {"forum_items_count": 20, "source_matrix_count": 1},
+    }
+    seed_articles = [{"filename": "weekly_2026-W48.md", "content": "# 第48周投资辅助决策报告\n\n周度观察正文。"}]
+    public_snapshot.publish_generation(base, seed_state, seed_articles, producer_id="windows-primary", generation=1)
+    # Remove compat articles copy so preservation from gen_1/articles is also exercised
+    (base / "articles" / "weekly_2026-W48.md").unlink()
+
+    monkeypatch.setattr(cloud_collector, "KOL_ROOT", tmp_path / "nonexistent_kol")
+    monkeypatch.setattr(cloud_collector, "_fetch_one_feed", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "collect_cn_finance_wires", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "collect_equation_news_with_meta", lambda *a, **kw: ([], {"changed": False}))
+    monkeypatch.setattr(cloud_collector, "_fetch_article_candidates_from_feed", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_fetch_cls_depth_candidates", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_fetch_wscn_hot_articles", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_fetch_aihot_hot_articles", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_collect_aihot_signals", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "collect_guru_articles", None)
+    monkeypatch.setattr(cloud_collector, "collect_guru_signals", None)
+    monkeypatch.setattr(cloud_collector, "fetch_sec_filings_map", lambda *a, **kw: {})
+    monkeypatch.setattr(cloud_collector, "fetch_us_equities", lambda *a, **kw: {"indices": [], "mag7_and_ai": [], "sectors": []})
+    monkeypatch.setattr(cloud_collector, "fetch_fx_snapshot", lambda *a, **kw: {"pair": "USD/CNH", "rate": "6.69", "status": "ok"})
+    monkeypatch.setattr(cloud_collector, "_load_cn_stock_profiles", lambda *a, **kw: {})
+    monkeypatch.setattr(cloud_collector, "build_macro_fred", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "compute_cross_asset_correlations", lambda *a, **kw: {})
+    monkeypatch.setattr(cloud_collector, "build_asset_source_matrix", lambda *a, **kw: {"categories": []})
+
+    res = cloud_collector.run_cn_merge_and_publish(base)
+    assert res["ok"] is True
+    loaded = public_snapshot.load_published_generation(base)
+    st2 = loaded["state"]
+    assert st2["forum_sentiment"]["overall_crowd_temp"] == 61
+    assert st2["forum_sentiment"]["channels_status"][0]["id"] == "xueqiu"
+    assert st2["asset_source_matrix"]["categories"][0]["id"] == "us_ai"
+    assert st2["crypto_quotes"]["swap"]["QQQUSDT"]["price"] == "635.2"
+    assert any(a["filename"] == "weekly_2026-W48.md" and a["source"] == "周月度深研" for a in st2["articles"])
+    assert st2["coverage"]["forum_items_count"] == 20
+
+    index_html = (COCKPIT_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert 'data-rsub="sentiment"' in index_html
+    assert 'id="view-sentiment"' in index_html
+    assert 'data-rsub-panel="sentiment"' in index_html
+    assert 'id="todaySentimentCard"' in index_html
+    assert 'data-mtab="today"' in index_html
+    assert all(ch not in index_html for ch in ("◧", "◈", "▤", "✎"))
+
+    from backend import kazike_engine, rss_sources
+
+    assert rss_sources.strip_emojis("🔴 MU 较昨收下跌 12.6% 🎉") == "MU 较昨收下跌 12.6%"
+    assert rss_sources.strip_emojis("BTC 1️⃣") == "BTC 1"
+    assert "✓" in rss_sources.strip_emojis("✓ 已核验")
+    assert rss_sources._scrub_forbidden("量化E21信号") == "量化波动结构信号"
+    assert rss_sources._dedup_summary(
+        "收评：创业板指放量大涨超11%",
+        "【收评：创业板指放量大涨超11%】财联社11月27日电，市场午后快速反弹",
+    ) == "市场午后快速反弹"
+    assert rss_sources._dedup_summary("MU 较昨收下跌 12.6%", "MU 较昨收下跌 12.6%") == ""
+    assert rss_sources._dedup_summary("美债收益率 +0.4%", "美债收益率 -0.4%") == "美债收益率 -0.4%"
+    assert rss_sources._dedup_summary("美债收益率 +0.4%", "美债收益率 －0.4%") == "美债收益率 －0.4%"
+    assert rss_sources._dedup_summary("BTC 跌至 100000", "BTC 跌至 10000") == "BTC 跌至 10000"
+    assert rss_sources._dedup_summary("美联储维持利率不变", "【美联储维持利率不变，两票反对】市场交投清淡") == "【美联储维持利率不变，两票反对】市场交投清淡"
+    assert rss_sources._dedup_summary("美联储维持利率不变", "美联储维持利率不变，两票反对") == "美联储维持利率不变，两票反对"
+    rss_xml = (
+        '<rss version="2.0"><channel>'
+        "<item><title>Crypto update</title><description>Crypto update, regulators ban exchange flows</description>"
+        "<link>https://example.com/ban</link><pubDate>Fri, 27 Nov 2026 09:00:00 +0000</pubDate></item>"
+        "</channel></rss>"
+    )
+    parsed_ban = rss_sources.parse_feed_xml(rss_xml, {"id": "t", "source": "Test", "category": "crypto", "tier": "T1_5"})
+    assert parsed_ban and parsed_ban[0]["direction"] == "bearish"
+    assert rss_sources._normalize_equation_item({"no": 1, "zh": "KGEN、FLR 新增交易支持公告 (BTC、USDT 市场)"}, "main") is None
+    assert kazike_engine.prefilter_financial({"title": "某学者再获数学大奖！攻克近140年数学难题", "summary": "淡泊名利"})[0] == "BLOCK"
+
+
+def test_cloud_collector_cas_matrix_richness_fresher_quotes_and_feed_preserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify CAS preserves concurrent upstream publish, preserves richer matrix, picks newer quotes, and retains feed_ articles."""
+    from backend import cloud_collector, public_snapshot
+
+    base = tmp_path / "vps_cas"
+    (base / "data").mkdir(parents=True)
+    # Seed stale local crypto cache
+    (base / "data" / "crypto_quotes_cache.json").write_text(
+        json.dumps(
+            {
+                "payload": {
+                    "quotes": {
+                        "BTC": {"price": "59000", "market_at": "2026-11-27T10:00:00+08:00"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    gen1_state = {
+        "schema_version": 2,
+        "generation": 1,
+        "generated_at_bjt": "2026-11-27 12:00:00+08:00",
+        "risk_gate": {"light": "YELLOW", "long_risk_cap": 1.0, "label": "均衡"},
+        "positions": [],
+        "signals": [],
+        "articles": [{"filename": "feed_kept_prev_123456.md", "title": "旧代精选长文", "source": "同步深度长文"}],
+        "forum_sentiment": {"overall_crowd_temp": 45, "overall_label": "冷清", "channels_status": [{"id": "xueqiu", "count": 5}]},
+        "asset_source_matrix": {
+            "categories": [
+                {
+                    "id": "us_ai",
+                    "name": "美股 AI",
+                    "supply_chain_bridges": [{"us_leader": "NVDA"}],
+                    "top_kols": [{"handle": "a"}],
+                }
+            ]
+        },
+        "crypto_quotes": {
+            "quotes": {
+                "BTC": {"price": "62000", "market_at": "2026-11-27T13:00:00+08:00"},
+            }
+        },
+    }
+    public_snapshot.publish_generation(
+        base,
+        gen1_state,
+        [{"filename": "feed_kept_prev_123456.md", "content": "# 旧代精选长文\n\n" + ("有效长文内容测试。" * 40)}],
+        producer_id="windows-primary",
+        generation=1,
+    )
+
+    monkeypatch.setattr(cloud_collector, "KOL_ROOT", tmp_path / "no_kol")
+    monkeypatch.setattr(cloud_collector, "_fetch_one_feed", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "collect_cn_finance_wires", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "collect_equation_news_with_meta", lambda *a, **kw: ([], {"changed": False}))
+    monkeypatch.setattr(cloud_collector, "_fetch_article_candidates_from_feed", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_fetch_cls_depth_candidates", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_fetch_wscn_hot_articles", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_fetch_aihot_hot_articles", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "_collect_aihot_signals", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "collect_guru_articles", None)
+    monkeypatch.setattr(cloud_collector, "collect_guru_signals", None)
+    monkeypatch.setattr(cloud_collector, "fetch_sec_filings_map", lambda *a, **kw: {})
+    monkeypatch.setattr(cloud_collector, "fetch_us_equities", lambda *a, **kw: {"indices": [], "mag7_and_ai": [], "sectors": []})
+    monkeypatch.setattr(cloud_collector, "fetch_fx_snapshot", lambda *a, **kw: {"pair": "USD/CNH", "rate": "6.69", "status": "ok"})
+    monkeypatch.setattr(cloud_collector, "build_macro_fred", lambda *a, **kw: [])
+    monkeypatch.setattr(cloud_collector, "compute_cross_asset_correlations", lambda *a, **kw: {})
+    # Rebuild returns 6 empty categories without bridges/kols (like VPS without chain map)
+    monkeypatch.setattr(
+        cloud_collector,
+        "build_asset_source_matrix",
+        lambda *a, **kw: {"categories": [{"id": f"c{i}", "supply_chain_bridges": [], "top_kols": []} for i in range(6)]},
+    )
+
+    injected = {"done": False}
+
+    def _mock_profiles_with_concurrent_publish(*args, **kwargs):
+        if not injected["done"]:
+            injected["done"] = True
+            gen2_state = {
+                **gen1_state,
+                "generation": 2,
+                "generated_at_bjt": "2026-11-27 12:05:00+08:00",
+                "forum_sentiment": {"overall_crowd_temp": 77, "overall_label": "偏热", "channels_status": [{"id": "xueqiu", "count": 28}]},
+            }
+            public_snapshot.publish_generation(
+                base,
+                gen2_state,
+                [{"filename": "feed_kept_prev_123456.md", "content": "# 旧代精选长文\n\n" + ("有效长文内容测试。" * 40)}],
+                producer_id="windows-primary",
+                generation=2,
+            )
+        return {}
+
+    monkeypatch.setattr(cloud_collector, "_load_cn_stock_profiles", _mock_profiles_with_concurrent_publish)
+
+    res = cloud_collector.run_cn_merge_and_publish(base)
+    assert res["ok"] is True
+    assert res["generation"] == 3
+    loaded = public_snapshot.load_published_generation(base)
+    st3 = loaded["state"]
+    # Concurrent Windows gen=2 forum_sentiment was preserved, not overwritten with gen=1
+    assert st3["forum_sentiment"]["overall_crowd_temp"] == 77
+    # Richer upstream matrix was preserved instead of 6 empty categories
+    assert st3["asset_source_matrix"]["categories"][0]["supply_chain_bridges"][0]["us_leader"] == "NVDA"
+    # Newer timestamp BTC quote (62000 @ 13:00) beat stale cached quote (59000 @ 10:00)
+    assert st3["crypto_quotes"]["quotes"]["BTC"]["price"] == "62000"
+    # Previous feed_ article survived
+    assert any(a["filename"] == "feed_kept_prev_123456.md" for a in st3["articles"])
+
+    # #7: English portfolio/cash phrase blocked in has_private_article_content & dr_ ingest
+    from backend.public_snapshot import has_private_article_content
+
+    assert has_private_article_content({"title": "Note", "body_md": "Current portfolio: SPY 50 shares. Cash on hand: $12,500."}) is True
+
+    # #11: Funding-only OKX record with newer timestamp & mark_price=None, price=None MUST NOT overwrite valid mark price
+    merged_q = cloud_collector._merge_fresher_quotes(
+        {"BTC-USDT-SWAP": {"price": None, "mark_price": None, "funding_rate": "-0.0001", "market_at": "2026-11-27T14:00:00+08:00"}},
+        {"BTC-USDT-SWAP": {"price": "62000", "mark_price": "62000", "market_at": "2026-11-27T13:00:00+08:00"}},
+    )
+    assert merged_q["BTC-USDT-SWAP"]["mark_price"] == "62000"
+    assert merged_q["BTC-USDT-SWAP"]["funding_rate"] == "-0.0001"
+
+    # #10: Initial prior_gen=0 concurrent Windows gen=1 forces CAS retry -> preserves Windows gen=1 & publishes gen=2
+    base_init = tmp_path / "vps_cas_init"
+    (base_init / "data").mkdir(parents=True)
+    inj_init = {"done": False}
+
+    def _mock_profiles_race_init(*args, **kwargs):
+        if not inj_init["done"]:
+            inj_init["done"] = True
+            public_snapshot.publish_generation(
+                base_init,
+                {**gen1_state, "generation": 1, "forum_sentiment": {"overall_crowd_temp": 88, "channels_status": [{"id": "xueqiu", "count": 9}]}},
+                [],
+                producer_id="windows-primary",
+                generation=1,
+            )
+        return {}
+
+    monkeypatch.setattr(cloud_collector, "_load_cn_stock_profiles", _mock_profiles_race_init)
+    res_init = cloud_collector.run_cn_merge_and_publish(base_init)
+    assert res_init["generation"] == 2
+    assert public_snapshot.load_published_generation(base_init)["state"]["forum_sentiment"]["overall_crowd_temp"] == 88
+
+    # #10b: Continuous CAS conflicts raise explicit RuntimeError instead of UnboundLocalError
+    monkeypatch.setattr(
+        cloud_collector,
+        "publish_generation",
+        lambda *a, **kw: (_ for _ in ()).throw(ValueError("generation_conflict")),
+    )
+    with pytest.raises(RuntimeError, match="cn_merge_publish_cas_exhausted"):
+        cloud_collector.run_cn_merge_and_publish(base_init)
+
+    # #10c: run_eqn_fast_sync reloads concurrent generation on generation_conflict instead of overwriting
+    monkeypatch.undo()
+    from backend import rss_sources
+
+    base_eqn = tmp_path / "vps_eqn_cas"
+    (base_eqn / "data").mkdir(parents=True)
+    public_snapshot.publish_generation(
+        base_eqn,
+        {**gen1_state, "generation": 1, "signals": [], "signal_candidates": []},
+        [],
+        producer_id="windows-primary",
+        generation=1,
+    )
+    pub_calls = {"n": 0}
+    orig_pub = public_snapshot.publish_generation
+
+    def _eqn_race_publish(b_dir, st, arts, **kw):
+        pub_calls["n"] += 1
+        if pub_calls["n"] == 1:
+            orig_pub(
+                base_eqn,
+                {**gen1_state, "generation": 2, "signals": [], "signal_candidates": [], "forum_sentiment": {"overall_crowd_temp": 91}},
+                [],
+                producer_id="windows-primary",
+                generation=2,
+            )
+        return orig_pub(b_dir, st, arts, **kw)
+
+    monkeypatch.setattr(cloud_collector, "publish_generation", _eqn_race_publish)
+    monkeypatch.setattr(
+        cloud_collector,
+        "collect_equation_news_with_meta",
+        lambda **kw: (
+            [{"id": "eqn-999", "source": "方程式快讯", "category": "macro", "time_bjt": "2026-11-27 15:00", "title": "快讯", "summary": "内容", "tickers": ["BTC"]}],
+            {"changed": True, "new_count": 1},
+        ),
+    )
+    res_eqn = cloud_collector.run_eqn_fast_sync(base_eqn)
+    assert res_eqn["generation"] == 3
+    assert public_snapshot.load_published_generation(base_eqn)["state"]["forum_sentiment"]["overall_crowd_temp"] == 91
+
+
+
 

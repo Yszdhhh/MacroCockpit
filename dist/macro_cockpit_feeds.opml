@@ -2,7 +2,7 @@
 <opml version="2.0">
   <head>
     <title>MacroCockpit 精选金融与 AI 订阅源</title>
-    <dateCreated>Mon, 23 Nov 2026 04:48:43 GMT</dateCreated>
+    <dateCreated>Sat, 28 Nov 2026 02:11:51 GMT</dateCreated>
   </head>
   <body>
     <outline text="宏观与央行" title="宏观与央行">
@@ -43,6 +43,20 @@
       <outline text="Lil'Log" title="Lil'Log" type="rss" xmlUrl="https://lilianweng.github.io/index.xml" htmlUrl="https://lilianweng.github.io/" />
       <outline text="BAIR Blog" title="BAIR Blog" type="rss" xmlUrl="https://bair.berkeley.edu/blog/feed.xml" htmlUrl="https://bair.berkeley.edu/blog/" />
       <outline text="Ahead of AI" title="Ahead of AI" type="rss" xmlUrl="https://magazine.sebastianraschka.com/feed" htmlUrl="https://magazine.sebastianraschka.com/" />
+    </outline>
+    <outline text="大佬分享与深度访谈" title="大佬分享与深度访谈">
+      <outline text="Ben Carlson · 常识财富" title="Ben Carlson · 常识财富" type="rss" xmlUrl="https://awealthofcommonsense.com/feed/" htmlUrl="https://awealthofcommonsense.com/" />
+      <outline text="Cullen Roche · 宏观货币" title="Cullen Roche · 宏观货币" type="rss" xmlUrl="https://www.pragcap.com/feed/" htmlUrl="https://www.pragcap.com/" />
+      <outline text="Kyla Scanlon · 宏观叙事" title="Kyla Scanlon · 宏观叙事" type="rss" xmlUrl="https://kylascanlon.substack.com/feed" htmlUrl="https://kylascanlon.substack.com/" />
+      <outline text="Arthur Hayes · 加密宏观" title="Arthur Hayes · 加密宏观" type="rss" xmlUrl="https://cryptohayes.substack.com/feed" htmlUrl="https://cryptohayes.substack.com/" />
+      <outline text="SemiAnalysis · 半导体深研" title="SemiAnalysis · 半导体深研" type="rss" xmlUrl="https://www.semianalysis.com/feed" htmlUrl="https://www.semianalysis.com/" />
+      <outline text="Fabricated Knowledge · 芯片投研" title="Fabricated Knowledge · 芯片投研" type="rss" xmlUrl="https://www.fabricatedknowledge.com/feed" htmlUrl="https://www.fabricatedknowledge.com/" />
+      <outline text="Ben Thompson · Stratechery" title="Ben Thompson · Stratechery" type="rss" xmlUrl="https://stratechery.com/feed/" htmlUrl="https://stratechery.com/" />
+      <outline text="Dwarkesh Patel · 深度访谈" title="Dwarkesh Patel · 深度访谈" type="rss" xmlUrl="https://www.dwarkeshpatel.com/feed" htmlUrl="https://www.dwarkeshpatel.com/" />
+      <outline text="Packy McCormick · Not Boring" title="Packy McCormick · Not Boring" type="rss" xmlUrl="https://www.notboring.co/feed" htmlUrl="https://www.notboring.co/" />
+      <outline text="Doomberg · 能源与大宗" title="Doomberg · 能源与大宗" type="rss" xmlUrl="https://doomberg.substack.com/feed" htmlUrl="https://doomberg.substack.com/" />
+      <outline text="Vitalik Buterin · 以太坊研究" title="Vitalik Buterin · 以太坊研究" type="rss" xmlUrl="https://vitalik.eth.limo/feed.xml" htmlUrl="https://vitalik.eth.limo/" />
+      <outline text="Paul Graham · 商业随笔" title="Paul Graham · 商业随笔" type="rss" xmlUrl="http://www.aaronsw.com/2002/feeds/pgessays.rss" htmlUrl="https://paulgraham.com/articles.html" />
     </outline>
   </body>
 </opml>

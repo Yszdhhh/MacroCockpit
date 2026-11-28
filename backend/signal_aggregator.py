@@ -40,19 +40,64 @@ from backend.mobile_push import get_push_channels_status
 from backend.public_snapshot import file_lock, has_private_article_content, safe_article_filename
 import backend.rss_sources as _rss_mod
 from backend.rss_sources import (
+    _dedup_summary,
     build_opml_export,
     collect_curated_articles,
     collect_curated_rss_signals,
     extract_tickers as _rss_extract_tickers,
+    strip_emojis,
 )
 from backend.sec_edgar import collect_recent_sec_signals, fetch_sec_filings_map
 from backend.stock_research import build_quick_thesis, build_stock_profiles
 
 try:
-    from backend.market_quotes import fetch_crypto_quotes, fetch_fx_snapshot
+    from backend.guru_sources import collect_guru_articles, collect_guru_signals
+except ImportError:
+    collect_guru_articles = None  # type: ignore[assignment]
+    collect_guru_signals = None  # type: ignore[assignment]
+
+try:
+    from backend.kol_intel_engine import (
+        DEFAULT_SCORECARD_CACHE_PATH,
+        build_kol_actionable_signals,
+        build_kol_digest,
+        build_kol_scorecards,
+        select_quality_kol_articles,
+    )
+except ImportError:
+    DEFAULT_SCORECARD_CACHE_PATH = DATA_DIR / "kol_scorecard_cache.json"  # type: ignore[assignment]
+    build_kol_actionable_signals = None  # type: ignore[assignment]
+    build_kol_digest = None  # type: ignore[assignment]
+    build_kol_scorecards = None  # type: ignore[assignment]
+    select_quality_kol_articles = None  # type: ignore[assignment]
+
+try:
+    from backend.market_synthesis import build_market_synthesis
+except ImportError:
+    build_market_synthesis = None  # type: ignore[assignment]
+
+try:
+    from backend.market_quotes import fetch_crypto_quotes, fetch_fx_snapshot, fetch_hybrid_perp_quotes
 except ImportError:
     fetch_crypto_quotes = None  # type: ignore[assignment]
     fetch_fx_snapshot = None  # type: ignore[assignment]
+    fetch_hybrid_perp_quotes = None  # type: ignore[assignment]
+
+try:
+    from backend.forum_sentiment import build_sentiment_divergence, collect_forum_pulse
+except ImportError:
+    build_sentiment_divergence = None  # type: ignore[assignment]
+    collect_forum_pulse = None  # type: ignore[assignment]
+
+try:
+    from backend.source_matrix import build_asset_source_matrix
+except ImportError:
+    build_asset_source_matrix = None  # type: ignore[assignment]
+
+try:
+    from backend.periodic_report import generate_periodic_decision_report
+except ImportError:
+    generate_periodic_decision_report = None  # type: ignore[assignment]
 
 STATE_OUTPUT_PATH = DATA_DIR / "cockpit_state.json"
 AIHOT_CACHE_PATH = DATA_DIR / "aihot_cache.json"
@@ -108,31 +153,56 @@ def _read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
-def _clean_business_text(text: str) -> str:
-    """Replace internal quant jargon with plain Chinese business wording."""
+_CLEAN_BUSINESS_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    (r"E33\+E32\s*液态孤立慢洗", "高流动性超跌结构"),
+    (r"(?<![A-Za-z0-9])(?:E33|E32)(?![A-Za-z0-9])", "超跌结构"),
+    (r"(?<![A-Za-z0-9])E21(?![A-Za-z0-9])", "清算风暴"),
+    (r"(?<![A-Za-z0-9])Tier-1(?![A-Za-z0-9])", "核心"),
+    (r"(?<![A-Za-z0-9])Tier-S(?![A-Za-z0-9])", "高优"),
+    (r"(?<![A-Za-z0-9])Tier-A(?![A-Za-z0-9])", "重点"),
+    (r"(?<![A-Za-z0-9])Sleeves?(?![A-Za-z0-9])", "仓位"),
+    (r"(?<![A-Za-z0-9])Regimes?(?![A-Za-z0-9])", "市场状态"),
+    (r"(?<![A-Za-z0-9])arbitration(?![A-Za-z0-9])", "风险评估"),
+    (r"(?<![A-Za-z0-9])N/A(?![A-Za-z0-9])", "—"),
+    (r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明", "规则摘要"),
+    (r"待刷新|待补充|待补", "—"),
+    (r"液态山寨", "高流动性山寨"),
+    (r"MA50/MA120", "50/120日均线"),
+    (r"MA100", "100日均线"),
+    (r"（量化未确认，禁止提前抄底）", "（趋势未确认，严禁左侧提前抄底）"),
+    (r"量化禁止左侧趋势做多", "趋势未转强，严禁左侧提前做多"),
+)
+
+_SKIP_SANITIZE_KEYS: frozenset[str] = frozenset({"url", "html_url", "filename", "id", "receipt_id", "sha256"})
+
+
+def _scrub_forbidden_text(text: str, *, preserve_newlines: bool = True) -> str:
+    """Replace internal jargon and forbidden placeholders while optionally preserving line breaks."""
     if not text:
         return ""
-    s = html.unescape(str(text)).strip()
-    replacements = (
-        (r"E33\+E32\s*液态孤立慢洗", "高流动性超跌结构"),
-        (r"\bE33\b|\bE32\b", "超跌结构"),
-        (r"\bE21\b", "清算风暴"),
-        (r"\bTier-1\b", "核心"),
-        (r"\bTier-S\b", "高优"),
-        (r"\bTier-A\b", "重点"),
-        (r"\bSleeves?\b", "仓位"),
-        (r"\bRegime\b", "市场状态"),
-        (r"\barbitration\b", "风险评估"),
-        (r"\bN/A\b", "—"),
-        (r"液态山寨", "高流动性山寨"),
-        (r"MA50/MA120", "50/120日均线"),
-        (r"MA100", "100日均线"),
-        (r"（量化未确认，禁止提前抄底）", "（趋势未确认，严禁左侧提前抄底）"),
-        (r"量化禁止左侧趋势做多", "趋势未转强，严禁左侧提前做多"),
-    )
-    for pat, rep in replacements:
+    s = strip_emojis(html.unescape(str(text)))
+    for pat, rep in _CLEAN_BUSINESS_REPLACEMENTS:
         s = re.sub(pat, rep, s, flags=re.IGNORECASE)
+    if preserve_newlines:
+        return re.sub(r"[ \t]{2,}", " ", s).strip()
     return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _clean_business_text(text: str) -> str:
+    """Replace internal quant jargon with plain Chinese business wording."""
+    return _scrub_forbidden_text(text, preserve_newlines=False)
+
+
+def _sanitize_state_value(val: Any, key_name: str = "") -> Any:
+    if isinstance(val, str):
+        if key_name in _SKIP_SANITIZE_KEYS:
+            return val
+        return _scrub_forbidden_text(val, preserve_newlines=(key_name == "body_md" or "\n" in val))
+    if isinstance(val, list):
+        return [_sanitize_state_value(item, key_name) for item in val]
+    if isinstance(val, dict):
+        return {k: _sanitize_state_value(v, str(k)) for k, v in val.items()}
+    return val
 
 
 def _parse_iso_to_bjt_str(ts: str | None) -> str:
@@ -398,9 +468,10 @@ def _collect_eqn_signals(decision_brief: dict[str, Any]) -> list[dict[str, Any]]
             continue
         overview = _clean_business_text(str(ev.get("overview_zh") or ""))
         zh_raw = _clean_business_text(str(ev.get("zh") or "").lstrip("* "))
-        summary = overview or zh_raw or headline
-        if len(summary) > 280:
-            summary = summary[:277].rstrip() + "..."
+        raw_sum = overview or ("" if zh_raw == headline else zh_raw)
+        if len(raw_sum) > 280:
+            raw_sum = raw_sum[:277].rstrip() + "..."
+        summary = _dedup_summary(headline, raw_sum)
 
         domain = str(ev.get("domain") or "").lower()
         tickers = _extract_tickers(f"{headline} {ev.get('zh', '')} {ev.get('en', '')}")
@@ -415,7 +486,10 @@ def _collect_eqn_signals(decision_brief: dict[str, Any]) -> list[dict[str, Any]]
         direction = "bearish" if pol == "adverse" else ("bullish" if pol == "supportive" else "neutral")
         tier = str(ev.get("tier") or "")
         score = int(ev.get("score") or 0)
-        importance = "高" if (tier == "Tier-S" or score >= 7) else "中"
+        if category == "crypto":
+            importance = "高" if (tier == "Tier-S" and score >= 8) else "中"
+        else:
+            importance = "高" if (tier == "Tier-S" or score >= 7) else "中"
 
         signals.append(
             {
@@ -850,8 +924,11 @@ def parse_markdown_article(path: Path, source_label: str) -> dict[str, Any] | No
     title = ""
     excerpt = ""
     publisher = ""
+    author_role = ""
     art_url = ""
     art_score: int | None = None
+    art_tickers: list[str] = []
+    report_kind = ""
     body_md = raw.strip()
 
     # Check YAML frontmatter
@@ -874,15 +951,22 @@ def parse_markdown_article(path: Path, source_label: str) -> dict[str, Any] | No
                 title = str(fm_meta.get("title") or "").strip()
                 excerpt = str(fm_meta.get("summary") or "").strip()
                 publisher = str(fm_meta.get("publisher") or "").strip()
+                author_role = str(fm_meta.get("author_role") or "").strip()
                 art_url = str(fm_meta.get("url") or "").strip()
+                report_kind = str(fm_meta.get("report_kind") or "").strip().lower()
                 raw_score = fm_meta.get("score")
                 if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool):
                     art_score = int(round(float(raw_score)))
+                raw_tickers = fm_meta.get("tickers")
+                if isinstance(raw_tickers, list):
+                    art_tickers = [str(t).strip().upper() for t in raw_tickers if str(t).strip()][:8]
             else:
                 m_title = re.search(r'^title:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
                 m_sum = re.search(r'^summary:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
                 m_pub = re.search(r'^publisher:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
+                m_role = re.search(r'^author_role:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
                 m_url = re.search(r'^url:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
+                m_rk = re.search(r'^report_kind:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
                 m_scr = re.search(r'^score:\s*(\d+(?:\.\d+)?)\s*$', fm_raw, re.MULTILINE)
                 if m_title:
                     title = m_title.group(1).strip()
@@ -890,8 +974,12 @@ def parse_markdown_article(path: Path, source_label: str) -> dict[str, Any] | No
                     excerpt = m_sum.group(1).strip()
                 if m_pub:
                     publisher = m_pub.group(1).strip()
+                if m_role:
+                    author_role = m_role.group(1).strip()
                 if m_url:
                     art_url = m_url.group(1).strip()
+                if m_rk:
+                    report_kind = m_rk.group(1).strip().lower()
                 if m_scr:
                     art_score = int(round(float(m_scr.group(1))))
 
@@ -917,22 +1005,34 @@ def parse_markdown_article(path: Path, source_label: str) -> dict[str, Any] | No
     if len(excerpt) > 180:
         excerpt = excerpt[:177].rstrip() + "..."
 
-    if path.name.lower().startswith("ta_"):
+    fname_lower = path.name.lower()
+    if fname_lower.startswith(("weekly_", "monthly_", "dr_")) or report_kind in ("weekly", "monthly", "deep_research"):
+        resolved_source = "周月度深研"
+    elif fname_lower.startswith("ta_"):
         resolved_source = "多智能体深研"
+    elif fname_lower.startswith("guru_"):
+        resolved_source = "大佬分享"
     elif publisher:
         resolved_source = "AI与金融研报"
     else:
         resolved_source = source_label
+    clean_body = _scrub_forbidden_text(body_md, preserve_newlines=True)
     out: dict[str, Any] = {
         "filename": path.name,
         "title": _clean_business_text(title),
         "source": resolved_source,
         "mtime": mtime_str,
         "excerpt": _clean_business_text(excerpt) or _clean_business_text(title),
-        "body_md": body_md,
+        "body_md": clean_body,
     }
     if publisher:
         out["publisher"] = _clean_business_text(publisher)
+    if author_role:
+        out["author_role"] = _clean_business_text(author_role)
+    if report_kind:
+        out["report_kind"] = report_kind
+    if art_tickers:
+        out["tickers"] = art_tickers
     if art_url.startswith(("http://", "https://")):
         out["url"] = art_url
     if art_score is not None:
@@ -945,8 +1045,16 @@ def _dedup_articles(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen_urls: set[str] = set()
     seen_titles: list[str] = []
     seen_ta_syms: set[str] = set()
+    seen_periodic_fnames: set[str] = set()
     for art in items:
         fname = str(art.get("filename") or "")
+        if art.get("source") == "周月度深研" or fname.lower().startswith(("weekly_", "monthly_", "dr_")):
+            pf_key = fname.lower()
+            if pf_key in seen_periodic_fnames:
+                continue
+            seen_periodic_fnames.add(pf_key)
+            deduped.append(art)
+            continue
         m_ta = re.match(r"^ta_([A-Za-z0-9._-]+)_", fname, re.IGNORECASE)
         if m_ta:
             sym_key = m_ta.group(1).upper()
@@ -969,12 +1077,95 @@ def _dedup_articles(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
-def _collect_articles() -> list[dict[str, Any]]:
+def _interleave_article_buckets(buckets: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Round-robin interleave non-empty article source buckets so every source remains represented."""
+    queues = [list(b) for b in buckets if b]
+    merged: list[dict[str, Any]] = []
+    while queues:
+        next_queues: list[list[dict[str, Any]]] = []
+        for q in queues:
+            merged.append(q.pop(0))
+            if q:
+                next_queues.append(q)
+        queues = next_queues
+    return merged
+
+
+def _sort_and_balance_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    periodic_arts = sorted(
+        [a for a in articles if a.get("source") == "周月度深研"],
+        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
+        reverse=True,
+    )
+    guru_arts = sorted(
+        [a for a in articles if a.get("source") == "大佬分享"],
+        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
+        reverse=True,
+    )
+    ai_arts = sorted(
+        [a for a in articles if a.get("source") == "AI与金融研报"],
+        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
+        reverse=True,
+    )
+    kol_arts = sorted(
+        [a for a in articles if a.get("source") == "KOL深度长文"],
+        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
+        reverse=True,
+    )
+    ta_arts = sorted(
+        [a for a in articles if a.get("source") == "多智能体深研"],
+        key=lambda x: str(x.get("mtime") or ""),
+        reverse=True,
+    )
+    kb_arts = sorted(
+        [
+            a
+            for a in articles
+            if a.get("source") not in ("周月度深研", "大佬分享", "AI与金融研报", "KOL深度长文", "多智能体深研")
+        ],
+        key=lambda x: str(x.get("mtime") or ""),
+        reverse=True,
+    )
+    interleaved = _interleave_article_buckets([periodic_arts, guru_arts, ai_arts, kol_arts, ta_arts, kb_arts])
+    return _dedup_articles(interleaved)
+
+
+def _collect_articles(kol_scorecards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     articles: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     for folder, src_label in get_allowed_article_dirs():
         if not folder.exists():
             continue
+        if src_label == "KOL深度长文" and select_quality_kol_articles is not None:
+            try:
+                quality_kol = select_quality_kol_articles(
+                    folder,
+                    kol_dir=KOL_ROOT,
+                    scorecards=kol_scorecards,
+                    limit=40,
+                )
+            except Exception:
+                quality_kol = []
+            for art in quality_kol:
+                if not isinstance(art, dict):
+                    continue
+                fname = safe_article_filename(art.get("filename"))
+                if not fname or fname in seen_names or "异常告警" in fname:
+                    continue
+                if has_private_article_content(art):
+                    continue
+                clean_art = dict(art)
+                clean_art["title"] = _clean_business_text(str(clean_art.get("title") or fname))
+                clean_art["excerpt"] = _clean_business_text(str(clean_art.get("excerpt") or clean_art["title"]))
+                clean_art["body_md"] = _scrub_forbidden_text(str(clean_art.get("body_md") or ""), preserve_newlines=True)
+                if clean_art.get("publisher"):
+                    clean_art["publisher"] = _clean_business_text(str(clean_art["publisher"]))
+                if clean_art.get("author_role"):
+                    clean_art["author_role"] = _clean_business_text(str(clean_art["author_role"]))
+                seen_names.add(fname)
+                articles.append(clean_art)
+            continue
+
         files = sorted(folder.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
         for p in files:
             if p.name in seen_names or "异常告警" in p.name:
@@ -983,19 +1174,7 @@ def _collect_articles() -> list[dict[str, Any]]:
             if art:
                 seen_names.add(p.name)
                 articles.append(art)
-    ta_arts = sorted([a for a in articles if a["source"] == "多智能体深研"], key=lambda x: x["mtime"], reverse=True)
-    ai_arts = sorted(
-        [a for a in articles if a["source"] == "AI与金融研报"],
-        key=lambda x: (int(x.get("score") or 0), x["mtime"]),
-        reverse=True,
-    )
-    kol_arts = sorted([a for a in articles if a["source"] == "KOL深度长文"], key=lambda x: x["mtime"], reverse=True)
-    kb_arts = sorted(
-        [a for a in articles if a["source"] not in ("多智能体深研", "AI与金融研报", "KOL深度长文")],
-        key=lambda x: x["mtime"],
-        reverse=True,
-    )
-    return _dedup_articles(ta_arts + ai_arts + kol_arts + kb_arts)
+    return _sort_and_balance_articles(articles)
 
 
 def _build_strategy_targets(
@@ -1127,12 +1306,87 @@ def generate_cockpit_state(
         sec_signals = []
     eq_signals = _collect_equity_signals(us_equities)
 
+    # (a) Guru longform articles ('大佬分享') & signals with exception isolation
+    guru_articles: list[dict[str, Any]] = []
+    guru_signals: list[dict[str, Any]] = []
+    if collect_guru_articles is not None:
+        try:
+            guru_articles = collect_guru_articles(articles_dir=COCKPIT_ROOT / "articles")
+        except Exception:
+            guru_articles = []
+    if collect_guru_signals is not None:
+        try:
+            guru_signals = collect_guru_signals(articles=guru_articles or None)
+        except Exception:
+            guru_signals = []
+
+    # (b) KOL historical scorecards, readable digest (up to 36), & high-reliability actionable signals
+    scorecard_cache_path = (
+        DEFAULT_SCORECARD_CACHE_PATH
+        if output_path == STATE_OUTPUT_PATH
+        else output_path.with_name("kol_scorecard_cache.json")
+    )
+    kol_scorecards: list[dict[str, Any]] = []
+    kol_digest: list[dict[str, Any]] = []
+    kol_actionable_signals: list[dict[str, Any]] = []
+    if build_kol_scorecards is not None and build_kol_digest is not None and build_kol_actionable_signals is not None:
+        try:
+            if KOL_ROOT.exists():
+                kol_scorecards = build_kol_scorecards(
+                    kol_dir=KOL_ROOT,
+                    cache_path=scorecard_cache_path,
+                    force_refresh=True,
+                )
+                kol_digest = build_kol_digest(
+                    kol_dir=KOL_ROOT,
+                    scorecards=kol_scorecards,
+                    cache_path=scorecard_cache_path,
+                    limit=36,
+                )
+            else:
+                kol_scorecards = build_kol_scorecards(
+                    kol_dir=KOL_ROOT,
+                    cache_path=DEFAULT_SCORECARD_CACHE_PATH,
+                    force_refresh=False,
+                )
+        except Exception:
+            kol_scorecards = []
+            kol_digest = []
+
+        if not kol_digest:
+            kol_digest = _collect_kol_digest(decision_brief)[:36]
+        try:
+            kol_actionable_signals = build_kol_actionable_signals(
+                kol_digest_items=kol_digest,
+                scorecards=kol_scorecards,
+                min_reliability_score=68.0,
+                limit=16,
+            )
+        except Exception:
+            kol_actionable_signals = []
+    else:
+        kol_digest = _collect_kol_digest(decision_brief)[:36]
+
+    # (c) Merge KOL actionable signals + Guru signals into Kazike signal pipeline
     raw_signals = [
         _ensure_signal_topics(s)
-        for s in (eqn_signals + aihot_signals + rss_signals + sec_signals + eq_signals)
+        for s in (
+            eqn_signals
+            + aihot_signals
+            + rss_signals
+            + sec_signals
+            + eq_signals
+            + kol_actionable_signals
+            + guru_signals
+        )
     ]
     all_signals, kazike_stats = process_financial_signals(raw_signals)
     signal_candidates = kazike_stats.pop("candidates", [])
+    for sig_list in (all_signals, signal_candidates):
+        for sig in sig_list:
+            if isinstance(sig, dict):
+                sig["title"] = strip_emojis(str(sig.get("title") or ""))
+                sig["summary"] = _dedup_summary(sig["title"], str(sig.get("summary") or ""))
     if compute_cross_asset_correlations is None:
         raise RuntimeError("State refresh requires pandas and numpy")
     correlations = compute_cross_asset_correlations()
@@ -1161,7 +1415,28 @@ def generate_cockpit_state(
         try:
             cq_res = fetch_crypto_quotes()
             if isinstance(cq_res, dict):
-                crypto_quotes = cq_res
+                crypto_quotes = dict(cq_res)
+        except Exception:
+            pass
+    if fetch_hybrid_perp_quotes is not None:
+        try:
+            hq_res = fetch_hybrid_perp_quotes()
+            if isinstance(hq_res, dict) and hq_res:
+                quotes_map = dict(crypto_quotes.get("quotes") or {})
+                swap_map = dict(crypto_quotes.get("swap") or {})
+                proxy_map = dict(crypto_quotes.get("spot_proxies") or {})
+                for sym_k, entry in hq_res.items():
+                    if isinstance(entry, dict):
+                        sk = str(sym_k).upper()
+                        quotes_map[sk] = dict(entry)
+                        if entry.get("kind") == "spot_proxy" or entry.get("is_proxy") is True:
+                            proxy_map[sk] = dict(entry)
+                        else:
+                            swap_map[sk] = dict(entry)
+                crypto_quotes["quotes"] = quotes_map
+                crypto_quotes["swap"] = swap_map
+                if proxy_map:
+                    crypto_quotes["spot_proxies"] = proxy_map
         except Exception:
             pass
 
@@ -1174,8 +1449,7 @@ def generate_cockpit_state(
     except Exception:
         pass
 
-    kol_digest = _collect_kol_digest(decision_brief)
-    articles = _collect_articles()
+    articles = _collect_articles(kol_scorecards=kol_scorecards)
     push_channels = get_push_channels_status()
 
     # Recompute site-aware quick_thesis and attach latest ta_<SYM>_*.md deep report filename
@@ -1198,10 +1472,103 @@ def generate_cockpit_state(
             ta_matches.sort(key=lambda a: (str(a.get("mtime") or ""), str(a.get("filename") or "")), reverse=True)
             prof["deep_report_file"] = str(ta_matches[0]["filename"])
 
+    # (d) Cross-source market synthesis
+    market_analysis: dict[str, Any] = {}
+    if build_market_synthesis is not None:
+        try:
+            market_analysis = build_market_synthesis(
+                macro_fred=macro_fred,
+                us_equities=us_equities,
+                correlations=correlations,
+                signals=all_signals,
+                kol_digest=kol_digest,
+                kol_scorecards=kol_scorecards,
+                articles=articles,
+                risk_gate=risk_gate,
+                stock_profiles=stock_profiles,
+            )
+        except Exception:
+            market_analysis = {}
+
+    # (e) Forum sentiment divergence & 6-category asset source matrix
+    forum_sentiment: dict[str, Any] = {}
+    if collect_forum_pulse is not None and build_sentiment_divergence is not None:
+        try:
+            forum_pulse = collect_forum_pulse(force_refresh=False)
+            forum_sentiment = build_sentiment_divergence(
+                forum_pulse,
+                kol_digest=kol_digest,
+                kol_scorecards=kol_scorecards,
+                signals=all_signals,
+            )
+        except Exception:
+            forum_sentiment = {}
+
+    asset_source_matrix: dict[str, Any] = {}
+    if build_asset_source_matrix is not None:
+        try:
+            asset_source_matrix = build_asset_source_matrix(kol_scorecards=kol_scorecards)
+        except Exception:
+            asset_source_matrix = {}
+
+    # (f) Ensure current weekly & monthly periodic decision reports exist, then re-collect articles if added
+    articles_dir = COCKPIT_ROOT / "articles"
+    if generate_periodic_decision_report is not None:
+        partial_state = {
+            "macro_fred": macro_fred,
+            "us_equities": us_equities,
+            "risk_gate": risk_gate,
+            "positions": positions,
+            "kol_digest": kol_digest,
+            "kol_scorecards": kol_scorecards,
+            "market_analysis": market_analysis,
+            "forum_sentiment": forum_sentiment,
+            "asset_source_matrix": asset_source_matrix,
+            "signals": all_signals,
+            "articles": articles,
+            "calendar_events": calendar_events,
+            "correlations": correlations,
+            "crypto_quotes": crypto_quotes,
+        }
+        existing_fnames = {str(a.get("filename") or "") for a in articles if isinstance(a, dict)}
+        need_recollect = False
+        for _period in ("weekly", "monthly"):
+            try:
+                res_rep = generate_periodic_decision_report(
+                    partial_state,
+                    period=_period,
+                    articles_dir=articles_dir,
+                    force=False,
+                )
+                rep_fname = str(res_rep.get("filename") or "") if isinstance(res_rep, dict) else ""
+                if rep_fname and rep_fname not in existing_fnames:
+                    need_recollect = True
+            except Exception:
+                pass
+        if need_recollect:
+            articles = _collect_articles(kol_scorecards=kol_scorecards)
+
     cat_counts: dict[str, int] = {}
     for sig in all_signals:
         c = str(sig.get("category") or "macro")
         cat_counts[c] = cat_counts.get(c, 0) + 1
+
+    kol_verified_authors_count = sum(
+        1 for c in kol_scorecards if isinstance(c, dict) and int(c.get("verified_calls") or 0) >= 5
+    )
+    guru_articles_count = sum(
+        1 for a in articles if isinstance(a, dict) and a.get("source") == "大佬分享"
+    )
+    periodic_reports_count = sum(
+        1 for a in articles if isinstance(a, dict) and a.get("source") == "周月度深研"
+    )
+    forum_items_count = sum(
+        int(c.get("count") or 0)
+        for c in (forum_sentiment.get("channels_status") or [])
+        if isinstance(c, dict)
+    ) or len(forum_sentiment.get("hot_discussions") or [])
+    source_matrix_count = len((asset_source_matrix or {}).get("categories") or [])
+    cross_links_count = len((market_analysis or {}).get("cross_source_links") or [])
 
     coverage = {
         "signals_count": len(all_signals),
@@ -1213,6 +1580,13 @@ def generate_cockpit_state(
         "sec_filings_count": sum(len(p.get("sec_filings") or []) for p in stock_profiles.values()),
         "articles_count": len(articles),
         "calendar_events_count": len(calendar_events),
+        "kol_digest_count": len(kol_digest),
+        "kol_verified_authors_count": kol_verified_authors_count,
+        "guru_articles_count": guru_articles_count,
+        "cross_links_count": cross_links_count,
+        "forum_items_count": forum_items_count,
+        "source_matrix_count": source_matrix_count,
+        "periodic_reports_count": periodic_reports_count,
     }
 
     state: dict[str, Any] = {
@@ -1228,6 +1602,10 @@ def generate_cockpit_state(
         "kazike_stats": kazike_stats,
         "correlations": correlations,
         "kol_digest": kol_digest,
+        "kol_scorecards": kol_scorecards,
+        "market_analysis": market_analysis,
+        "forum_sentiment": forum_sentiment,
+        "asset_source_matrix": asset_source_matrix,
         "articles": articles,
         "push_channels": push_channels,
         "calendar_events": calendar_events,
@@ -1235,6 +1613,7 @@ def generate_cockpit_state(
         "crypto_quotes": crypto_quotes,
         "coverage": coverage,
     }
+    state = _sanitize_state_value(state)
 
     counter_path = output_path.with_name("producer_generation.json")
     if output_path.resolve() == counter_path.resolve():

@@ -22,7 +22,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20261123c">
+  <link rel="stylesheet" href="styles.css?v=20261128a">
 </head>
 <body>
   <header class="masthead" id="masthead">
@@ -100,6 +100,7 @@
         <button type="button" class="ribbon-tab" data-sector="macro" aria-pressed="false">宏观<span class="ribbon-count num-plain" data-scount="macro"></span></button>
       </nav>
       <div class="glance-row" id="dailyGlance" aria-label="宏观速览"></div>
+      <section class="panel today-sentiment-card" id="todaySentimentCard" aria-label="全网舆论风向" hidden></section>
 
       <section class="exec-strip" id="execStrip" aria-label="风险与辅助仓位" hidden>
         <button type="button" class="exec-gate" id="execGate" data-jump="portfolio:strategy" title="查看策略对照"></button>
@@ -252,8 +253,10 @@
       <div class="subtab-bar" id="researchSubTabs" role="tablist" aria-label="研究子模块">
         <button type="button" class="chip is-active" data-rsub="stocks" aria-pressed="true">个股投研</button>
         <button type="button" class="chip" data-rsub="macro" aria-pressed="false">宏观与关联</button>
-        <button type="button" class="chip" data-rsub="kol" aria-pressed="false">KOL 观点树</button>
+        <button type="button" class="chip" data-rsub="sentiment" aria-pressed="false">舆论对照</button>
+        <button type="button" class="chip" data-rsub="kol" aria-pressed="false">KOL 观点与胜率</button>
         <button type="button" class="chip" data-rsub="articles" aria-pressed="false">长文待读</button>
+        <button type="button" class="chip" data-rsub="sources" aria-pressed="false">信源导航</button>
       </div>
 
       <!-- 个股投研（保留 id="view-research"） -->
@@ -307,6 +310,24 @@
 
       <!-- 宏观与关联 -->
       <section class="subview" id="view-macro" data-rsub-panel="macro" aria-label="宏观与关联" hidden>
+        <section class="panel market-synth-panel" id="marketSynthesisPanel" aria-label="市场四维定调与跨源关联" hidden>
+          <div class="panel-head">
+            <div class="synth-head-left">
+              <h2 class="sec-title">市场四维定调</h2>
+              <span id="marketStanceBadge"></span>
+            </div>
+            <span class="panel-meta num-plain" id="marketAsOf"></span>
+          </div>
+          <p class="market-verdict" id="marketVerdict" hidden></p>
+          <div class="market-dim-grid" id="marketDimensions"></div>
+          <div class="synth-alerts" id="marketDivergenceAlerts" hidden></div>
+          <div class="synth-subhead" id="crossSourceHead" hidden>
+            <h3 class="sec-title">跨源信号共振与背离</h3>
+            <span class="panel-meta num-plain" id="crossSourceCount"></span>
+          </div>
+          <div class="cross-links-grid" id="crossSourceLinks"></div>
+        </section>
+
         <section class="panel">
           <div class="panel-head"><h2 class="sec-title">宏观数据看板</h2><span class="panel-meta num-plain" id="macroCount"></span></div>
           <div class="macro-groups" id="macroGroups"></div>
@@ -335,9 +356,37 @@
         </section>
       </section>
 
-      <!-- KOL 观点树 -->
-      <section class="subview" id="view-kol" data-rsub-panel="kol" aria-label="KOL 观点树" hidden>
+      <!-- 全网舆论波动对照 -->
+      <section class="subview" id="view-sentiment" data-rsub-panel="sentiment" aria-label="舆论对照" hidden>
+        <section class="panel forum-sentiment-panel" id="forumSentimentPanel" aria-label="全网舆论波动对照" hidden>
+          <div class="panel-head forum-panel-head">
+            <div class="synth-head-left">
+              <h2 class="sec-title">全网舆论波动对照</h2>
+              <span id="forumContrarianBadge"></span>
+              <span id="forumOverallBadge"></span>
+            </div>
+            <div class="forum-channels-bar" id="forumChannelsBar"></div>
+          </div>
+          <div class="forum-macro-strip" id="forumMacroStrip" hidden></div>
+          <div class="forum-div-grid" id="forumDivergenceGrid"></div>
+          <div class="forum-hot-wrap" id="forumHotWrap" hidden>
+            <div class="forum-hot-head">
+              <h3 class="subsec-title">全网高热讨论</h3>
+              <span class="panel-meta num-plain" id="forumUpdatedAt"></span>
+            </div>
+            <div class="forum-hot-list" id="forumHotList"></div>
+          </div>
+        </section>
+      </section>
+
+      <!-- KOL 观点与历史胜率 -->
+      <section class="subview" id="view-kol" data-rsub-panel="kol" aria-label="KOL 观点与历史胜率" hidden>
         <div class="toolbar" id="kolToolbar">
+          <div class="seg seg-sm" id="kolViewSwitch" role="group" aria-label="KOL 视图切换">
+            <button type="button" class="seg-btn is-active" data-kview="feed" aria-pressed="true">观点动态</button>
+            <button type="button" class="seg-btn" data-kview="scorecard" aria-pressed="false">可靠度与胜率榜</button>
+          </div>
+          <button type="button" class="chip chip-toggle" id="kolHighWinBtn" aria-pressed="false">只看高胜率</button>
           <div class="chip-group chip-scroll" id="kolTopicChips" role="group" aria-label="议题"></div>
           <div class="chip-group" id="kolStanceChips" role="group" aria-label="立场">
             <button type="button" class="chip is-active" data-stance="all" aria-pressed="true">全部</button>
@@ -346,17 +395,27 @@
             <button type="button" class="chip" data-stance="中性" aria-pressed="false">中性</button>
           </div>
           <div class="search-box">
-            <input id="kolSearchInput" type="search" placeholder="作者、议题或观点，回车筛选" autocomplete="off" aria-label="KOL 关键词">
+            <input id="kolSearchInput" type="search" placeholder="作者、标的、议题或观点，回车筛选" autocomplete="off" aria-label="KOL 关键词">
             <button type="button" class="btn btn-sm" id="kolSearchBtn">筛选</button>
           </div>
         </div>
 
-        <section class="panel tug-panel" aria-label="多空对抗">
+        <div class="kol-crowd-strip" id="kolCrowdStrip" hidden></div>
+
+        <section class="panel tug-panel" id="kolTugPanel" aria-label="多空对抗">
           <div class="tug" id="kolTug"></div>
           <div class="topic-bars" id="kolTopicBars"></div>
         </section>
 
         <div class="timeline" id="kolTimeline"></div>
+
+        <section class="panel" id="kolScorecardPanel" aria-label="KOL 可靠度与胜率榜" hidden>
+          <div class="panel-head">
+            <h2 class="sec-title">KOL 可靠度与历史胜率榜</h2>
+            <span class="panel-meta num-plain" id="kolScorecardCount"></span>
+          </div>
+          <div class="table-scroll" id="kolScorecardWrap"></div>
+        </section>
       </section>
 
       <!-- 长文待读 -->
@@ -373,16 +432,28 @@
             <button type="button" class="chip is-active" data-asource="all" aria-pressed="true">全部来源</button>
             <button type="button" class="chip" data-asource="AI与金融研报" aria-pressed="false">AI与金融研报</button>
             <button type="button" class="chip" data-asource="KOL深度长文" aria-pressed="false">KOL深度长文</button>
+            <button type="button" class="chip" data-asource="大佬分享" aria-pressed="false">大佬分享</button>
             <button type="button" class="chip" data-asource="本地知识库" aria-pressed="false">本地知识库</button>
             <button type="button" class="chip" data-asource="同步深度长文" aria-pressed="false">同步深度长文</button>
+            <button type="button" class="chip" data-asource="周月度深研" aria-pressed="false">周月度深研</button>
           </div>
           <div class="search-box">
             <input id="articleSearchInput" type="search" placeholder="标题或摘要，回车筛选" autocomplete="off" aria-label="长文关键词">
             <button type="button" class="btn btn-sm" id="articleSearchBtn">筛选</button>
           </div>
           <a class="btn btn-sm btn-ghost" id="exportOpmlBtn" href="/feeds.opml" target="_blank" rel="noopener">导出 OPML</a>
+          <button type="button" class="btn btn-sm btn-accent" id="openIngestDrBtn">+ 导入深研</button>
         </div>
         <ul class="article-list" id="articleList"></ul>
+      </section>
+
+      <!-- 信源导航 -->
+      <section class="subview" id="view-sources" data-rsub-panel="sources" aria-label="信源导航" hidden>
+        <div class="toolbar" id="sourcesToolbar">
+          <div class="chip-group chip-scroll" id="sourceCategoryChips" role="group" aria-label="资产品类"></div>
+          <span class="panel-meta num-plain" id="sourcesMeta"></span>
+        </div>
+        <div class="sources-grid" id="sourcesGrid"></div>
       </section>
     </section>
 
@@ -681,14 +752,65 @@
     </section>
   </div>
 
+  <!-- 导入外部深研抽屉 -->
+  <div class="drawer" id="ingestDrDrawer" role="dialog" aria-modal="true" aria-labelledby="ingestDrTitle" hidden>
+    <div class="drawer-backdrop" data-close-drawer="ingestDr"></div>
+    <section class="drawer-panel">
+      <div class="drawer-handle" aria-hidden="true"><span></span></div>
+      <div class="drawer-bar">
+        <h2 class="drawer-heading" id="ingestDrTitle">导入外部深研</h2>
+        <button type="button" class="icon-btn" id="closeIngestDrBtn" aria-label="关闭导入深研">✕</button>
+      </div>
+      <div class="drawer-scroll">
+        <form class="composer" id="ingestDrForm" novalidate>
+          <div class="form-grid" style="margin-bottom:10px">
+            <label class="field field-span-2"><span>标题（选填）</span>
+              <input type="text" id="drTitleInput" maxlength="160" placeholder="留空自动从正文首行提取" autocomplete="off">
+            </label>
+            <label class="field field-span-2"><span>关联标的（选填，逗号分隔）</span>
+              <input type="text" id="drTickersInput" maxlength="160" placeholder="例如 NVDA, TSM, BTC" autocomplete="off">
+            </label>
+          </div>
+          <label class="field field-wide"><span>深研正文（Markdown，必填）</span>
+            <textarea id="drBodyInput" rows="12" maxlength="200000" required placeholder="粘贴 Gemini Deep Research / Perplexity 等输出的 Markdown 全文"></textarea>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-accent" id="drSaveBtn">入库并阅读</button>
+            <button type="button" class="btn btn-ghost" id="drCancelBtn">取消</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </div>
+
   <!-- 移动端底部 4 栏导航 -->
   <nav class="tabbar" id="mobileTabbar" aria-label="移动端视图切换">
-    <button type="button" class="tab is-active" data-mtab="today"><span class="tab-ico" aria-hidden="true">◧</span><span>今日</span></button>
-    <button type="button" class="tab" data-mtab="portfolio"><span class="tab-ico" aria-hidden="true">◈</span><span>持仓</span></button>
-    <button type="button" class="tab" data-mtab="research"><span class="tab-ico" aria-hidden="true">▤</span><span>研究</span></button>
-    <button type="button" class="tab" data-mtab="records"><span class="tab-ico" aria-hidden="true">✎</span><span>记录</span></button>
+    <button type="button" class="tab is-active" data-mtab="today">
+      <span class="tab-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 4 12 2.5-6H21"/></svg>
+      </span>
+      <span>今日</span>
+    </button>
+    <button type="button" class="tab" data-mtab="portfolio">
+      <span class="tab-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2.5"/><path d="M3 10.5h18"/><path d="M16 14.5h2"/></svg>
+      </span>
+      <span>持仓</span>
+    </button>
+    <button type="button" class="tab" data-mtab="research">
+      <span class="tab-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19h16"/><path d="M5 15l4.5-4.5 3.5 3.5L19 7"/><path d="M15 7h4v4"/></svg>
+      </span>
+      <span>研究</span>
+    </button>
+    <button type="button" class="tab" data-mtab="records">
+      <span class="tab-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h11a2 2 0 0 1 2 2v14H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg>
+      </span>
+      <span>记录</span>
+    </button>
   </nav>
 
-  <script src="app.js?v=20261123c"></script>
+  <script src="app.js?v=20261128a"></script>
 </body>
 </html>

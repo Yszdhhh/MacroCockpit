@@ -137,12 +137,17 @@
     600519: ["贵州茅台", "茅台"],
     300750: ["宁德时代"],
     BTC: ["比特币", "bitcoin"],
+    BNB: ["币安", "binance"],
     ETH: ["以太坊", "ethereum"],
     SOL: ["solana"],
     XAU: ["黄金", "现货黄金", "金价"],
+    PAXG: ["黄金", "现货黄金", "伦敦金", "金价", "gold", "xau", "gld"],
     GLD: ["黄金", "现货黄金", "金价"],
     IAU: ["黄金", "现货黄金", "金价"],
-    GC: ["黄金", "现货黄金", "金价"]
+    GC: ["黄金", "现货黄金", "金价"],
+    QQQ: ["纳指", "纳斯达克", "纳斯达克100", "nasdaq", "ndx"],
+    ZHIPU: ["智谱", "智谱ai", "2513.hk", "02513", "glm", "chatglm", "autoglm"],
+    2513: ["智谱", "智谱ai", "zhipu", "glm", "chatglm", "autoglm"]
   };
 
   const appState = {
@@ -194,8 +199,9 @@
     openSignalMenu: "",
     openScoreId: "",
     lastUndoAction: null,
-    kol: { topic: "all", stance: "all", keyword: "" },
+    kol: { topic: "all", stance: "all", keyword: "", view: "feed", highWinOnly: false },
     articles: { status: "all", source: "all", keyword: "" },
+    sources: { category: "all" },
     reviewStatus: "all",
     editingReviewTags: [],
     corrWindow: "30d",
@@ -234,7 +240,7 @@
       "keywordApplyBtn", "dailyCounter", "curationRulesPanel", "closeRulesPanelBtn",
       "ruleQuickForm", "ruleKindSelect", "ruleActionSelect", "ruleTargetInput",
       "curationRulesList", "sectorDrillBar", "backToOverviewBtn", "subtopicChips",
-      "signalList", "todayCalendarCard", "todayRiskCard",
+      "signalList", "todaySentimentCard", "todayCalendarCard", "todayRiskCard",
       "eqSummary", "eqAsOf", "eqIndices", "eqWatch", "eqSectors", "heatRadar",
       "portfolioModeHint", "openAddPosBtn", "openImportBtn", "portfolioSummaryBar",
       "portfolioSubTabs", "spotFxHint", "spotTableWrap", "derivSummaryHint",
@@ -245,10 +251,17 @@
       "stockChartWrap", "stockSummaryPanel", "stockInsightsCol", "stockSectionsCol",
       "macroCount", "macroGroups", "corrWindowSeg", "corrReadout", "corrMatrix",
       "pairsAsOf", "pairsList",
-      "kolTopicChips", "kolStanceChips", "kolSearchInput", "kolSearchBtn",
-      "kolTug", "kolTopicBars", "kolTimeline",
+      "marketSynthesisPanel", "marketStanceBadge", "marketAsOf", "marketVerdict",
+      "marketDimensions", "marketDivergenceAlerts", "crossSourceHead", "crossSourceCount",
+      "crossSourceLinks",
+      "forumSentimentPanel", "forumContrarianBadge", "forumOverallBadge", "forumChannelsBar", "forumMacroStrip", "forumDivergenceGrid",
+      "forumHotWrap", "forumUpdatedAt", "forumHotList",
+      "kolViewSwitch", "kolHighWinBtn", "kolToolbar", "kolTopicChips", "kolStanceChips", "kolSearchInput", "kolSearchBtn",
+      "kolCrowdStrip", "kolTugPanel", "kolTug", "kolTopicBars", "kolTimeline",
+      "kolScorecardPanel", "kolScorecardCount", "kolScorecardWrap",
       "articleStatusTabs", "articleSourceChips", "articleSearchInput", "articleSearchBtn",
-      "exportOpmlBtn", "articleList",
+      "exportOpmlBtn", "openIngestDrBtn", "articleList",
+      "sourceCategoryChips", "sourcesMeta", "sourcesGrid",
       "recordsSubTabs", "journalModeHint", "newReviewBtn", "reviewStatusChips",
       "reviewForm", "rvId", "rvRev", "rvDate", "rvSymbol", "rvDirection", "rvSize",
       "rvPrice", "rvPnl", "rvStatus", "rvThesis", "rvExec", "rvLesson", "rvSaveBtn",
@@ -268,6 +281,8 @@
       "pfSaveBtn", "pfCancelBtn",
       "importDrawer", "closeImportDrawerBtn", "importForm", "impFormat", "impMode",
       "impAccount", "impBody", "impPreviewBtn", "impCommitBtn", "importPreviewArea",
+      "ingestDrDrawer", "closeIngestDrBtn", "ingestDrForm", "drTitleInput", "drTickersInput",
+      "drBodyInput", "drSaveBtn", "drCancelBtn",
       "mobileTabbar"
     ];
     ids.forEach((id) => {
@@ -293,6 +308,48 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function stripEmojis(str) {
+    return String(str ?? "")
+      .replace(/[\u{1F1E6}-\u{1F1FF}\u{1F300}-\u{1FAFF}\u2600-\u26FF\u2702-\u2712\u2716-\u27BF\u231A-\u231B\u23E9-\u23FA\u25FD-\u25FE\u2B50\u2B55\uFE0E\uFE0F\u200D\u20E3]+/gu, "")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }
+
+  function normDupKey(str) {
+    return String(str ?? "")
+      .normalize("NFKC")
+      .replace(/\u2212/g, "-")
+      .toLowerCase()
+      .replace(/(?<!\d)\.(?!\d)/g, "")
+      .replace(/[^\p{L}\p{N}+\-%‰$¥€£.]+/gu, "");
+  }
+
+  function cleanSignalSummary(title, summary) {
+    const t = stripEmojis(title);
+    let s = stripEmojis(summary);
+    if (!s) return "";
+    const bracket = s.match(/^【([^】]{2,140})】\s*(.*)$/);
+    if (bracket) {
+      const nt = normDupKey(t);
+      const nb = normDupKey(bracket[1]);
+      if (nb && nt && nb === nt) {
+        s = bracket[2].trim();
+      }
+    }
+    s = s.replace(/^(?:财联社|华尔街见闻|科创板日报|证券时报|新京报)\s*\d{1,2}月\d{1,2}日(?:电|讯)[，,：:\s]*/, "").trim();
+    if (!s) return "";
+    const nt = normDupKey(t);
+    const ns = normDupKey(s);
+    if (nt && (ns === nt || ((s.endsWith("...") || s.endsWith("…")) && ns.length >= 10 && nt.startsWith(ns)))) return "";
+    return s;
+  }
+
+  function isGenericSourceWhy(text) {
+    const s = stripEmojis(text);
+    if (!s) return true;
+    return /^(?:国内一线中文电报实时快讯|全球宏微观实时编译电讯|主流加密机构与监管核心媒体动态|方程式(?:加密|海外传统金融|全球宏观)一线?突发快讯|中文科技一线报道|来自精选外部信息源|全球财经头条|华尔街核心财报|道琼斯旗下盘前盘后异动|金融时报全球跨资产|美国银行体系|OpenAI 一手产品|Google |DeepMind 前沿|Anthropic |Hugging Face |arXiv |Hacker News )/.test(s);
   }
 
   function safeHttpUrl(url) {
@@ -692,7 +749,7 @@
           i += 1;
         }
         i += 1;
-        out.push("<pre><code>" + buf.join("\n") + "</code></pre>");
+        out.push('<div class="code-copy-wrap"><button type="button" class="btn btn-sm code-copy-btn" data-copy-code>复制提问词</button><pre><code>' + buf.join("\n") + "</code></pre></div>");
         continue;
       }
       const heading = line.match(MD_HEADING);
@@ -862,7 +919,7 @@
         p.hidden = p.getAttribute("data-psub-panel") !== next;
       });
     } else if (group === "research") {
-      const next = ["stocks", "macro", "kol", "articles"].includes(val) ? val : "stocks";
+      const next = ["stocks", "macro", "sentiment", "kol", "articles", "sources"].includes(val) ? val : "stocks";
       appState.researchSub = next;
       setActive(dom.researchSubTabs, "data-rsub", next);
       document.querySelectorAll("[data-rsub-panel]").forEach((p) => {
@@ -897,8 +954,10 @@
       research: { view: "research", sub: "stocks" },
       stocks: { view: "research", sub: "stocks" },
       macro: { view: "research", sub: "macro" },
+      sentiment: { view: "research", sub: "sentiment" },
       kol: { view: "research", sub: "kol" },
       articles: { view: "research", sub: "articles" },
+      sources: { view: "research", sub: "sources" },
       records: { view: "records", sub: appState.recordsSub },
       journal: { view: "records", sub: "reviews" },
       reviews: { view: "records", sub: "reviews" },
@@ -1041,7 +1100,11 @@
   }
 
   function normalizeHeldBase(raw) {
-    return String(raw || "").trim().toUpperCase().split(/[-/.]/)[0];
+    let base = String(raw || "").trim().toUpperCase().split(/[-/.]/)[0];
+    if (base.length > 4 && (base.endsWith("USDT") || base.endsWith("USDC"))) {
+      base = base.slice(0, -4);
+    }
+    return base;
   }
 
   function heldSymbolsList() {
@@ -1112,9 +1175,7 @@
     }
 
     if (dom.signalsHeading) {
-      dom.signalsHeading.innerHTML = hasHeld
-        ? '核心快讯 <button type="button" class="badge badge-accent held-jump-btn" data-scope-jump="held" title="仅看持仓相关快讯">持仓加权 · ' + heldList.length + " 标的</button>"
-        : "核心快讯";
+      dom.signalsHeading.textContent = "核心快讯";
     }
 
     if (!dom.todayOverviewBar) return;
@@ -1199,14 +1260,32 @@
   function renderGlance() {
     if (!dom.dailyGlance) return;
     const map = macroById();
-    dom.dailyGlance.innerHTML = GLANCE_IDS.filter((id) => map[id]).map((id) => {
+    const glanceOrder = [];
+    GLANCE_IDS.forEach((id) => {
+      if (map[id]) glanceOrder.push(id);
+      if (id === "vix") glanceOrder.push("__forum__");
+    });
+    const cards = glanceOrder.map((id) => {
+      if (id === "__forum__") {
+        const fs = state().forum_sentiment;
+        const fTemp = fs && typeof fs === "object" ? toNum(fs.overall_crowd_temp) : NaN;
+        if (!Number.isFinite(fTemp)) return "";
+        const fLabel = String(fs.overall_label || "查看分歧").trim();
+        const cls = fTemp >= 70 ? "is-bear" : fTemp <= 35 ? "is-bull" : "";
+        return '<button type="button" class="glance" data-jump="sentiment" title="查看全网舆论波动对照与小红书反指">' +
+          '<span class="glance-label">舆论热度</span>' +
+          '<span class="glance-value num-plain">' + escapeHtml(String(Math.round(fTemp))) + "</span>" +
+          '<span class="glance-change num-plain ' + cls + '">' + escapeHtml(fLabel) + "</span>" +
+          "</button>";
+      }
       const m = map[id];
       return '<button type="button" class="glance" data-jump="macro" title="' + escapeHtml(m.note || m.label) + '">' +
         '<span class="glance-label">' + escapeHtml(m.label) + "</span>" +
         '<span class="glance-value num-plain">' + escapeHtml(m.value_display) + "</span>" +
         (!isBlank(m.change_display) ? '<span class="glance-change num-plain ' + toneClass(m.change_num) + '">' + escapeHtml(m.change_display) + "</span>" : "") +
         "</button>";
-    }).join("");
+    }).filter(Boolean);
+    dom.dailyGlance.innerHTML = cards.join("");
   }
 
   /* ---------- 今日：信号筛选规则、持仓雷达、分值分解与快讯流 ---------- */
@@ -1394,6 +1473,17 @@
     return '<span class="badge ' + cls + '">' + escapeHtml(badge) + "</span>";
   }
 
+  function isMostlyEnglishText(raw) {
+    const cleaned = String(raw || "").replace(/https?:\/\/\S+/gi, " ").trim();
+    if (!cleaned) return false;
+    const cjk = (cleaned.match(/[\u4e00-\u9fff]/g) || []).length;
+    const ascii = (cleaned.match(/[A-Za-z]/g) || []).length;
+    if (ascii < 12) return false;
+    if (cjk === 0) return true;
+    if (cjk >= 5) return false;
+    return cjk / Math.max(1, cjk + ascii) < 0.12;
+  }
+
   function parseSignalTimeMs(raw) {
     const s = String(raw || "").trim();
     if (!s) return 0;
@@ -1439,7 +1529,7 @@
         return signalRankScore(b) - signalRankScore(a);
       });
     }
-    return copy.sort((a, b) => {
+    copy.sort((a, b) => {
       const aPri = Boolean(a && (a.selected === true || a.holding_radar || a.held_match));
       const bPri = Boolean(b && (b.selected === true || b.holding_radar || b.held_match));
       const selDiff = (bPri ? 1 : 0) - (aPri ? 1 : 0);
@@ -1450,6 +1540,34 @@
       if (impDiff !== 0) return impDiff;
       return parseSignalTimeMs(b && b.time_bjt) - parseSignalTimeMs(a && a.time_bjt);
     });
+    const cat = String((appState.daily && appState.daily.cat) || "all").toLowerCase();
+    const scope = String((appState.daily && appState.daily.scope) || "all").toLowerCase();
+    const inst = String((appState.daily && appState.daily.inst) || "").trim();
+    if ((cat === "all" || !cat) && (scope === "all" || !scope) && !inst && copy.length > 2) {
+      const headCap = 2;
+      const headKept = [];
+      const nonCryptoTail = [];
+      const deferredCrypto = [];
+      let cryptoInHead = 0;
+      for (let i = 0; i < copy.length; i += 1) {
+        const it = copy[i];
+        const isCr = String((it && it.category) || "").toLowerCase() === "crypto";
+        if (headKept.length < 15) {
+          if (isCr && cryptoInHead >= headCap) {
+            deferredCrypto.push(it);
+          } else {
+            headKept.push(it);
+            if (isCr) cryptoInHead += 1;
+          }
+        } else if (isCr) {
+          deferredCrypto.push(it);
+        } else {
+          nonCryptoTail.push(it);
+        }
+      }
+      return headKept.concat(nonCryptoTail, deferredCrypto);
+    }
+    return copy;
   }
 
   function defaultSignalLimit() {
@@ -1516,6 +1634,55 @@
       "</span>";
   }
 
+  function tickerPillHtml(sym) {
+    const up = String(sym || "").trim().toUpperCase();
+    if (!up) return "";
+    const canOpen = !appState.offline || Boolean(allStockProfiles()[up]);
+    return canOpen
+      ? '<button type="button" class="ticker" data-open-stock="' + escapeHtml(up) + '" title="打开 ' + escapeHtml(up) + ' 投研">' + escapeHtml(up) + "</button>"
+      : '<span class="ticker">' + escapeHtml(up) + "</span>";
+  }
+
+  function kolReliabilityTone(badge) {
+    const b = String(badge || "").trim();
+    if (b === "高胜率") return "badge-bull";
+    if (b === "稳健参考") return "badge-accent";
+    if (b === "观点敏锐") return "badge-warn";
+    if (b === "反向警示") return "badge-bear";
+    return "badge-outline";
+  }
+
+  function kolWinRateText(k) {
+    if (!k) return "定性观察";
+    const w20 = toNum(k.win_rate_20d);
+    const calls = toNum(k.verified_calls);
+    if (k.win_rate_20d != null && Number.isFinite(w20) && (!Number.isFinite(calls) || calls >= 5)) {
+      return "20日胜率 " + w20.toFixed(1) + "%" + (Number.isFinite(calls) && calls > 0 ? " · " + calls + "次" : "");
+    }
+    if (Number.isFinite(calls) && calls > 0) return "样本积累 · " + calls + "次";
+    return k.reliability_badge === "样本积累" ? "样本积累" : "定性观察";
+  }
+
+  function isHighWinKol(k) {
+    if (!k) return false;
+    if (k.reliability_badge === "高胜率") return true;
+    const w20 = toNum(k.win_rate_20d);
+    const calls = toNum(k.verified_calls);
+    return k.win_rate_20d != null && Number.isFinite(w20) && w20 >= 60 && (!Number.isFinite(calls) || calls >= 5);
+  }
+
+  function signalSourceHtml(src) {
+    const s = String(src || "").trim();
+    if (!s) return "";
+    if (s === "X核心观点" || s === "X深度长文") {
+      return '<span class="signal-src is-src-kol">' + escapeHtml(s) + "</span>";
+    }
+    if (s === "大佬分享") {
+      return '<span class="signal-src is-src-guru">' + escapeHtml(s) + "</span>";
+    }
+    return '<span class="signal-src">' + escapeHtml(s) + "</span>";
+  }
+
   function signalMetaHtml(s, dir, radar, omitTime) {
     const merged = toNum(s && s.merged_count);
     const mergedSources = Array.isArray(s && s.merged_sources)
@@ -1524,7 +1691,9 @@
     const radarCls = radar && radar.status === "顺风" ? "badge-bull" : radar && radar.status === "逆风" ? "badge-bear" : "badge-warn";
     return [
       '<span class="dot dot-' + dir.cls + '" aria-hidden="true"></span>',
-      '<span class="signal-src">' + escapeHtml(s.source) + "</span>",
+      signalSourceHtml(s.source),
+      !isBlank(s.author_role) ? '<span class="badge badge-outline">' + escapeHtml(s.author_role) + "</span>" : "",
+      !isBlank(s.reliability_badge) ? '<span class="badge ' + kolReliabilityTone(s.reliability_badge) + '">' + escapeHtml(s.reliability_badge) + "</span>" : "",
       (!omitTime && !isBlank(s.time_bjt)) ? '<span class="num-plain">' + escapeHtml(s.time_bjt) + "</span>" : "",
       CATEGORY_LABELS[s.category] ? '<span class="badge">' + CATEGORY_LABELS[s.category] + "</span>" : "",
       !isBlank(s.merged_count) && merged > 1
@@ -1539,10 +1708,15 @@
   function signalHtml(s, idx) {
     const dir = DIRECTION_META[s.direction] || DIRECTION_META.neutral;
     const url = safeHttpUrl(s.url);
-    const title = escapeHtml(s.title);
-    const summary = String(s.summary || "").trim();
-    const whyText = String(s.why_it_matters || "").trim();
+    const cleanTitle = stripEmojis(s.title);
+    const title = escapeHtml(cleanTitle);
+    const summary = cleanSignalSummary(cleanTitle, s.summary);
+    const zhBrief = stripEmojis(s.zh_brief || "");
+    const showZhBrief = Boolean(zhBrief) && isMostlyEnglishText(cleanTitle);
+    const hideRawSummary = showZhBrief && Boolean(summary) && isMostlyEnglishText(summary);
+    const whyText = stripEmojis(s.why_it_matters);
     const isHigh = Boolean(s.personal_high ?? (s.importance === "高"));
+    const showWhyInline = Boolean(whyText) && isHigh && !isGenericSourceWhy(whyText);
     const reasons = arr(s.reasons).filter((r) => !isBlank(r));
     const radar = computeHoldingRadar(s, heldSymbolsSet());
     const sigId = String(s.id || idx);
@@ -1556,17 +1730,21 @@
     const breakdownHtml = scoreOpen && reasons.length
       ? '<div class="score-breakdown">' + reasons.map((r) => "<span>· " + escapeHtml(r) + "</span>").join("") + "</div>"
       : "";
-    const whyHtml = whyText
-      ? '<p class="signal-why' + (isHigh ? "" : " is-extra-only") + '"><b>影响研判</b>' + escapeHtml(whyText) + "</p>"
+    const zhBriefHtml = showZhBrief
+      ? '<p class="signal-zh-brief"><b>中文简介</b>' + escapeHtml(zhBrief) + "</p>"
       : "";
-    const canExpand = summary.length > 80 || (whyText && (!isHigh || whyText.length > 34));
+    const whyHtml = whyText
+      ? '<p class="signal-why' + (showWhyInline ? "" : " is-extra-only") + '"><b>影响研判</b>' + escapeHtml(whyText) + "</p>"
+      : "";
+    const canExpand = hideRawSummary || summary.length > 80 || (whyText && (!showWhyInline || whyText.length > 34));
 
     return '<li class="signal" data-sig-id="' + escapeHtml(sigId) + '">' +
       '<span class="signal-idx num-plain" aria-hidden="true">' + (idx + 1) + "</span>" +
       '<div class="signal-body">' +
       '<div class="signal-head-row"><div class="signal-meta">' + meta + "</div>" + menuHtml + "</div>" +
       '<h3 class="signal-title">' + (url ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + title + "</a>" : title) + "</h3>" +
-      (summary ? '<p class="signal-summary">' + escapeHtml(summary) + "</p>" : "") +
+      zhBriefHtml +
+      (summary ? '<p class="signal-summary' + (hideRawSummary ? " is-extra-only" : "") + '">' + escapeHtml(summary) + "</p>" : "") +
       whyHtml +
       '<div class="signal-foot">' + signalTickersHtml(s) + signalTopicTagsHtml(s) +
       '<span class="badge badge-' + dir.cls + '">' + dir.label + "</span>" +
@@ -1578,8 +1756,12 @@
   function timelineSignalHtml(s, idx, isFirst, isLast) {
     const dir = DIRECTION_META[s.direction] || DIRECTION_META.neutral;
     const url = safeHttpUrl(s.url);
-    const title = escapeHtml(s.title);
-    const summary = String(s.summary || "").trim();
+    const cleanTitle = stripEmojis(s.title);
+    const title = escapeHtml(cleanTitle);
+    const summary = cleanSignalSummary(cleanTitle, s.summary);
+    const zhBrief = stripEmojis(s.zh_brief || "");
+    const showZhBrief = Boolean(zhBrief) && isMostlyEnglishText(cleanTitle);
+    const hideRawSummary = showZhBrief && Boolean(summary) && isMostlyEnglishText(summary);
     const radar = computeHoldingRadar(s, heldSymbolsSet());
     const sigId = String(s.id || ("tl-" + idx));
     const read = appState.readBriefs.has(sigId);
@@ -1601,10 +1783,11 @@
       '<div class="tl-row-main">' +
       '<div class="signal-head-row"><div class="signal-meta">' + meta + "</div>" + menuHtml + "</div>" +
       '<h3 class="tl-row-title">' + (url ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + title + "</a>" : title) + "</h3>" +
-      (summary ? '<p class="tl-row-summary">' + escapeHtml(summary) + "</p>" : "") +
+      (showZhBrief ? '<p class="tl-row-zh-brief"><b>中文简介</b>' + escapeHtml(zhBrief) + "</p>" : "") +
+      (summary ? '<p class="tl-row-summary' + (hideRawSummary ? " is-extra-only" : "") + '">' + escapeHtml(summary) + "</p>" : "") +
       '<div class="signal-foot">' + signalTickersHtml(s) + signalTopicTagsHtml(s) +
       '<span class="badge badge-' + dir.cls + '">' + dir.label + "</span>" +
-      (summary.length > 70 ? '<button type="button" class="btn-link" data-expand>展开全文</button>' : "") +
+      (hideRawSummary || summary.length > 70 ? '<button type="button" class="btn-link" data-expand>展开全文</button>' : "") +
       "</div></div></li>";
   }
 
@@ -1854,7 +2037,7 @@
       .slice(0, 8);
     dom.heatRadar.innerHTML = top.map((s, i) => '<li class="radar-item"><button type="button" class="radar-btn" data-radar="' + escapeHtml(s.id) + '">' +
       '<span class="radar-rank num-plain">' + (i + 1) + "</span>" +
-      '<span class="radar-title">' + escapeHtml(s.title) + "</span>" +
+      '<span class="radar-title">' + escapeHtml(stripEmojis(s.title)) + "</span>" +
       '<span class="radar-heat"><span class="num-plain">' + escapeHtml(toNum(s.heat_48h).toFixed(1)) + "</span>" + heatBadge(s.heat_badge) + "</span>" +
       "</button></li>").join("");
   }
@@ -2748,15 +2931,15 @@
 
     return '<section class="panel quick-thesis-card">' +
       '<div class="panel-head" style="margin-bottom:10px">' +
-      '<div><div class="sec-eyebrow">QUICK THESIS</div><h3 class="sec-title">多空速判</h3></div>' +
+      '<h3 class="sec-title">多空速判</h3>' +
       '<div class="qt-head-badges"><span class="badge ' + stanceCls + '">' + escapeHtml(stance) + "</span>" +
       (Number.isFinite(score) ? '<span class="qt-score num-plain">' + Math.round(score) + " 分</span>" : "") + "</div>" +
       "</div>" +
       '<div class="qt-cols">' +
-      '<div class="qt-col qt-bull"><div class="qt-col-title">利多支撑</div><ul>' + bulls.map((b) => "<li>" + escapeHtml(b) + "</li>").join("") + "</ul></div>" +
-      '<div class="qt-col qt-bear"><div class="qt-col-title">风险与纪律</div><ul>' + bears.map((b) => "<li>" + escapeHtml(b) + "</li>").join("") + "</ul></div>" +
+      '<div class="qt-col qt-bull"><div class="qt-col-title">利多支撑</div><ul>' + bulls.map((b) => "<li>" + escapeHtml(stripEmojis(b)) + "</li>").join("") + "</ul></div>" +
+      '<div class="qt-col qt-bear"><div class="qt-col-title">风险与纪律</div><ul>' + bears.map((b) => "<li>" + escapeHtml(stripEmojis(b)) + "</li>").join("") + "</ul></div>" +
       "</div>" +
-      (actionHint ? '<p class="qt-action"><b>操作提示</b>' + escapeHtml(actionHint) + "</p>" : "") +
+      (actionHint ? '<p class="qt-action"><b>操作提示</b>' + escapeHtml(stripEmojis(actionHint)) + "</p>" : "") +
       deepBar +
       "</section>";
   }
@@ -2799,7 +2982,6 @@
     ).join("");
 
     return '<section class="panel discipline-card">' +
-      '<div class="sec-eyebrow">PRE-TRADE DISCIPLINE</div>' +
       '<h3 class="sec-title">开仓纪律检查</h3>' +
       '<div class="discipline-grid">' +
       '<div class="discipline-item"><span>MA20 乖离率</span><b class="' + toneClass(bias20) + '">' + escapeHtml(Number.isFinite(bias20) ? formatSignedPct(bias20) : "—") + "</b></div>" +
@@ -2847,15 +3029,23 @@
         const up = txt.toUpperCase();
         return tks.indexOf(sym) !== -1 || tks.indexOf(symShort) !== -1 || up.indexOf(sym) !== -1 || (symShort.length >= 3 && up.indexOf(symShort) !== -1) || (cn && txt.indexOf(cn) !== -1);
       }).slice(0, 5);
-      const relKols = arr(state().kol_digest).filter((k) => {
-        const txt = String(k.headline || "") + " " + String(k.takeaway || "");
+      const relKols = arr(state().kol_digest).map((k) => {
+        const kTickers = arr(k.tickers).map((x) => String(x || "").trim().toUpperCase());
+        const bestTickers = arr(k.best_tickers).map((x) => String(x || "").trim().toUpperCase());
+        const tickerHit = kTickers.includes(sym) || (symShort.length >= 2 && kTickers.includes(symShort));
+        const bestHit = bestTickers.includes(sym) || (symShort.length >= 2 && bestTickers.includes(symShort));
+        const txt = [k.headline, k.takeaway, k.why_usable].join(" ");
         const up = txt.toUpperCase();
-        return up.indexOf(sym) !== -1 || (symShort.length >= 3 && up.indexOf(symShort) !== -1) || (cn && txt.indexOf(cn) !== -1);
-      }).slice(0, 3);
+        const textHit = up.indexOf(sym) !== -1 || (symShort.length >= 3 && up.indexOf(symShort) !== -1) || (cn && txt.indexOf(cn) !== -1);
+        const rank = (tickerHit ? 1000 : 0) + (bestHit ? 200 : 0) + (textHit ? 50 : 0) + (toNum(k.reliability_score) || 0);
+        return { k, matched: tickerHit || textHit, rank };
+      }).filter((x) => x.matched)
+        .sort((a, b) => b.rank - a.rank)
+        .slice(0, 4)
+        .map((x) => x.k);
       const secFilings = arr(p.sec_filings).filter((f) => f && !isBlank(f.form));
       const secSection = (!isCrypto && secFilings.length)
         ? '<section class="panel sec-filings-panel">' +
-          '<div class="sec-eyebrow">SEC EDGAR FILINGS</div>' +
           '<h3 class="sec-title">官方财报与监管披露</h3>' +
           '<div class="sec-filings-list">' +
           secFilings.map((f) => {
@@ -2872,7 +3062,7 @@
 
       const hasConsensus = !isCrypto && ((!isBlank(ov.analyst_rating) && ov.analyst_rating !== "—") || ov.analyst_count != null || Number.isFinite(tgt));
       const consensusSection = hasConsensus
-        ? '<section class="panel"><div class="sec-eyebrow">CONSENSUS</div><h3 class="sec-title">机构一致预期</h3>' +
+        ? '<section class="panel"><h3 class="sec-title">机构一致预期</h3>' +
           '<div class="mini-kv-grid" style="margin-top:12px;border-top:0;padding-top:0">' +
           '<div class="mini-kv"><span>综合评级</span><b>' + escapeHtml(ov.analyst_rating || "—") + "</b></div>" +
           '<div class="mini-kv"><span>覆盖机构</span><b>' + escapeHtml(ov.analyst_count != null ? String(ov.analyst_count) + " 家" : "—") + "</b></div>" +
@@ -2883,16 +3073,32 @@
 
       dom.stockInsightsCol.innerHTML =
         buildQuickThesisCard(p, relSignals, relKols) +
-        '<section class="panel"><div class="sec-eyebrow">PROFILE</div><h3 class="sec-title">' + (isCrypto ? "资产定位与驱动" : "核心业务与护城河") + "</h3>" +
-        '<p class="overview-copy" style="margin-top:10px">' + escapeHtml(p.business_overview_cn || "—") + "</p></section>" +
+        '<section class="panel"><h3 class="sec-title">' + (isCrypto ? "资产定位与驱动" : "核心业务与护城河") + "</h3>" +
+        '<p class="overview-copy" style="margin-top:10px">' + escapeHtml(stripEmojis(p.business_overview_cn || "—")) + "</p></section>" +
         buildDisciplineCard(p) +
         consensusSection +
         secSection +
         '<section class="panel"><div class="panel-head"><h3 class="sec-title">站内关联快讯与观点</h3><button type="button" class="btn-link" data-jump="today">看全部日报</button></div>' +
         '<div class="rel-list">' +
         (relSignals.length || relKols.length
-          ? relSignals.map((s) => '<div class="rel-item"><div class="rel-item-head"><span>' + escapeHtml(s.source) + '</span><span class="num-plain">' + escapeHtml(s.time_bjt || "") + '</span></div><div class="rel-item-title">' + escapeHtml(s.title) + "</div></div>").join("") +
-            relKols.map((k) => '<div class="rel-item"><div class="rel-item-head"><span>' + escapeHtml(k.handle) + '</span><span class="badge badge-' + (STANCE_CLS[k.stance] || "neutral") + '">' + escapeHtml(k.stance) + '</span></div><div class="rel-item-title">' + escapeHtml(k.headline) + "</div></div>").join("")
+          ? relSignals.map((s) => '<div class="rel-item"><div class="rel-item-head"><span>' + escapeHtml(s.source) + '</span><span class="num-plain">' + escapeHtml(s.time_bjt || "") + '</span></div><div class="rel-item-title">' + escapeHtml(stripEmojis(s.title)) + "</div></div>").join("") +
+            relKols.map((k) => {
+              const handle = String(k.handle || "");
+              const shownHandle = handle && !handle.startsWith("@") ? "@" + handle : handle;
+              const authorStr = !isBlank(k.name) && String(k.name).toLowerCase() !== handle.replace(/^@/, "").toLowerCase()
+                ? k.name + " " + shownHandle
+                : shownHandle;
+              const winStr = kolWinRateText(k);
+              const badgeStr = !isBlank(k.reliability_badge) ? String(k.reliability_badge) : "";
+              return '<div class="rel-item"><div class="rel-item-head"><span class="rel-kol-author">' + escapeHtml(authorStr) +
+                (!isBlank(k.role_label) ? ' <span class="badge badge-outline">' + escapeHtml(k.role_label) + "</span>" : "") +
+                (badgeStr ? ' <span class="badge ' + kolReliabilityTone(badgeStr) + '">' + escapeHtml(badgeStr) + "</span>" : "") +
+                (winStr && winStr !== badgeStr ? ' <span class="num-plain rel-win">' + escapeHtml(winStr) + "</span>" : "") +
+                '</span><span class="badge badge-' + (STANCE_CLS[k.stance] || "neutral") + '">' + escapeHtml(k.stance) + '</span></div>' +
+                '<div class="rel-item-title">' + escapeHtml(stripEmojis(k.headline)) + "</div>" +
+                (!isBlank(k.why_usable) ? '<div class="panel-meta" style="margin-top:4px">' + escapeHtml(stripEmojis(k.why_usable)) + "</div>" : "") +
+                "</div>";
+            }).join("")
           : '<div class="empty-hint">今日快讯库暂无直接提及 ' + escapeHtml(sym) + " 的增量信号</div>") +
         "</div></section>";
     }
@@ -2915,7 +3121,7 @@
             "</tbody></table></div>"
           : "";
         dom.stockSectionsCol.innerHTML =
-          '<section class="panel"><div class="sec-eyebrow">SECTION 01</div><h3 class="sec-title">盘面与流动性概览<span class="sec-sub">Market &amp; Liquidity</span></h3>' +
+          '<section class="panel"><h3 class="sec-title">盘面与流动性概览</h3>' +
           '<div class="metric-grid-3" style="margin-top:14px">' +
           mCard("24h 成交额", cm.turnover_24h_fmt || ov.turnover_fmt) +
           mCard("24h 成交量", cm.base_vol_24h_fmt || ov.volume_fmt) +
@@ -2924,7 +3130,7 @@
           mCard("24h 最低", cm.low_24h != null ? formatAssetPrice(cm.low_24h, curSym) : "—") +
           mCard("365日高点", ov.high_52w != null ? formatAssetPrice(ov.high_52w, curSym) : "—") +
           "</div></section>" +
-          '<section class="panel"><div class="sec-eyebrow">SECTION 02</div><h3 class="sec-title">波动率与周期表现<span class="sec-sub">Volatility &amp; Momentum</span></h3>' +
+          '<section class="panel"><h3 class="sec-title">波动率与周期表现</h3>' +
           '<div class="metric-grid-3" style="margin-top:14px">' +
           mCard("30日年化波动", cm.vol_30d_ann_pct != null ? cm.vol_30d_ann_pct + "%" : "—") +
           mCard("90日最大回撤", cm.max_drawdown_90d_pct != null ? cm.max_drawdown_90d_pct + "%" : "—", toneClass(cm.max_drawdown_90d_pct)) +
@@ -2933,7 +3139,7 @@
           mCard("近30日收益", ch.return_1m != null ? formatSignedPct(ch.return_1m) : "—", toneClass(ch.return_1m)) +
           mCard("近1年收益", ch.return_1y != null ? formatSignedPct(ch.return_1y) : "—", toneClass(ch.return_1y)) +
           "</div></section>" +
-          '<section class="panel"><div class="sec-eyebrow">SECTION 03</div><h3 class="sec-title">同板块资产对照<span class="sec-sub">Crypto Peers</span></h3>' +
+          '<section class="panel"><h3 class="sec-title">同板块资产对照</h3>' +
           cPeerTable + "</section>";
         return;
       }
@@ -2972,20 +3178,20 @@
         : "";
 
       dom.stockSectionsCol.innerHTML =
-        '<section class="panel"><div class="sec-eyebrow">SECTION 01</div><h3 class="sec-title">公司概览<span class="sec-sub">Overview</span></h3>' +
+        '<section class="panel"><h3 class="sec-title">公司概览</h3>' +
         '<div class="metric-grid-3" style="margin-top:14px">' +
         mCard("总市值", ov.market_cap_fmt) + mCard("市盈率 P/E", fmtMetricVal(ov.pe_ttm, 2)) + mCard("远期 P/E", fmtMetricVal(ov.pe_forward, 2)) +
         mCard("每股收益 EPS", ov.eps_ttm != null ? curSym + fmtMetricVal(ov.eps_ttm, 2) : "—") + mCard("股息率", ov.dividend_yield_fmt) + mCard("成交量", ov.volume_fmt) +
         mCard("成交额", ov.turnover_fmt) + mCard("Beta 系数", fmtMetricVal(ov.beta, 2)) + mCard("机构持股占比", ov.institution_pct) +
         "</div></section>" +
-        '<section class="panel"><div class="sec-eyebrow">SECTION 02</div><h3 class="sec-title">财务体检<span class="sec-sub">Financial Health</span></h3>' +
+        '<section class="panel"><h3 class="sec-title">财务体检</h3>' +
         '<div class="metric-grid-3" style="margin-top:14px">' +
         mCard("营收规模", fin.ttm_revenue_fmt) + mCard("EBITDA TTM", fin.ttm_ebitda_fmt) + mCard("经营/自由现金流", fin.ttm_fcf_fmt !== "—" ? fin.ttm_fcf_fmt : fin.ttm_ocf_fmt) +
         mCard("毛利率", fin.gross_margin) + mCard("营业利润率", fin.operating_margin) + mCard("净利率", fin.net_margin) +
         mCard("净资产收益率 ROE", fin.roe) + mCard("总资产收益率 ROA", fin.roa) + mCard("流动比率", fin.current_ratio) +
         mCard("现金储备", fin.total_cash_fmt) + mCard("总负债", fin.total_debt_fmt) + mCard("负债/权益", fin.debt_to_equity && fin.debt_to_equity !== "—" ? fin.debt_to_equity + "%" : "—") +
         "</div>" + qTable + "</section>" +
-        '<section class="panel"><div class="sec-eyebrow">SECTION 03</div><h3 class="sec-title">估值判断与同行对比<span class="sec-sub">Valuation &amp; Peers</span></h3>' +
+        '<section class="panel"><h3 class="sec-title">估值判断与同行对比</h3>' +
         '<div class="metric-grid-3" style="margin-top:14px">' +
         mCard("市盈率 P/E", fmtMetricVal(val.pe_ttm, 2)) + mCard("远期 P/E", fmtMetricVal(val.pe_forward, 2)) + mCard("市销率 P/S", fmtMetricVal(val.ps_ttm, 2)) +
         mCard("市净率 P/B", fmtMetricVal(val.pb, 2)) + mCard("EV / EBITDA", fmtMetricVal(val.ev_ebitda, 2)) + mCard("PEG", fmtMetricVal(val.peg, 2)) +
@@ -3050,6 +3256,449 @@
   }
 
   /* ---------- 宏观与关联 ---------- */
+
+  function synthToneBadge(tone) {
+    if (tone === "bull") return "badge-bull";
+    if (tone === "bear") return "badge-bear";
+    if (tone === "warn") return "badge-warn";
+    return "badge-outline";
+  }
+
+  function renderMarketSynthesis() {
+    if (!dom.marketSynthesisPanel) return;
+    const ma = state().market_analysis;
+    if (!ma || typeof ma !== "object") {
+      dom.marketSynthesisPanel.hidden = true;
+      return;
+    }
+    const dims = arr(ma.market_dimensions);
+    const links = arr(ma.cross_source_links);
+    const alerts = arr(ma.divergence_alerts);
+    const hasVerdict = !isBlank(ma.headline_verdict);
+    if (!hasVerdict && !dims.length && !links.length && !alerts.length) {
+      dom.marketSynthesisPanel.hidden = true;
+      return;
+    }
+    dom.marketSynthesisPanel.hidden = false;
+
+    if (dom.marketStanceBadge) {
+      const st = String(ma.stance || "").trim();
+      const sCls = STANCE_CLS[st] || "neutral";
+      dom.marketStanceBadge.innerHTML = st
+        ? '<span class="badge badge-' + sCls + '">' + escapeHtml(st) + "</span>"
+        : "";
+    }
+    if (dom.marketAsOf) {
+      dom.marketAsOf.textContent = !isBlank(ma.as_of) ? String(ma.as_of) : "";
+    }
+    if (dom.marketVerdict) {
+      dom.marketVerdict.hidden = !hasVerdict;
+      dom.marketVerdict.textContent = hasVerdict ? String(ma.headline_verdict) : "";
+    }
+    if (dom.marketDimensions) {
+      dom.marketDimensions.hidden = !dims.length;
+      dom.marketDimensions.innerHTML = dims.map((d) => {
+        const tone = String(d.tone || "neutral");
+        const bCls = synthToneBadge(tone);
+        const cardTone = (tone === "bull" || tone === "bear" || tone === "warn") ? " tone-" + tone : "";
+        return '<article class="market-dim-card' + cardTone + '">' +
+          '<div class="mdim-head"><span class="mdim-name">' + escapeHtml(d.name || "") + "</span>" +
+          (!isBlank(d.status) ? '<span class="badge ' + bCls + '">' + escapeHtml(d.status) + "</span>" : "") + "</div>" +
+          (!isBlank(d.metric) ? '<div class="mdim-metric num-plain">' + escapeHtml(d.metric) + "</div>" : "") +
+          (!isBlank(d.implication) ? '<p class="mdim-imp">' + escapeHtml(d.implication) + "</p>" : "") +
+          "</article>";
+      }).join("");
+    }
+    if (dom.marketDivergenceAlerts) {
+      if (alerts.length) {
+        dom.marketDivergenceAlerts.hidden = false;
+        dom.marketDivergenceAlerts.innerHTML = alerts.map((al) => {
+          const tks = arr(al.tickers).slice(0, 4).map(tickerPillHtml).join("");
+          return '<div class="synth-alert-item tone-' + escapeHtml(al.tone || "warn") + '">' +
+            '<div class="synth-alert-head"><b>' + escapeHtml(al.title || "异常联动") + "</b>" +
+            (tks ? '<span class="synth-alert-tickers">' + tks + "</span>" : "") + "</div>" +
+            (!isBlank(al.detail) ? '<p class="synth-alert-detail">' + escapeHtml(al.detail) + "</p>" : "") +
+            "</div>";
+        }).join("");
+      } else {
+        dom.marketDivergenceAlerts.hidden = true;
+        dom.marketDivergenceAlerts.innerHTML = "";
+      }
+    }
+    if (dom.crossSourceHead) dom.crossSourceHead.hidden = !links.length;
+    if (dom.crossSourceCount) dom.crossSourceCount.textContent = links.length ? links.length + " 组联动" : "";
+    if (dom.crossSourceLinks) {
+      dom.crossSourceLinks.hidden = !links.length;
+      dom.crossSourceLinks.innerHTML = links.map((lk) => {
+        const tone = String(lk.tone || "neutral");
+        const conf = toNum(lk.confidence);
+        const lanes = [
+          { label: "快讯", items: arr(lk.news_evidence).filter((x) => !isBlank(x)) },
+          { label: "高胜率KOL", items: arr(lk.kol_evidence).filter((x) => !isBlank(x)) },
+          { label: "大佬长文", items: arr(lk.guru_evidence).filter((x) => !isBlank(x)) }
+        ].filter((ln) => ln.items.length > 0);
+        const tks = arr(lk.tickers).slice(0, 5).map(tickerPillHtml).join("");
+        const artFile = !isBlank(lk.related_article_file) ? String(lk.related_article_file) : "";
+        return '<article class="xlink-card tone-' + escapeHtml(tone) + '">' +
+          '<div class="xlink-head">' +
+          '<h4 class="xlink-title">' + escapeHtml(lk.focus || "") + "</h4>" +
+          '<div class="xlink-badges">' +
+          (!isBlank(lk.pattern) ? '<span class="badge ' + synthToneBadge(tone) + '">' + escapeHtml(lk.pattern) + "</span>" : "") +
+          (Number.isFinite(conf) ? '<span class="badge badge-outline num-plain">置信度 ' + Math.round(conf) + "%</span>" : "") +
+          "</div></div>" +
+          (!isBlank(lk.conclusion) ? '<p class="xlink-conclusion">' + escapeHtml(lk.conclusion) + "</p>" : "") +
+          (lanes.length
+            ? '<div class="xlink-lanes">' + lanes.map((ln) =>
+                '<div class="xlink-lane"><span class="xlink-lane-lbl">' + escapeHtml(ln.label) + '</span><ul>' +
+                ln.items.slice(0, 3).map((txt) => "<li>" + escapeHtml(txt) + "</li>").join("") +
+                "</ul></div>"
+              ).join("") + "</div>"
+            : "") +
+          ((!isBlank(lk.market_check) || !isBlank(lk.watch_trigger))
+            ? '<div class="xlink-checks">' +
+              (!isBlank(lk.market_check) ? '<div class="xlink-chk"><b>盘面检验</b><span>' + escapeHtml(lk.market_check) + "</span></div>" : "") +
+              (!isBlank(lk.watch_trigger) ? '<div class="xlink-chk"><b>观察触发</b><span>' + escapeHtml(lk.watch_trigger) + "</span></div>" : "") +
+              "</div>"
+            : "") +
+          ((tks || artFile)
+            ? '<div class="xlink-foot">' +
+              (tks ? '<div class="xlink-tickers">' + tks + "</div>" : "<span></span>") +
+              (artFile ? '<button type="button" class="btn btn-sm" data-open-article="' + escapeHtml(artFile) + '">阅读关联长文</button>' : "") +
+              "</div>"
+            : "") +
+          "</article>";
+      }).join("");
+    }
+  }
+
+  function forumStatusCls(status) {
+    const s = String(status || "").trim();
+    if (s === "实时在线" || s === "免登直采") return "online";
+    if (s === "部分受限") return "limited";
+    return "auth";
+  }
+
+  function forumOverallBadgeTone(temp, label) {
+    const lbl = String(label || "");
+    if (lbl.indexOf("过热") !== -1 || lbl.indexOf("狂热") !== -1) return "badge-bear";
+    if (lbl.indexOf("恐慌") !== -1 || lbl.indexOf("见底") !== -1) return "badge-bull";
+    if (Number.isFinite(temp) && temp >= 70) return "badge-warn";
+    if (Number.isFinite(temp) && temp <= 30) return "badge-bull";
+    return "badge-accent";
+  }
+
+  function forumBarMetrics(score, opts) {
+    const raw = toNum(score);
+    const val = Number.isFinite(raw) ? Math.max(-100, Math.min(100, raw)) : 0;
+    const half = Math.abs(val) / 2;
+    const left = val >= 0 ? 50 : 50 - half;
+    const isWarn = opts && opts.warn;
+    const fillCls = isWarn ? "is-warn" : (val > 5 ? "is-bull" : val < -5 ? "is-bear" : "is-neutral");
+    const signed = Number.isFinite(raw) ? (val > 0 ? "+" : "") + Math.round(val) : "—";
+    return { left, width: Math.max(half, 1.5), fillCls, signed };
+  }
+
+  function renderForumMacroPillsHtml(mp) {
+    if (!mp || typeof mp !== "object") return "";
+    const pills = [];
+    if (!isBlank(mp.a_turnover_display)) {
+      const shPct = toNum(mp.sh_pct);
+      const sub = Number.isFinite(shPct) ? ("上证 " + (shPct >= 0 ? "+" : "") + shPct.toFixed(1) + "%") : "";
+      const subCls = Number.isFinite(shPct) ? (shPct >= 0 ? "is-bull" : "is-bear") : "";
+      pills.push(
+        '<div class="fms-pill">' +
+        '<span class="fms-lbl">沪深成交</span>' +
+        '<span class="fms-val num-plain">' + escapeHtml(String(mp.a_turnover_display)) + "</span>" +
+        (sub ? '<span class="fms-sub num-plain ' + subCls + '">' + escapeHtml(sub) + "</span>" : "") +
+        "</div>"
+      );
+    }
+    if (!isBlank(mp.rzrq_balance_display)) {
+      const rzNet = toNum(mp.rzrq_net_buy_yi);
+      const rzBuy = toNum(mp.rzrq_buy_yi);
+      const sub = Number.isFinite(rzNet)
+        ? ("净" + (rzNet >= 0 ? "+" : "") + Math.round(rzNet) + "亿")
+        : (Number.isFinite(rzBuy) ? ("买" + Math.round(rzBuy) + "亿") : "");
+      const subCls = Number.isFinite(rzNet) ? (rzNet >= 0 ? "is-bull" : "is-bear") : "";
+      pills.push(
+        '<div class="fms-pill">' +
+        '<span class="fms-lbl">两融余额</span>' +
+        '<span class="fms-val num-plain">' + escapeHtml(String(mp.rzrq_balance_display)) + "</span>" +
+        (sub ? '<span class="fms-sub num-plain ' + subCls + '">' + escapeHtml(sub) + "</span>" : "") +
+        "</div>"
+      );
+    }
+    const sb = toNum(mp.southbound_net_yi_hkd);
+    if (Number.isFinite(sb)) {
+      const sbCls = sb > 5 ? "is-bull" : sb < -5 ? "is-bear" : "";
+      const sb5d = toNum(mp.southbound_5d_net_yi_hkd);
+      const sub = Number.isFinite(sb5d) ? ("5日" + (sb5d >= 0 ? "+" : "") + sb5d.toFixed(0) + "亿") : "";
+      pills.push(
+        '<div class="fms-pill">' +
+        '<span class="fms-lbl">南向资金</span>' +
+        '<span class="fms-val num-plain ' + sbCls + '">' + escapeHtml((sb >= 0 ? "+" : "") + sb.toFixed(1) + "亿港元") + "</span>" +
+        (sub ? '<span class="fms-sub num-plain">' + escapeHtml(sub) + "</span>" : "") +
+        "</div>"
+      );
+    }
+    const massPct = toNum(mp.mass_penetration_pct);
+    const totalSlots = toNum(mp.mass_total_slots);
+    const finHits = toNum(mp.mass_finance_hits);
+    const ahkHits = toNum(mp.mass_ahk_hits);
+    if (Number.isFinite(massPct) && Number.isFinite(totalSlots) && totalSlots > 0) {
+      const isHot = massPct >= 8.0 || (Number.isFinite(ahkHits) && ahkHits >= 5);
+      const sub = Number.isFinite(finHits) ? (Math.round(finHits) + "/" + Math.round(totalSlots) + "条") : "";
+      pills.push(
+        '<div class="fms-pill' + (isHot ? " is-warn" : "") + '" title="微博、百度、头条、抖音、知乎、B站总热榜中的财经破圈占比">' +
+        '<span class="fms-lbl">大众热榜占榜</span>' +
+        '<span class="fms-val num-plain">' + escapeHtml(massPct.toFixed(1) + "%") + "</span>" +
+        (sub ? '<span class="fms-sub num-plain">' + escapeHtml(sub) + "</span>" : "") +
+        "</div>"
+      );
+    }
+    return pills.join("");
+  }
+
+  function renderForumSentiment() {
+    if (!dom.forumSentimentPanel) return;
+    const fs = state().forum_sentiment;
+    if (!fs || typeof fs !== "object") {
+      dom.forumSentimentPanel.hidden = true;
+      return;
+    }
+    const channels = arr(fs.channels_status);
+    const divs = arr(fs.divergences);
+    const hots = arr(fs.hot_discussions);
+    if (!channels.length && !divs.length) {
+      dom.forumSentimentPanel.hidden = true;
+      return;
+    }
+    dom.forumSentimentPanel.hidden = false;
+
+    if (dom.forumContrarianBadge) {
+      const warnDivs = divs.filter((d) => d && (d.divergence_tag === "热度偏高" || d.divergence_tag === "散户过热" || d.divergence_tag === "出圈见顶"));
+      const temp = toNum(fs.overall_crowd_temp);
+      if (warnDivs.length) {
+        dom.forumContrarianBadge.innerHTML = '<span class="badge badge-warn">偏热提醒 · ' + escapeHtml(warnDivs.map((d) => d.topic).slice(0, 2).join(" / ")) + "</span>";
+      } else if (Number.isFinite(temp) && temp >= 68) {
+        dom.forumContrarianBadge.innerHTML = '<span class="badge badge-warn">情绪温度偏高</span>';
+      } else {
+        dom.forumContrarianBadge.innerHTML = '<span class="panel-meta">多平台讨论热度与专业观点对照</span>';
+      }
+    }
+
+    if (dom.forumOverallBadge) {
+      const temp = toNum(fs.overall_crowd_temp);
+      const lbl = String(fs.overall_label || "").trim();
+      if (Number.isFinite(temp)) {
+        const parts = ["散户温度 " + Math.round(temp)];
+        if (lbl) parts.push(lbl);
+        dom.forumOverallBadge.innerHTML = '<span class="badge ' + forumOverallBadgeTone(temp, lbl) + ' num-plain">' + escapeHtml(parts.join(" · ")) + "</span>";
+      } else {
+        dom.forumOverallBadge.innerHTML = '<span class="badge badge-outline">' + escapeHtml(lbl || "暂无样本") + "</span>";
+      }
+    }
+
+    if (dom.forumChannelsBar) {
+      dom.forumChannelsBar.innerHTML = channels.map((ch) => {
+        const name = String(ch.name || ch.id || "").trim();
+        const st = String(ch.status || "").trim();
+        const cnt = toNum(ch.count);
+        const note = String(ch.note || "").trim();
+        return '<span class="forum-ch-pill is-' + forumStatusCls(st) + '"' +
+          (note ? ' title="' + escapeHtml(note) + '"' : "") + ">" +
+          '<span class="forum-ch-dot" aria-hidden="true"></span>' +
+          "<span>" + escapeHtml(name + (st ? " · " + st : "") + (Number.isFinite(cnt) && cnt > 0 ? " (" + Math.round(cnt) + ")" : "")) + "</span>" +
+          "</span>";
+      }).join("");
+    }
+
+    if (dom.forumMacroStrip) {
+      const macroPills = renderForumMacroPillsHtml(fs.market_pulse);
+      dom.forumMacroStrip.innerHTML = macroPills;
+      dom.forumMacroStrip.hidden = !macroPills;
+    }
+
+    if (dom.forumDivergenceGrid) {
+      dom.forumDivergenceGrid.innerHTML = divs.map((d) => {
+        const tone = String(d.tone || "neutral");
+        const dCnt = toNum(d.desk_count);
+        const sCnt = toNum(d.street_count);
+        const deskM = forumBarMetrics(d.desk_score, { warn: false });
+        const streetHeat = toNum(d.street_heat);
+        const streetScore = toNum(d.street_score);
+        const hasStreetSample = Number.isFinite(streetHeat) && Number.isFinite(streetScore);
+        const streetM = hasStreetSample
+          ? forumBarMetrics(streetScore, { warn: streetHeat >= 70 || tone === "warn" })
+          : { left: 50, width: 0, fillCls: "is-neutral", signed: "暂无样本" };
+        const deskBarText = Number.isFinite(dCnt) && dCnt === 0
+          ? "暂无样本"
+          : ((d.desk_bias ? d.desk_bias + " " : "") + deskM.signed + (Number.isFinite(dCnt) && dCnt > 0 ? " · " + Math.round(dCnt) + "条" : ""));
+        const streetBarText = hasStreetSample
+          ? (streetM.signed + " · 热度" + Math.round(streetHeat) + (Number.isFinite(sCnt) && sCnt > 0 ? " · " + Math.round(sCnt) + "条" : ""))
+          : "暂无样本";
+        const deskSamples = arr(d.desk_samples).slice(0, 2);
+        const streetSamples = arr(d.street_samples).slice(0, 2);
+        return '<article class="forum-div-card tone-' + escapeHtml(tone) + '">' +
+          '<div class="forum-div-head">' +
+          '<h3 class="forum-div-topic">' + escapeHtml(d.topic || "") + "</h3>" +
+          (!isBlank(d.divergence_tag) ? '<span class="badge ' + synthToneBadge(tone) + '">' + escapeHtml(d.divergence_tag) + "</span>" : "") +
+          "</div>" +
+          '<div class="forum-bars">' +
+          '<div class="forum-bar-row">' +
+          '<span class="forum-bar-lbl">专业层</span>' +
+          '<div class="forum-bar-track" aria-hidden="true"><span class="forum-bar-mid"></span><i class="forum-bar-fill ' + deskM.fillCls + '" style="left:' + deskM.left + "%;width:" + deskM.width + '%"></i></div>' +
+          '<span class="forum-bar-val num-plain">' + escapeHtml(deskBarText) + "</span>" +
+          "</div>" +
+          '<div class="forum-bar-row">' +
+          '<span class="forum-bar-lbl">散户层</span>' +
+          '<div class="forum-bar-track" aria-hidden="true"><span class="forum-bar-mid"></span><i class="forum-bar-fill ' + streetM.fillCls + '" style="left:' + streetM.left + "%;width:" + streetM.width + '%"></i></div>' +
+          '<span class="forum-bar-val num-plain">' + escapeHtml(streetBarText) + "</span>" +
+          "</div>" +
+          "</div>" +
+          (!isBlank(d.action_hint) ? '<p class="forum-div-hint">' + escapeHtml(d.action_hint) + "</p>" : "") +
+          ((deskSamples.length || streetSamples.length)
+            ? '<div class="forum-samples">' +
+              deskSamples.map((s) => {
+                const u = safeHttpUrl(s.url);
+                const sumTxt = stripEmojis(s.summary || "");
+                const zhBr = stripEmojis(s.zh_brief || "");
+                const showDeskZh = Boolean(zhBr) && isMostlyEnglishText(sumTxt);
+                return '<div class="forum-sample-row"><span class="badge badge-outline">专业</span>' +
+                  (!isBlank(s.author) ? '<b class="forum-sample-author">' + escapeHtml(s.author) + "</b>" : "") +
+                  '<span class="forum-sample-txt">' + escapeHtml(showDeskZh ? (zhBr + "（" + sumTxt + "）") : sumTxt) + "</span>" +
+                  (u ? '<a class="forum-sample-link" href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer">原帖 ↗</a>' : "") +
+                  "</div>";
+              }).join("") +
+              streetSamples.map((s) => {
+                const u = safeHttpUrl(s.url);
+                const cleanTitle = stripEmojis(s.title || "");
+                const zhBr = stripEmojis(s.zh_brief || "");
+                const showStreetZh = Boolean(zhBr) && isMostlyEnglishText(cleanTitle);
+                return '<div class="forum-sample-row"><span class="badge badge-warn">' + escapeHtml(s.platform || "社区") + "</span>" +
+                  '<div class="forum-sample-main">' +
+                  (u
+                    ? '<a class="forum-sample-txt forum-sample-title" href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(cleanTitle) + "\u00a0↗</a>"
+                    : '<span class="forum-sample-txt">' + escapeHtml(cleanTitle) + "</span>") +
+                  (showStreetZh ? '<span class="forum-zh-brief">中文简介：' + escapeHtml(zhBr) + "</span>" : "") +
+                  "</div></div>";
+              }).join("") +
+              "</div>"
+            : "") +
+          "</article>";
+      }).join("");
+    }
+
+    if (dom.forumHotWrap && dom.forumHotList) {
+      if (dom.forumUpdatedAt) dom.forumUpdatedAt.textContent = !isBlank(fs.updated_at_bjt) ? String(fs.updated_at_bjt) : "";
+      if (hots.length) {
+        dom.forumHotWrap.hidden = false;
+        dom.forumHotList.innerHTML = hots.slice(0, 6).map((h) => {
+          const u = safeHttpUrl(h.url);
+          const sCls = STANCE_CLS[h.sentiment] || "neutral";
+          const tks = arr(h.tickers).slice(0, 3).map(tickerPillHtml).filter(Boolean).join("");
+          const heat = toNum(h.heat);
+          const cleanTitle = stripEmojis(h.title || "");
+          const zhBr = stripEmojis(h.zh_brief || "");
+          const showHotZh = Boolean(zhBr) && isMostlyEnglishText(cleanTitle);
+          return '<div class="forum-hot-item">' +
+            '<div class="forum-hot-meta">' +
+            (!isBlank(h.platform) ? '<span class="badge badge-outline">' + escapeHtml(h.platform) + "</span>" : "") +
+            (!isBlank(h.sentiment) ? '<span class="badge badge-' + sCls + '">' + escapeHtml(h.sentiment) + "</span>" : "") +
+            (Number.isFinite(heat) ? '<span class="num-plain forum-hot-heat">热度 ' + Math.round(heat) + "</span>" : "") +
+            "</div>" +
+            (u
+              ? '<a class="forum-hot-title" href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(cleanTitle) + "\u00a0↗</a>"
+              : '<span class="forum-hot-title">' + escapeHtml(cleanTitle) + "</span>") +
+            (showHotZh ? '<p class="forum-zh-brief">中文简介：' + escapeHtml(zhBr) + "</p>" : "") +
+            (tks ? '<div class="forum-hot-tickers">' + tks + "</div>" : "") +
+            "</div>";
+        }).join("");
+      } else {
+        dom.forumHotWrap.hidden = true;
+        dom.forumHotList.innerHTML = "";
+      }
+    }
+  }
+
+  function renderTodaySentimentCard() {
+    if (!dom.todaySentimentCard) return;
+    const fs = state().forum_sentiment;
+    if (!fs || typeof fs !== "object") {
+      dom.todaySentimentCard.hidden = true;
+      dom.todaySentimentCard.innerHTML = "";
+      return;
+    }
+    const channels = arr(fs.channels_status);
+    const divs = arr(fs.divergences);
+    const hots = arr(fs.hot_discussions);
+    if (!channels.length && !divs.length && !hots.length) {
+      dom.todaySentimentCard.hidden = true;
+      dom.todaySentimentCard.innerHTML = "";
+      return;
+    }
+    dom.todaySentimentCard.hidden = false;
+
+    const temp = toNum(fs.overall_crowd_temp);
+    const lbl = String(fs.overall_label || "").trim();
+    const tempBadge = Number.isFinite(temp)
+      ? '<span class="badge ' + forumOverallBadgeTone(temp, lbl) + ' num-plain">综合情绪指数 ' + Math.round(temp) + (lbl ? " · " + escapeHtml(lbl) : "") + "</span>"
+      : '<span class="badge badge-outline">' + escapeHtml(lbl || "暂无样本") + "</span>";
+
+    const warnDivs = divs.filter((d) => d && (d.divergence_tag === "热度偏高" || d.divergence_tag === "散户过热" || d.divergence_tag === "出圈见顶"));
+    const contrarianHtml = warnDivs.length
+      ? '<span class="badge badge-warn">情绪偏热 · ' + escapeHtml(warnDivs[0].topic || "") + "</span>"
+      : "";
+
+    const rankedDivs = divs.slice().sort((a, b) => {
+      const hasSample = (d) => d && Number.isFinite(toNum(d.street_heat)) && Number.isFinite(toNum(d.street_score));
+      const rankOf = (d) => {
+        if (!d) return 0;
+        const base = hasSample(d) ? 200 : 0;
+        if (d.divergence_tag === "热度偏高" || d.divergence_tag === "散户过热" || d.divergence_tag === "出圈见顶") return base + 1000;
+        if (d.divergence_tag && d.divergence_tag !== "情绪平稳" && d.divergence_tag !== "暂无样本") return base + 500;
+        return base;
+      };
+      const scoreA = rankOf(a) + Math.abs(toNum(a.desk_score) || 0) + Math.abs(toNum(a.street_score) || 0);
+      const scoreB = rankOf(b) + Math.abs(toNum(b.desk_score) || 0) + Math.abs(toNum(b.street_score) || 0);
+      return scoreB - scoreA;
+    }).slice(0, 4);
+
+    const indexCardsHtml = rankedDivs.map((d) => {
+      const tone = String(d.tone || "neutral");
+      const deskVal = toNum(d.desk_score);
+      const streetVal = toNum(d.street_score);
+      const dCnt = toNum(d.desk_count);
+      const hasStreetSample = Number.isFinite(streetVal) && Number.isFinite(toNum(d.street_heat));
+      const fmtS = (v) => Number.isFinite(v) ? (v > 0 ? "+" : "") + Math.round(v) : "0";
+      const deskText = Number.isFinite(dCnt) && dCnt === 0 ? "专业 暂无" : ("专业 " + fmtS(deskVal));
+      const streetText = hasStreetSample ? ("散户 " + fmtS(streetVal)) : "散户 暂无";
+      return '<button type="button" class="ts-index-card" data-jump="sentiment">' +
+        '<div class="ts-index-head">' +
+        '<span class="ts-index-topic">' + escapeHtml(d.topic || "") + "</span>" +
+        '<span class="badge ' + synthToneBadge(tone) + '">' + escapeHtml(d.divergence_tag || "情绪平稳") + "</span>" +
+        "</div>" +
+        '<div class="ts-index-nums num-plain">' + escapeHtml(deskText + " · " + streetText) + "</div>" +
+        "</button>";
+    }).join("");
+
+    const macroPills = renderForumMacroPillsHtml(fs.market_pulse);
+    const macroStripHtml = macroPills ? '<div class="forum-macro-strip ts-macro-strip">' + macroPills + "</div>" : "";
+
+    dom.todaySentimentCard.innerHTML =
+      '<div class="panel-head ts-head">' +
+      '<div class="synth-head-left">' +
+      '<h2 class="sec-title">全网舆论风向</h2>' +
+      tempBadge +
+      contrarianHtml +
+      "</div>" +
+      '<div class="ts-head-right">' +
+      '<button type="button" class="btn btn-sm btn-ghost" data-jump="sentiment">详细热度与原帖 →</button>' +
+      "</div>" +
+      "</div>" +
+      macroStripHtml +
+      (indexCardsHtml ? '<div class="ts-index-grid">' + indexCardsHtml + "</div>" : "");
+  }
 
   function renderMacroGroups() {
     if (!dom.macroGroups) return;
@@ -3141,14 +3790,24 @@
     }).join("");
   }
 
-  /* ---------- KOL 观点树 ---------- */
+  /* ---------- KOL 观点与历史胜率 ---------- */
 
   function kolFiltered(ignoreTopic) {
     const f = appState.kol, kw = f.keyword.toLowerCase();
     return arr(state().kol_digest).filter((k) => {
       if (!ignoreTopic && f.topic !== "all" && k.topic !== f.topic) return false;
       if (f.stance !== "all" && k.stance !== f.stance) return false;
-      if (kw && [k.handle, k.headline, k.takeaway, k.topic, k.group].join(" ").toLowerCase().indexOf(kw) === -1) return false;
+      if (f.highWinOnly && !isHighWinKol(k)) return false;
+      if (kw && [k.handle, k.name, k.role_label, k.headline, k.takeaway, k.why_usable, k.topic, k.group, arr(k.tickers).join(" ")].join(" ").toLowerCase().indexOf(kw) === -1) return false;
+      return true;
+    });
+  }
+
+  function kolScorecardsFiltered() {
+    const f = appState.kol, kw = f.keyword.toLowerCase();
+    return arr(state().kol_scorecards).filter((c) => {
+      if (f.highWinOnly && !isHighWinKol(c)) return false;
+      if (kw && [c.handle, c.name, c.role_label, c.category_label, c.focus, c.latest_headline, arr(c.best_tickers).join(" ")].join(" ").toLowerCase().indexOf(kw) === -1) return false;
       return true;
     });
   }
@@ -3200,24 +3859,37 @@
       return '<button type="button" class="topic-bar' + (on ? " is-active" : "") + '" data-topic="' + escapeHtml(tp) + '">' +
         '<span class="topic-name">' + escapeHtml(tp) + '</span><span class="topic-split" aria-hidden="true">' +
         '<span class="l"><i style="width:' + (g.bull / maxSide) * 100 + '%"></i></span><span class="r"><i style="width:' + (g.bear / maxSide) * 100 + '%"></i></span></span>' +
-        '<span class="topic-count num-plain">' + g.bull + "多 / " + g.bear + "空</span></button>";
+        '<span class="topic-count num-plain">' + (g.bull === 0 && g.bear === 0 && g.total > 0 ? g.total + "中性" : g.bull + "多 / " + g.bear + "空") + "</span></button>";
     }).join("");
   }
 
   function kolCardHtml(k) {
     const cls = STANCE_CLS[k.stance] || "neutral";
     const handle = String(k.handle || "");
+    const rawHandle = handle.replace(/^@/, "");
     const shownHandle = handle && !handle.startsWith("@") ? "@" + handle : handle;
+    const hasDistinctName = !isBlank(k.name) && String(k.name).trim().toLowerCase() !== rawHandle.toLowerCase();
+    const roleOrGroup = !isBlank(k.role_label) ? k.role_label : (!isBlank(k.group) ? k.group : "");
+    const relBadge = !isBlank(k.reliability_badge) ? String(k.reliability_badge) : "";
+    const winText = kolWinRateText(k);
     const sc = toNum(k.score);
     const take = String(k.takeaway || "").trim();
+    const whyUsable = String(k.why_usable || "").trim();
+    const tickers = arr(k.tickers).slice(0, 5).map(tickerPillHtml).filter(Boolean).join("");
     const url = safeHttpUrl(k.url);
     return '<article class="tl-card"><div class="tl-head">' +
-      '<span class="tl-handle">' + escapeHtml(shownHandle) + "</span>" +
-      (!isBlank(k.group) ? '<span class="badge">' + escapeHtml(k.group) + "</span>" : "") +
-      (!isBlank(k.topic) ? '<span class="badge badge-outline">' + escapeHtml(k.topic) + "</span>" : "") +
+      (hasDistinctName ? '<span class="tl-author-name">' + escapeHtml(k.name) + "</span>" : "") +
+      (shownHandle ? '<span class="tl-handle">' + escapeHtml(shownHandle) + "</span>" : "") +
+      (roleOrGroup ? '<span class="badge badge-outline">' + escapeHtml(roleOrGroup) + "</span>" : "") +
+      (relBadge ? '<span class="badge ' + kolReliabilityTone(relBadge) + '">' + escapeHtml(relBadge) + "</span>" : "") +
+      (winText && winText !== relBadge ? '<span class="tl-win num-plain">' + escapeHtml(winText) + "</span>" : "") +
+      (!isBlank(k.topic) ? '<span class="badge">' + escapeHtml(k.topic) + "</span>" : "") +
       '<span class="badge badge-' + cls + '">' + escapeHtml(k.stance || "中性") + (Number.isFinite(sc) ? " " + (sc > 0 ? "+" : "") + sc.toFixed(2) : "") + "</span>" +
-      "</div>" + (!isBlank(k.headline) ? '<h3 class="tl-headline">' + escapeHtml(k.headline) + "</h3>" : "") +
-      (take ? '<p class="tl-take">' + escapeHtml(take) + "</p>" : "") +
+      "</div>" +
+      (!isBlank(k.headline) ? '<h3 class="tl-headline">' + escapeHtml(stripEmojis(k.headline)) + "</h3>" : "") +
+      (tickers ? '<div class="tl-tickers">' + tickers + "</div>" : "") +
+      (take ? '<p class="tl-take">' + escapeHtml(stripEmojis(take)) + "</p>" : "") +
+      (whyUsable ? '<p class="tl-why"><b>操作参考</b>' + escapeHtml(stripEmojis(whyUsable)) + "</p>" : "") +
       '<div class="tl-actions">' +
       (!isBlank(k.article_file) ? '<button type="button" class="btn btn-sm" data-open-article="' + escapeHtml(k.article_file) + '">阅读关联长文</button>' : "") +
       (url ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">原帖 ↗</a>' : "") +
@@ -3247,11 +3919,123 @@
     }).join("");
   }
 
+  function fmtWinRateCell(val) {
+    const n = toNum(val);
+    if (val === null || val === undefined || !Number.isFinite(n)) return "—";
+    return n.toFixed(1) + "%";
+  }
+
+  function renderKolScorecards() {
+    if (!dom.kolScorecardWrap) return;
+    const rawList = arr(state().kol_scorecards);
+    const list = kolScorecardsFiltered();
+    if (dom.kolScorecardCount) {
+      dom.kolScorecardCount.textContent = rawList.length
+        ? (list.length === rawList.length ? "共 " + list.length + " 位博主" : "显示 " + list.length + " / " + rawList.length + " 位")
+        : "";
+    }
+    if (!rawList.length) {
+      dom.kolScorecardWrap.innerHTML = '<div class="empty-hint">暂无历史胜率榜单数据</div>';
+      return;
+    }
+    if (!list.length) {
+      dom.kolScorecardWrap.innerHTML = '<div class="empty-hint">没有符合条件的博主记录 · <button type="button" class="btn-link" data-clear-filters="kol">清除筛选</button></div>';
+      return;
+    }
+    dom.kolScorecardWrap.innerHTML =
+      '<table class="fin-table sticky-table kol-score-table"><thead><tr>' +
+      '<th class="ks-col-left">博主</th><th class="ks-col-left">领域</th><th class="num">综合评分</th><th class="ks-col-left">可靠标签</th>' +
+      '<th class="num">已核验次数(N)</th><th class="num">5日胜率</th><th class="num">20日胜率</th><th class="num">20日均幅</th>' +
+      '<th class="ks-col-left">擅长标的</th><th class="ks-col-left">最新态度</th>' +
+      "</tr></thead><tbody>" +
+      list.map((c) => {
+        const rawHandle = String(c.handle || "").replace(/^@/, "");
+        const shownHandle = rawHandle ? "@" + rawHandle : "";
+        const hasName = !isBlank(c.name) && String(c.name).trim().toLowerCase() !== rawHandle.toLowerCase();
+        const relScore = toNum(c.reliability_score);
+        const verified = toNum(c.verified_calls);
+        const edge20 = toNum(c.avg_edge_20d_pct);
+        const bestTks = arr(c.best_tickers).slice(0, 3).map(tickerPillHtml).filter(Boolean).join("");
+        const stance = String(c.latest_stance || "").trim();
+        const stanceCls = STANCE_CLS[stance] || "neutral";
+        return '<tr class="ks-row" data-kol-handle="' + escapeHtml(rawHandle) + '" title="点击查看 ' + escapeHtml(shownHandle || c.name || "") + ' 观点动态">' +
+          '<td><div class="ks-author"><b>' + escapeHtml(hasName ? c.name : shownHandle) + "</b>" +
+          '<span class="ks-sub">' + (hasName ? escapeHtml(shownHandle) : "") +
+          (!isBlank(c.role_label) ? (hasName ? " · " : "") + escapeHtml(c.role_label) : "") + "</span></div></td>" +
+          '<td class="ks-text">' + escapeHtml(c.category_label || c.focus || "—") + "</td>" +
+          '<td class="num">' + escapeHtml(Number.isFinite(relScore) ? String(Math.round(relScore)) : "—") + "</td>" +
+          '<td>' + (!isBlank(c.reliability_badge) ? '<span class="badge ' + kolReliabilityTone(c.reliability_badge) + '">' + escapeHtml(c.reliability_badge) + "</span>" : "—") + "</td>" +
+          '<td class="num">' + escapeHtml(Number.isFinite(verified) ? String(Math.round(verified)) : "0") + "</td>" +
+          '<td class="num">' + escapeHtml(fmtWinRateCell(c.win_rate_5d)) + "</td>" +
+          '<td class="num">' + escapeHtml(fmtWinRateCell(c.win_rate_20d)) + "</td>" +
+          '<td class="num ' + (c.avg_edge_20d_pct != null && Number.isFinite(edge20) ? toneClass(edge20) : "tone-flat") + '">' +
+          escapeHtml(c.avg_edge_20d_pct != null && Number.isFinite(edge20) ? formatSignedPct(edge20) : "—") + "</td>" +
+          '<td class="ks-tickers">' + (bestTks || '<span class="tone-flat">—</span>') + "</td>" +
+          '<td class="ks-stance">' +
+          (stance ? '<span class="badge badge-' + stanceCls + '">' + escapeHtml(stance) + "</span>" : "—") +
+          (!isBlank(c.latest_date) ? '<span class="ks-date num-plain">' + escapeHtml(c.latest_date) + "</span>" : "") +
+          "</td></tr>";
+      }).join("") +
+      "</tbody></table>";
+  }
+
+  function renderKolCrowdStrip() {
+    if (!dom.kolCrowdStrip) return;
+    const fs = state().forum_sentiment;
+    if (!fs || typeof fs !== "object") {
+      dom.kolCrowdStrip.hidden = true;
+      return;
+    }
+    const divs = arr(fs.divergences);
+    const temp = toNum(fs.overall_crowd_temp);
+    if (!divs.length && !Number.isFinite(temp)) {
+      dom.kolCrowdStrip.hidden = true;
+      return;
+    }
+    dom.kolCrowdStrip.hidden = false;
+    const label = String(fs.overall_label || "").trim();
+    const badges = divs
+      .filter((d) => !isBlank(d.divergence_tag) && d.divergence_tag !== "情绪平稳" && d.divergence_tag !== "暂无样本")
+      .slice(0, 3);
+    const shownDivs = badges.length ? badges : divs.slice(0, 2);
+    dom.kolCrowdStrip.innerHTML =
+      '<div class="kol-crowd-main">' +
+      '<span class="kol-crowd-lbl">散户/机构温差</span>' +
+      (Number.isFinite(temp)
+        ? '<span class="badge ' + forumOverallBadgeTone(temp, label) + ' num-plain">散户温度 ' + Math.round(temp) + (label ? " · " + escapeHtml(label) : "") + "</span>"
+        : "") +
+      shownDivs.map((d) =>
+        '<span class="kol-crowd-chip">' +
+        escapeHtml(d.topic || "") +
+        ' <span class="badge ' + synthToneBadge(d.tone) + '">' + escapeHtml(d.divergence_tag || "") + "</span>" +
+        "</span>"
+      ).join("") +
+      "</div>" +
+      '<button type="button" class="btn btn-sm btn-ghost" data-jump-forum>全网舆论明细 →</button>';
+  }
+
   function renderKol() {
-    renderKolTopicChips();
-    renderKolTug();
-    renderKolTopicBars();
-    renderKolTimeline();
+    renderKolCrowdStrip();
+    const isScore = appState.kol.view === "scorecard";
+    if (dom.kolViewSwitch) setActive(dom.kolViewSwitch, "data-kview", isScore ? "scorecard" : "feed");
+    if (dom.kolHighWinBtn) {
+      dom.kolHighWinBtn.classList.toggle("is-active", appState.kol.highWinOnly);
+      dom.kolHighWinBtn.setAttribute("aria-pressed", String(appState.kol.highWinOnly));
+    }
+    if (dom.kolTugPanel) dom.kolTugPanel.hidden = isScore;
+    if (dom.kolTimeline) dom.kolTimeline.hidden = isScore;
+    if (dom.kolScorecardPanel) dom.kolScorecardPanel.hidden = !isScore;
+    if (dom.kolStanceChips) dom.kolStanceChips.hidden = isScore;
+    if (dom.kolTopicChips) dom.kolTopicChips.hidden = isScore;
+
+    if (isScore) {
+      renderKolScorecards();
+    } else {
+      renderKolTopicChips();
+      renderKolTug();
+      renderKolTopicBars();
+      renderKolTimeline();
+    }
   }
 
   /* ---------- 长文待读 ---------- */
@@ -3277,7 +4061,7 @@
     const f = appState.articles, kw = f.keyword.toLowerCase();
     return arr(state().articles).filter((a) => {
       if (f.source !== "all" && a.source !== f.source) return false;
-      if (kw && [a.title, a.excerpt, a.source, a.publisher].join(" ").toLowerCase().indexOf(kw) === -1) return false;
+      if (kw && [a.title, a.excerpt, a.source, a.publisher, a.author_role, arr(a.tickers).join(" ")].join(" ").toLowerCase().indexOf(kw) === -1) return false;
       return true;
     });
   }
@@ -3301,16 +4085,193 @@
       const rec = articleRecord(a.filename);
       const note = rec && !isBlank(rec.note) ? String(rec.note) : "";
       const fname = escapeHtml(a.filename);
+      const tks = arr(a.tickers).slice(0, 4).map(tickerPillHtml).filter(Boolean).join("");
       return '<li class="article-item"><div class="article-main">' +
         '<div class="article-meta"><span class="badge status-badge-' + st + '">' + ARTICLE_STATUS_LABELS[st] + "</span>" +
         (!isBlank(a.source) ? "<span>" + escapeHtml(a.source) + "</span>" : "") +
         (!isBlank(a.publisher) ? '<span class="badge badge-outline">' + escapeHtml(a.publisher) + "</span>" : "") +
+        (!isBlank(a.author_role) ? '<span class="badge badge-outline">' + escapeHtml(a.author_role) + "</span>" : "") +
         articleScoreBadge(a) +
         (!isBlank(a.mtime) ? '<span class="num-plain">' + escapeHtml(a.mtime) + "</span>" : "") + "</div>" +
         '<button type="button" class="article-title" data-open-article="' + fname + '">' + escapeHtml(a.title || a.filename) + "</button>" +
         (!isBlank(a.excerpt) ? '<p class="article-excerpt">' + escapeHtml(a.excerpt) + "</p>" : "") +
+        (tks ? '<div class="article-tickers">' + tks + "</div>" : "") +
         (note ? '<p class="article-note">笔记：' + escapeHtml(note) + "</p>" : "") +
         '</div><div class="article-side"><button type="button" class="btn btn-sm" data-open-article="' + fname + '">阅读</button></div></li>';
+    }).join("");
+  }
+
+  /* ---------- 信源导航 ---------- */
+
+  function sourceKolWinText(k) {
+    const calls = toNum(k && k.verified_calls);
+    const w20 = toNum(k && k.win_rate_20d);
+    if (k && k.win_rate_20d != null && Number.isFinite(w20) && Number.isFinite(calls) && calls >= 5) {
+      return "20日胜率 " + w20.toFixed(1) + "% · " + Math.round(calls) + "次";
+    }
+    return "样本积累";
+  }
+
+  function sourceChainStockPill(sym, label) {
+    const up = String(sym || "").trim().toUpperCase();
+    if (!up) return "";
+    return '<button type="button" class="ticker source-chain-pill" data-open-stock="' + escapeHtml(up) + '" title="打开 ' + escapeHtml(up) + ' 投研">' +
+      escapeHtml(label || up) + "</button>";
+  }
+
+  function renderSources() {
+    if (!dom.sourcesGrid) return;
+    const mx = state().asset_source_matrix;
+    const cats = arr(mx && mx.categories).filter((c) => c && typeof c === "object" && !isBlank(c.id));
+    if (!mx || !cats.length) {
+      if (dom.sourceCategoryChips) dom.sourceCategoryChips.innerHTML = "";
+      if (dom.sourcesMeta) dom.sourcesMeta.textContent = "";
+      dom.sourcesGrid.innerHTML = '<div class="empty-hint">暂无信源导航矩阵数据</div>';
+      return;
+    }
+
+    if (appState.sources.category !== "all" && !cats.some((c) => c.id === appState.sources.category)) {
+      appState.sources.category = "all";
+    }
+    if (dom.sourceCategoryChips) {
+      const chipList = [{ id: "all", name: "全部品类" }].concat(cats);
+      dom.sourceCategoryChips.innerHTML = chipList.map((c) => {
+        const on = appState.sources.category === c.id;
+        return '<button type="button" class="chip' + (on ? " is-active" : "") + '" data-scategory="' + escapeHtml(c.id) + '" aria-pressed="' + String(on) + '">' + escapeHtml(c.name || c.id) + "</button>";
+      }).join("");
+    }
+
+    if (dom.sourcesMeta) {
+      const sum = mx.summary || {};
+      const parts = [];
+      parts.push((Number.isFinite(toNum(sum.categories_count)) ? Math.round(toNum(sum.categories_count)) : cats.length) + " 大品类");
+      if (Number.isFinite(toNum(sum.verified_kols_linked))) parts.push(Math.round(toNum(sum.verified_kols_linked)) + " 位关联博主");
+      if (Number.isFinite(toNum(sum.supply_chain_nodes))) parts.push(Math.round(toNum(sum.supply_chain_nodes)) + " 个产业链节点");
+      if (!isBlank(mx.updated_at_bjt)) parts.push(String(mx.updated_at_bjt));
+      dom.sourcesMeta.textContent = parts.join(" · ");
+    }
+
+    const shown = appState.sources.category === "all"
+      ? cats
+      : cats.filter((c) => c.id === appState.sources.category);
+
+    dom.sourcesGrid.innerHTML = shown.map((c) => {
+      const venues = arr(c.primary_venues);
+      const kols = arr(c.top_kols);
+      const longforms = arr(c.guru_longforms);
+      const warnCh = c.crowd_warning_channel && typeof c.crowd_warning_channel === "object" ? c.crowd_warning_channel : null;
+      const bridges = arr(c.supply_chain_bridges);
+
+      const venuesHtml = venues.length
+        ? '<div class="source-sec"><h4 class="source-sec-title">去哪看</h4><div class="source-venues">' +
+          venues.map((v) => {
+            const u = safeHttpUrl(v.url);
+            return '<div class="source-venue-row">' +
+              '<div class="source-venue-top">' +
+              (u
+                ? '<a class="source-venue-link" href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(v.name || "") + " ↗</a>"
+                : '<span class="source-venue-name">' + escapeHtml(v.name || "") + "</span>") +
+              (!isBlank(v.type) ? '<span class="badge badge-outline">' + escapeHtml(v.type) + "</span>" : "") +
+              (!isBlank(v.cadence) ? '<span class="source-cadence">' + escapeHtml(v.cadence) + "</span>" : "") +
+              "</div>" +
+              (!isBlank(v.focus) ? '<p class="source-venue-focus">' + escapeHtml(v.focus) + "</p>" : "") +
+              "</div>";
+          }).join("") +
+          "</div></div>"
+        : "";
+
+      const longformHtml = longforms.length
+        ? '<div class="source-sec"><h4 class="source-sec-title">大佬长文源</h4><div class="source-longforms">' +
+          longforms.map((g) => {
+            const u = safeHttpUrl(g.url);
+            const label = (g.name || "") + (!isBlank(g.publication) ? " · " + g.publication : "");
+            return '<div class="source-longform-chip">' +
+              (u
+                ? '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(label) + " ↗</a>"
+                : "<span>" + escapeHtml(label) + "</span>") +
+              (!isBlank(g.focus) ? '<span class="source-lf-focus">' + escapeHtml(g.focus) + "</span>" : "") +
+              "</div>";
+          }).join("") +
+          "</div></div>"
+        : "";
+
+      const kolsHtml = kols.length
+        ? '<div class="source-sec"><h4 class="source-sec-title">看谁的</h4><div class="source-kol-list">' +
+          kols.map((k) => {
+            const rawHandle = String(k.handle || "").replace(/^@/, "");
+            const shownHandle = rawHandle ? "@" + rawHandle : "";
+            const dispName = !isBlank(k.name) ? k.name : shownHandle;
+            const winStr = sourceKolWinText(k);
+            const u = safeHttpUrl(k.url);
+            const bestTks = arr(k.best_tickers).slice(0, 3).map((t) => String(t || "").toUpperCase()).filter(Boolean).join(" / ");
+            return '<div class="source-kol-item">' +
+              '<button type="button" class="source-kol-pill" data-jump-kol="' + escapeHtml(rawHandle) + '" title="点击筛选 ' + escapeHtml(shownHandle || dispName) + ' 观点">' +
+              '<span class="source-kol-head">' +
+              '<b class="source-kol-name">' + escapeHtml(dispName) + "</b>" +
+              (shownHandle && dispName !== shownHandle ? '<span class="source-kol-handle">' + escapeHtml(shownHandle) + "</span>" : "") +
+              (!isBlank(k.role_label) ? '<span class="badge badge-outline">' + escapeHtml(k.role_label) + "</span>" : "") +
+              (!isBlank(k.reliability_badge) ? '<span class="badge ' + kolReliabilityTone(k.reliability_badge) + '">' + escapeHtml(k.reliability_badge) + "</span>" : "") +
+              '<span class="source-kol-win num-plain">' + escapeHtml(winStr) + "</span>" +
+              "</span>" +
+              (!isBlank(k.why_follow) || bestTks
+                ? '<span class="source-kol-why">' +
+                  (bestTks ? '<strong class="num-plain">' + escapeHtml(bestTks) + "</strong> · " : "") +
+                  escapeHtml(k.why_follow || "") +
+                  "</span>"
+                : "") +
+              "</button>" +
+              (u ? '<a class="source-kol-ext" href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer" title="打开原主页">↗</a>' : "") +
+              "</div>";
+          }).join("") +
+          "</div></div>"
+        : "";
+
+      const warnHtml = warnCh && (!isBlank(warnCh.platform) || !isBlank(warnCh.what_to_watch))
+        ? '<div class="source-warn-box">' +
+          '<span class="badge badge-warn">散户反指</span>' +
+          '<div class="source-warn-body">' +
+          (!isBlank(warnCh.platform) ? "<b>" + escapeHtml(warnCh.platform) + "</b>" : "") +
+          (!isBlank(warnCh.what_to_watch) ? "<span>" + escapeHtml(warnCh.what_to_watch) + "</span>" : "") +
+          "</div></div>"
+        : "";
+
+      const bridgesHtml = bridges.length
+        ? '<div class="source-sec"><h4 class="source-sec-title">中美产业链映射</h4><div class="source-bridges">' +
+          bridges.map((b) => {
+            const aList = arr(b.a_shares);
+            const usLbl = b.us_leader + (!isBlank(b.us_name) && b.us_name !== b.us_leader ? " " + b.us_name : "");
+            return '<div class="source-bridge-row">' +
+              '<div class="source-bridge-lead">' +
+              sourceChainStockPill(b.us_leader, usLbl) +
+              (!isBlank(b.focus) ? '<span class="source-bridge-focus">' + escapeHtml(b.focus) + "</span>" : "") +
+              "</div>" +
+              (aList.length
+                ? '<div class="source-bridge-ashares">' +
+                  '<span class="source-bridge-arrow" aria-hidden="true">→</span>' +
+                  aList.map((a) => {
+                    const sym = String(a.symbol || "").trim();
+                    const lbl = (a.name ? a.name + " " : "") + sym + (a.sector ? " · " + a.sector : "");
+                    return sourceChainStockPill(sym, lbl);
+                  }).join("") +
+                  "</div>"
+                : "") +
+              "</div>";
+          }).join("") +
+          "</div></div>"
+        : "";
+
+      return '<article class="panel source-cat-card">' +
+        '<div class="source-cat-head">' +
+        '<h3 class="sec-title">' + escapeHtml(c.name || c.id || "") + "</h3>" +
+        '<span class="badge badge-accent num-plain">' + kols.length + " 位追踪博主</span>" +
+        "</div>" +
+        (!isBlank(c.core_question) ? '<p class="source-core-q">' + escapeHtml(c.core_question) + "</p>" : "") +
+        venuesHtml +
+        kolsHtml +
+        longformHtml +
+        warnHtml +
+        bridgesHtml +
+        "</article>";
     }).join("");
   }
 
@@ -3320,7 +4281,8 @@
     return (dom.articleDrawer && !dom.articleDrawer.hidden) ||
       (dom.pushDrawer && !dom.pushDrawer.hidden) ||
       (dom.positionDrawer && !dom.positionDrawer.hidden) ||
-      (dom.importDrawer && !dom.importDrawer.hidden);
+      (dom.importDrawer && !dom.importDrawer.hidden) ||
+      (dom.ingestDrDrawer && !dom.ingestDrDrawer.hidden);
   }
 
   function openDrawer(el, focusEl) {
@@ -3336,7 +4298,8 @@
       article: dom.articleDrawer,
       push: dom.pushDrawer,
       position: dom.positionDrawer,
-      import: dom.importDrawer
+      import: dom.importDrawer,
+      ingestDr: dom.ingestDrDrawer
     };
     const el = map[which] || dom.articleDrawer;
     if (!el || el.hidden) return;
@@ -3380,8 +4343,13 @@
     const meta = [];
     if (!isBlank(art.source)) meta.push('<span class="badge badge-outline">' + escapeHtml(art.source) + "</span>");
     if (!isBlank(art.publisher)) meta.push('<span class="badge badge-outline">' + escapeHtml(art.publisher) + "</span>");
+    if (!isBlank(art.author_role)) meta.push('<span class="badge badge-outline">' + escapeHtml(art.author_role) + "</span>");
     const sb = articleScoreBadge(art);
     if (sb) meta.push(sb);
+    arr(art.tickers).slice(0, 4).forEach((sym) => {
+      const s = String(sym || "").trim().toUpperCase();
+      if (s) meta.push('<span class="ticker">' + escapeHtml(s) + "</span>");
+    });
     if (!isBlank(art.mtime)) meta.push('<span class="num-plain">' + escapeHtml(art.mtime) + "</span>");
     const artUrl = safeHttpUrl(art.url);
     if (artUrl) {
@@ -3439,6 +4407,46 @@
       showToast(err.message || "保存失败", "error");
     } finally {
       if (btn) btn.disabled = false;
+    }
+  }
+
+  async function submitIngestDr(e) {
+    e.preventDefault();
+    if (appState.offline) return showToast("共享离线快照只读，无法导入深研", "error");
+    if (appState.busy.ingestDr) return;
+    const title = dom.drTitleInput ? dom.drTitleInput.value.trim() : "";
+    const tickers = dom.drTickersInput ? dom.drTickersInput.value.trim() : "";
+    const bodyMd = dom.drBodyInput ? dom.drBodyInput.value.trim() : "";
+    if (!bodyMd) return showToast("请输入深研 Markdown 正文", "error");
+
+    appState.busy.ingestDr = true;
+    if (dom.drSaveBtn) dom.drSaveBtn.disabled = true;
+    try {
+      const res = await apiJson("/api/research/ingest", {
+        method: "POST",
+        body: { title, tickers, body_md: bodyMd }
+      });
+      const art = res && res.article ? res.article : null;
+      if (art) {
+        if (!appState.raw || typeof appState.raw !== "object") appState.raw = {};
+        const prev = arr(appState.raw.articles).filter((a) => a.filename !== art.filename);
+        appState.raw.articles = [art].concat(prev);
+      }
+      if (dom.drTitleInput) dom.drTitleInput.value = "";
+      if (dom.drTickersInput) dom.drTickersInput.value = "";
+      if (dom.drBodyInput) dom.drBodyInput.value = "";
+      closeDrawer("ingestDr");
+      renderArticles();
+      renderCounts();
+      showToast("深研已入库", "ok");
+      if (art && art.filename) {
+        await openArticle(art.filename);
+      }
+    } catch (err) {
+      showToast(err.message || "导入深研失败", "error");
+    } finally {
+      appState.busy.ingestDr = false;
+      if (dom.drSaveBtn) dom.drSaveBtn.disabled = false;
     }
   }
 
@@ -4093,6 +5101,7 @@
   function applyModeUi() {
     const ro = Boolean(appState.offline);
     if (dom.exportOpmlBtn) dom.exportOpmlBtn.hidden = ro;
+    if (dom.openIngestDrBtn) dom.openIngestDrBtn.hidden = ro;
     if (dom.openAddPosBtn) dom.openAddPosBtn.hidden = ro;
     if (dom.openImportBtn) dom.openImportBtn.hidden = ro;
     if (dom.newReviewBtn) dom.newReviewBtn.hidden = ro;
@@ -4124,6 +5133,7 @@
     renderExecGate();
     renderExecPositions();
     renderGlance();
+    renderTodaySentimentCard();
     renderCurationRulesPanel();
     renderSectorRibbon();
     renderNewsModeSwitch();
@@ -4133,11 +5143,14 @@
     renderRadar();
     renderPortfolioView();
     renderResearch();
+    renderMarketSynthesis();
+    renderForumSentiment();
     renderMacroGroups();
     renderCorrMatrix();
     renderPairs();
     renderKol();
     renderArticles();
+    renderSources();
     renderJournalGate();
     renderJournalPositions();
     renderReviews();
@@ -4168,8 +5181,7 @@
 
   function commitKolKeyword() {
     appState.kol.keyword = dom.kolSearchInput.value.trim();
-    renderKolTug();
-    renderKolTimeline();
+    renderKol();
   }
 
   function commitArticleKeyword() {
@@ -4181,7 +5193,7 @@
     if (scope === "daily") {
       resetDailyFilters();
     } else if (scope === "kol") {
-      appState.kol = { topic: "all", stance: "all", keyword: "" };
+      appState.kol = { topic: "all", stance: "all", keyword: "", view: appState.kol.view || "feed", highWinOnly: false };
       dom.kolSearchInput.value = "";
       setActive(dom.kolStanceChips, "data-stance", "all");
       renderKol();
@@ -4442,6 +5454,49 @@
       return dom.corrReadout.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
+    if ((el = hit("#kolViewSwitch [data-kview]"))) {
+      appState.kol.view = el.getAttribute("data-kview") === "scorecard" ? "scorecard" : "feed";
+      return renderKol();
+    }
+    if (hit("#kolHighWinBtn")) {
+      appState.kol.highWinOnly = !appState.kol.highWinOnly;
+      return renderKol();
+    }
+    if ((el = hit("#kolScorecardWrap tr[data-kol-handle]"))) {
+      const handle = el.getAttribute("data-kol-handle") || "";
+      appState.kol.view = "feed";
+      appState.kol.topic = "all";
+      appState.kol.stance = "all";
+      appState.kol.keyword = handle;
+      if (dom.kolSearchInput) dom.kolSearchInput.value = handle;
+      setActive(dom.kolStanceChips, "data-stance", "all");
+      renderKol();
+      if (dom.kolToolbar) dom.kolToolbar.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      return undefined;
+    }
+    if ((el = hit("[data-jump-kol]"))) {
+      const handle = String(el.getAttribute("data-jump-kol") || "").replace(/^@/, "");
+      appState.kol.view = "feed";
+      appState.kol.topic = "all";
+      appState.kol.stance = "all";
+      appState.kol.highWinOnly = false;
+      appState.kol.keyword = handle;
+      if (dom.kolSearchInput) dom.kolSearchInput.value = handle;
+      setActive(dom.kolStanceChips, "data-stance", "all");
+      setView("kol");
+      renderKol();
+      if (dom.kolToolbar) dom.kolToolbar.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      return undefined;
+    }
+    if (hit("[data-jump-forum]")) {
+      setView("sentiment");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return undefined;
+    }
+    if ((el = hit("#sourceCategoryChips [data-scategory]"))) {
+      appState.sources.category = el.getAttribute("data-scategory") || "all";
+      return renderSources();
+    }
     if ((el = hit("[data-topic]"))) {
       const topic = el.getAttribute("data-topic");
       appState.kol.topic = topic === appState.kol.topic && topic !== "all" ? "all" : topic;
@@ -4450,7 +5505,7 @@
     if ((el = hit("#kolStanceChips [data-stance]"))) {
       appState.kol.stance = el.getAttribute("data-stance");
       setActive(dom.kolStanceChips, "data-stance", appState.kol.stance);
-      return renderKolTimeline();
+      return renderKol();
     }
     if (hit("#kolSearchBtn")) return commitKolKeyword();
 
@@ -4465,6 +5520,18 @@
       return renderArticles();
     }
     if (hit("#articleSearchBtn")) return commitArticleKeyword();
+    if (hit("#openIngestDrBtn")) {
+      if (appState.offline) return showToast("共享离线快照只读", "error");
+      return openDrawer(dom.ingestDrDrawer, dom.drBodyInput);
+    }
+    if (hit("#closeIngestDrBtn") || hit("#drCancelBtn")) return closeDrawer("ingestDr");
+    if ((el = hit("[data-copy-code]"))) {
+      const wrap = el.closest(".code-copy-wrap");
+      const codeEl = wrap ? wrap.querySelector("pre code, pre") : null;
+      const text = codeEl ? codeEl.textContent : "";
+      if (!text) return undefined;
+      return copyText(text).then((ok) => showToast(ok ? "提问词已复制" : "复制失败", ok ? "ok" : "error"));
+    }
     if ((el = hit("[data-set-status]"))) return setArticleStatus(el.getAttribute("data-set-status"), false);
     if (hit("#saveNoteBtn")) {
       const cur = appState.drawerArticle;
@@ -4607,6 +5674,7 @@
       });
     }
     if (dom.positionForm) dom.positionForm.addEventListener("submit", submitPosition);
+    if (dom.ingestDrForm) dom.ingestDrForm.addEventListener("submit", submitIngestDr);
     for (const input of [dom.impBody, dom.impAccount, dom.impFormat, dom.impMode]) {
       input?.addEventListener("input", invalidateImportPreview);
       input?.addEventListener("change", invalidateImportPreview);
@@ -4637,6 +5705,7 @@
         closeDrawer("push");
         closeDrawer("position");
         closeDrawer("import");
+        closeDrawer("ingestDr");
         return;
       }
       if ((e.key === "Enter" || e.key === " ") && e.target instanceof Element) {

@@ -4,11 +4,16 @@ from __future__ import annotations
 import email.utils
 import hashlib
 import html
+import inspect
+import ipaddress
 import json
 import os
 import re
+import socket
 import sys
+import threading
 import time
+import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,15 +39,60 @@ RSS_CACHE_PATH = DATA_DIR / "rss_cache.json"
 RSS_CACHE_TTL = 900  # 15 minutes
 ARTICLE_CACHE_PATH = DATA_DIR / "curated_articles_cache.json"
 ARTICLE_CACHE_TTL = 1800  # 30 minutes
+FULLTEXT_CACHE_PATH = DATA_DIR / "fulltext_cache.json"
+FULLTEXT_CACHE_TTL = 86400  # 24 hours
+FULLTEXT_SKIP_CACHE_TTL = 21600  # 6 hours
+FULLTEXT_CACHE_MAX_ITEMS = 300
 ARTICLES_DIR = COCKPIT_ROOT / "articles"
 DEFAULT_OPML_PATH = COCKPIT_ROOT / "dist" / "macro_cockpit_feeds.opml"
+_FULLTEXT_CACHE_LOCK = threading.Lock()
 
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept-Encoding": "gzip, deflate",
 }
+
+_FULLTEXT_SKIP_DOMAINS: tuple[str, ...] = (
+    "mp.weixin.qq.com",
+    "ft.com",
+    "wsj.com",
+    "bloomberg.com",
+    "economist.com",
+    "barrons.com",
+    "nytimes.com",
+    "theinformation.com",
+    "seekingalpha.com",
+    "reuters.com",
+)
+
+_BOT_CHALLENGE_TOKENS: tuple[str, ...] = (
+    "just a moment",
+    "attention required",
+    "access denied",
+    "verify you are human",
+    "please enable js",
+    "enable javascript",
+    "captcha",
+    "cloudflare",
+    "环境异常",
+    "当前环境异常",
+    "完成验证",
+)
+
+_STRONG_CHALLENGE_TOKENS: tuple[str, ...] = (
+    "just a moment",
+    "attention required",
+    "verify you are human",
+    "please enable js",
+    "enable javascript",
+    "access denied",
+    "环境异常",
+    "当前环境异常",
+    "完成验证",
+)
 
 # Curated high-SNR feeds verified live (HTTP 200 OK)
 CURATED_RSS_FEEDS: tuple[dict[str, str], ...] = (
@@ -220,7 +270,7 @@ CURATED_RSS_FEEDS: tuple[dict[str, str], ...] = (
         "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
         "html_url": "https://www.coindesk.com/",
         "category": "crypto",
-        "tier": "T1_5",
+        "tier": "T2",
         "why": "主流加密机构与监管核心媒体动态，跟踪 ETF 资金流、稳定币立法与机构配置。",
     },
     {
@@ -314,14 +364,14 @@ CURATED_ARTICLE_FEEDS: tuple[dict[str, str], ...] = (
 )
 
 _FORBIDDEN_SCRUB = (
-    (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
-    (r"\bTier-1\b", "核心"),
-    (r"\bTier-S\b", "高优"),
-    (r"\bTier-A\b", "重点"),
-    (r"\bSleeves?\b", "仓位"),
-    (r"\bRegimes?\b", "市场周期"),
-    (r"\barbitration\b", "风险评估"),
-    (r"\bN/A\b", "—"),
+    (r"(?<![A-Za-z0-9])(?:E33|E32|E21)(?![A-Za-z0-9])", "波动结构"),
+    (r"(?<![A-Za-z0-9])Tier-1(?![A-Za-z0-9])", "核心"),
+    (r"(?<![A-Za-z0-9])Tier-S(?![A-Za-z0-9])", "高优"),
+    (r"(?<![A-Za-z0-9])Tier-A(?![A-Za-z0-9])", "重点"),
+    (r"(?<![A-Za-z0-9])Sleeves?(?![A-Za-z0-9])", "仓位"),
+    (r"(?<![A-Za-z0-9])Regimes?(?![A-Za-z0-9])", "市场周期"),
+    (r"(?<![A-Za-z0-9])arbitration(?![A-Za-z0-9])", "风险评估"),
+    (r"(?<![A-Za-z0-9])N/A(?![A-Za-z0-9])", "—"),
     (r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明", "规则摘要"),
     (r"待刷新|待补", "—"),
 )
@@ -347,6 +397,13 @@ _TICKER_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bSMCI\b|Super Micro|超微电脑", "SMCI"),
     (r"\bCOIN\b|Coinbase", "COIN"),
     (r"\bMSTR\b|MicroStrategy", "MSTR"),
+    (r"(?<![A-Z0-9$])(?:0?0700\.HK|TCEHY)(?![A-Z0-9])|腾讯控股|腾讯", "0700.HK"),
+    (r"(?<![A-Z0-9$])(?:0?9988\.HK|\bBABA\b)(?![A-Z0-9])|阿里巴巴|阿里", "BABA"),
+    (r"(?<![A-Z0-9$])0?3690\.HK(?![A-Z0-9])|美团", "3690.HK"),
+    (r"(?<![A-Z0-9$])0?1810\.HK(?![A-Z0-9])|小米集团|小米汽车", "1810.HK"),
+    (r"(?<![A-Z0-9$])(?:0?0981\.HK|688981)(?![A-Z0-9])|中芯国际", "0981.HK"),
+    (r"(?<![A-Z0-9$])(?:0?1211\.HK|002594)(?![A-Z0-9])|比亚迪", "1211.HK"),
+    (r"(?<![A-Z0-9$])(?:ZHIPU|0?2513\.HK|02513)(?![A-Z0-9])|智谱", "ZHIPU"),
     (r"\bSPY\b|标普500|S&P\s*500", "SPY"),
     (r"\bQQQ\b|纳指|纳斯达克|Nasdaq", "QQQ"),
     (r"\bBTC\b|Bitcoin|比特币", "BTC"),
@@ -371,11 +428,63 @@ def _scrub_forbidden(text: str) -> str:
     return s
 
 
+_EMOJI_RE = re.compile(
+    r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u26FF\u2702-\u2712\u2716-\u27BF"
+    r"\u231A-\u231B\u23E9-\u23FA\u25FD-\u25FE\u2B50\u2B55\uFE0E\uFE0F\u200D\u20E3]+"
+)
+_WIRE_DATELINE_RE = re.compile(
+    r"^(?:财联社|华尔街见闻|科创板日报|证券时报|新京报)\s*\d{1,2}月\d{1,2}日(?:电|讯)[，,：:\s]*"
+)
+_EQN_ROUTINE_LISTING_RE = re.compile(
+    r"(?i)(?:will\s+list\b|market\s+support\s+for|新增.*交易支持|交易支持公告|"
+    r"新增.*(?:交易对|币对)|上线.*(?:永续合约|现货)|暂停.*充提|恢复.*充提|支持.*网络升级)"
+)
+
+
+def strip_emojis(text: str) -> str:
+    """Remove pictographic/color/flag/dingbat/keycap emojis while preserving checkmarks, arrows, and CJK punctuation."""
+    s = _EMOJI_RE.sub("", str(text or ""))
+    return re.sub(r"[ \t]{2,}", " ", s).strip()
+
+
+def _norm_dup_key(text: str) -> str:
+    s = unicodedata.normalize("NFKC", str(text or "")).replace("\u2212", "-").lower()
+    s = re.sub(r"(?<!\d)\.(?!\d)", "", s)
+    return re.sub(r"[^\u4e00-\u9fffa-z0-9+\-%‰$¥€£.]+", "", s)
+
+
+def _dedup_summary(title: str, summary: str) -> str:
+    """Strip duplicate bracketed titles and wire datelines; preserve diffs in signs, numbers, or CJK text."""
+    t = strip_emojis(str(title or "").strip())
+    s = strip_emojis(str(summary or "").strip())
+    if not s:
+        return ""
+    m = re.match(r"^【([^】]{2,140})】\s*(.*)$", s)
+    if m:
+        bracket_txt = m.group(1).strip()
+        rest = m.group(2).strip()
+        nt = _norm_dup_key(t)
+        nb = _norm_dup_key(bracket_txt)
+        if nb and nt and nb == nt:
+            s = rest
+    s = _WIRE_DATELINE_RE.sub("", s).strip()
+    if not s:
+        return ""
+    nt = _norm_dup_key(t)
+    ns = _norm_dup_key(s)
+    if not nt:
+        return s
+    if ns == nt or (s.endswith(("...", "…")) and len(ns) >= 10 and nt.startswith(ns)):
+        return ""
+    return s
+
+
 def _clean_text(raw: Any, *, max_len: int = 240) -> str:
     txt = str(raw or "")
     txt = re.sub(r"<[^>]+>", " ", txt)
     txt = html.unescape(txt)
     txt = _scrub_forbidden(txt)
+    txt = strip_emojis(txt)
     txt = re.sub(r"\s+", " ", txt).strip()
     if max_len > 0 and len(txt) > max_len:
         txt = txt[: max_len - 3].rstrip() + "..."
@@ -441,6 +550,7 @@ def html_to_clean_markdown(raw_html: str, *, max_chars: int = 16000) -> str:
     s = re.sub(r"<[^>]+>", " ", s)
     s = html.unescape(s)
     s = _scrub_forbidden(s)
+    s = strip_emojis(s)
 
     lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in s.splitlines()]
     cleaned = "\n".join(lines)
@@ -471,14 +581,36 @@ def _parse_rss_datetime(raw: str | None) -> datetime | None:
         return None
 
 
+def _canon_hk_code_rss(digits: str) -> str:
+    d = str(digits or "").strip()
+    if len(d) == 5 and d.startswith("0"):
+        d = d[1:]
+    return f"{d}.HK"
+
+
 def extract_tickers(text: str) -> list[str]:
-    """Extract canonical US/crypto/macro tickers from mixed English & Chinese financial copy."""
+    """Extract canonical US/A-HK/crypto/macro tickers from mixed English & Chinese financial copy."""
     if not text:
         return []
     out: list[str] = []
     for m in re.findall(r"\$([A-Z]{2,5})\b", text):
         if m not in out:
             out.append(m)
+    for m in re.findall(r"(?<![A-Za-z0-9])((?:SH|SZ|BJ)\d{6})(?![A-Za-z0-9])", text):
+        if m not in out:
+            out.append(m)
+    for m in re.findall(r"(?<![A-Za-z0-9])(\d{6}\.(?:SZ|SS|SH|BJ))(?![A-Za-z0-9])", text, re.IGNORECASE):
+        sym = m.upper()
+        if sym not in out:
+            out.append(sym)
+    for m in re.findall(r"(?<![A-Za-z0-9])(\d{4,5})\.HK(?![A-Za-z0-9])", text, re.IGNORECASE):
+        sym = _canon_hk_code_rss(m)
+        if sym not in out:
+            out.append(sym)
+    for m in re.findall(r"(?<![A-Za-z0-9])HK(\d{4,5})(?![A-Za-z0-9])", text, re.IGNORECASE):
+        sym = _canon_hk_code_rss(m)
+        if sym not in out:
+            out.append(sym)
     for pat, sym in _TICKER_PATTERNS:
         if re.search(pat, text, re.IGNORECASE) and sym not in out:
             out.append(sym)
@@ -488,8 +620,10 @@ def extract_tickers(text: str) -> list[str]:
 _extract_tickers = extract_tickers
 
 _ASHARE_KEYWORDS_RE = re.compile(
-    r"A股|沪指|深成指|创业板|科创板|上证|深证|北交所|恒指|恒生|港股|证监会|上交所|深交所|港交所|"
-    r"北向|南向|融资保证金|比亚迪|华为|鸿蒙|昇腾|宁德时代|茅台|中芯|寒武纪"
+    r"A股|沪指|深成指|创业板|科创板|科创50|沪深300|中证500|上证|深证|北交所|恒指|恒生|恒生科技|恒科|HSTECH|港股|港股通|"
+    r"证监会|上交所|深交所|港交所|北向|南向|两融|融资余额|融资保证金|融券|平准基金|汇金|国常会|"
+    r"(?<![A-Za-z0-9])\d{4,5}\.HK(?![A-Za-z0-9])|(?<![A-Za-z0-9])HK\d{4,5}(?![A-Za-z0-9])|(?<![A-Za-z0-9])\d{6}\.(?:SZ|SS|SH|BJ)(?![A-Za-z0-9])|"
+    r"比亚迪|华为|鸿蒙|昇腾|宁德时代|茅台|中芯|寒武纪|腾讯|阿里|美团|小米"
 )
 
 _SUBTOPIC_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
@@ -636,10 +770,11 @@ def parse_feed_xml(
         clean_title = _clean_text(ent["title"], max_len=140)
         if not clean_title:
             continue
-        clean_summary = _clean_text(ent["short_raw"], max_len=240) or clean_title
+        raw_summary = _clean_text(ent["short_raw"], max_len=240)
+        clean_summary = _dedup_summary(clean_title, raw_summary)
         time_bjt = ent["dt_utc"].astimezone(BJT).strftime("%Y-%m-%d %H:%M")
 
-        combined_text = f"{clean_title} {clean_summary}"
+        combined_text = f"{clean_title} {raw_summary}".strip()
         link = ent["link"]
         sig_id = f"rss-{spec_id}-{hashlib.sha1((clean_title + link).encode('utf-8')).hexdigest()[:10]}"
         items_out.append(
@@ -691,13 +826,15 @@ def _split_cn_headline_and_summary(title: str, body: str) -> tuple[str, str]:
         m = re.match(r"^【([^】]{4,80})】\s*(.*)$", b)
         if m:
             t = m.group(1).strip()
-            b = (m.group(2).strip() or t)
+            b = m.group(2).strip()
         else:
-            first_sent = re.split(r"[。！？\n]", b, maxsplit=1)[0].strip()
+            b_nodate = _WIRE_DATELINE_RE.sub("", b).strip()
+            first_sent = re.split(r"[。！？\n]", b_nodate or b, maxsplit=1)[0].strip()
             t = first_sent[:72] if first_sent else b[:72]
-    if not b:
-        b = t
-    return (t, b)
+    stripped_t = _WIRE_DATELINE_RE.sub("", t).strip()
+    if len(stripped_t) >= 8:
+        t = stripped_t
+    return (t, _dedup_summary(t, b))
 
 
 def _infer_cn_category(text: str, default_cat: str) -> str:
@@ -771,9 +908,9 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
                 dt = datetime.now(UTC)
             time_bjt = dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
 
-            combined = f"{title} {summary}"
-            tickers = extract_tickers(combined)
-            item_cat = _infer_cn_category(combined, default_cat)
+            raw_combined = f"{title} {_clean_text(raw_content, max_len=260)}".strip()
+            tickers = extract_tickers(raw_combined)
+            item_cat = _infer_cn_category(raw_combined, default_cat)
             level = str(row.get("level") or "").upper()
             shareurl = str(row.get("shareurl") or "").strip()
             url = shareurl if shareurl.startswith(("http://", "https://")) else (
@@ -785,14 +922,14 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
                     "source": "财联社电报",
                     "category": item_cat,
                     "source_tier": "T1_5",
-                    "direction": _infer_direction(combined),
+                    "direction": _infer_direction(raw_combined),
                     "importance": "高" if (level in ("A", "B") or len(tickers) >= 1 or item_cat == "ashare") else "中",
                     "time_bjt": time_bjt,
                     "title": title,
                     "summary": summary,
                     "why_it_matters": "国内一线中文电报实时快讯，同步追踪 A股·港股看盘与美股宏观动向。",
                     "tickers": tickers,
-                    "topics": extract_subtopics(combined, item_cat),
+                    "topics": extract_subtopics(raw_combined, item_cat),
                     "url": url,
                 }
             )
@@ -827,7 +964,7 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
             title, summary = _split_cn_headline_and_summary(raw_title, raw_body)
             if not title:
                 continue
-            combined = f"{title} {summary}"
+            combined = f"{title} {_clean_text(raw_body, max_len=260)}".strip()
             tickers = extract_tickers(combined)
             is_ashare_hit = bool(_ASHARE_KEYWORDS_RE.search(combined))
             if ch != "a-stock-channel" and score < 2 and not tickers and not is_ashare_hit:
@@ -955,13 +1092,16 @@ def _normalize_equation_item(item: dict[str, Any], channel: str) -> dict[str, An
     title = _clean_text((raw_zh or raw_en).lstrip("* ").strip(), max_len=140)
     if not title:
         return None
+    if _EQN_ROUTINE_LISTING_RE.search(f"{title} {raw_en}"):
+        return None
 
     overview = _extract_eqn_overview(item)
     en_clean = raw_en.lstrip("* ").strip()
-    summary = _clean_text(overview or (en_clean if raw_zh else "") or title, max_len=260)
+    raw_summary = _clean_text(overview or (en_clean if not raw_zh else ""), max_len=260)
+    summary = _dedup_summary(title, raw_summary)
 
     coins = [str(c).strip().upper() for c in (item.get("coins") or []) if str(c).strip()]
-    combined = f"{title} {raw_en} {summary}"
+    combined = f"{title} {raw_en} {raw_summary}".strip()
     extracted = extract_tickers(combined)
     tickers: list[str] = []
     for sym in extracted + coins:
@@ -1364,6 +1504,570 @@ def _fetch_article_candidates_from_feed(spec: dict[str, str], timeout: int = 8) 
     return candidates
 
 
+def _load_fulltext_cache(cache_path: Path | None = None) -> dict[str, dict[str, Any]]:
+    path = cache_path or FULLTEXT_CACHE_PATH
+    with _FULLTEXT_CACHE_LOCK:
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            items = data.get("items") if isinstance(data, dict) else None
+            return dict(items) if isinstance(items, dict) else {}
+        except Exception:
+            return {}
+
+
+def _get_cached_fulltext(
+    cache_key: str,
+    *,
+    cache_path: Path | None = None,
+) -> tuple[str, str] | None:
+    if not cache_key:
+        return None
+    items = _load_fulltext_cache(cache_path)
+    entry = items.get(cache_key)
+    if not isinstance(entry, dict):
+        return None
+    ts = float(entry.get("ts") or 0.0)
+    status = str(entry.get("status") or "")
+    text = str(entry.get("text") or "")
+    ttl = FULLTEXT_SKIP_CACHE_TTL if status == "skipped_paywall" else FULLTEXT_CACHE_TTL
+    if (time.time() - ts) > ttl:
+        return None
+    if status == "skipped_paywall":
+        return ("", status)
+    if len(text) >= 200 and status:
+        return (text, status)
+    return None
+
+
+def _save_cached_fulltext(
+    cache_key: str,
+    *,
+    text: str,
+    status: str,
+    cache_path: Path | None = None,
+) -> None:
+    if not cache_key:
+        return
+    if status != "skipped_paywall" and len(text) < 200:
+        return
+    path = cache_path or FULLTEXT_CACHE_PATH
+    with _FULLTEXT_CACHE_LOCK:
+        items: dict[str, dict[str, Any]] = {}
+        if path.is_file():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and isinstance(raw.get("items"), dict):
+                    items = dict(raw["items"])
+            except Exception:
+                items = {}
+        items[cache_key] = {
+            "ts": time.time(),
+            "status": status,
+            "text": text if status != "skipped_paywall" else "",
+        }
+        if len(items) > FULLTEXT_CACHE_MAX_ITEMS:
+            ordered = sorted(
+                items.items(),
+                key=lambda kv: float((kv[1] or {}).get("ts") or 0.0),
+                reverse=True,
+            )[:FULLTEXT_CACHE_MAX_ITEMS]
+            items = dict(ordered)
+        try:
+            atomic_write_json(path, {"schema_version": 1, "items": items})
+        except Exception:
+            pass
+
+
+_CLASH_FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _is_forbidden_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_clash_fake_ip: bool = False) -> bool:
+    if allow_clash_fake_ip and ip_obj in _CLASH_FAKE_IP_NET:
+        return False
+    return bool(
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_reserved
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+    )
+
+
+def _resolve_safe_public_ips(url: str) -> tuple[bool, list[str]]:
+    """Validate URL safety once via DNS and return (ok, pinned_public_ips)."""
+    raw = str(url or "").strip()
+    if not raw:
+        return (False, [])
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except Exception:
+        return (False, [])
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        return (False, [])
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return (False, [])
+    if host in ("localhost", "ip6-localhost") or host.endswith((".local", ".internal", ".localhost")):
+        return (False, [])
+    host_unbracketed = host.strip("[]")
+    try:
+        ip = ipaddress.ip_address(host_unbracketed)
+        if _is_forbidden_ip(ip, allow_clash_fake_ip=False):
+            return (False, [])
+        return (True, [str(ip)])
+    except ValueError:
+        resolved: list[str] = []
+        try:
+            port = parsed.port or (443 if scheme == "https" else 80)
+            addrs = socket.getaddrinfo(host_unbracketed, port, type=socket.SOCK_STREAM)
+            for _fam, _type, _proto, _canon, sockaddr in addrs:
+                if not sockaddr:
+                    continue
+                ip_str = str(sockaddr[0]).split("%", 1)[0]
+                resolved_ip = ipaddress.ip_address(ip_str)
+                if _is_forbidden_ip(resolved_ip, allow_clash_fake_ip=True):
+                    return (False, [])
+                if ip_str not in resolved:
+                    resolved.append(ip_str)
+        except OSError:
+            pass
+        return (True, resolved)
+
+
+def _is_safe_public_url(url: str) -> bool:
+    """Block non-HTTP(S), localhost, .local/.internal, and private/loopback/reserved IP literals."""
+    ok, _ips = _resolve_safe_public_ips(url)
+    return ok
+
+
+def _supports_allow_redirects(getter: Any) -> bool:
+    try:
+        target = getattr(getter, "side_effect", None)
+        if callable(target):
+            getter = target
+        sig = inspect.signature(getter)
+        return any(
+            p.name == "allow_redirects" or p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _make_pinned_adapter(expected_host: str, pinned_ip: str):
+    """Build an HTTPAdapter whose underlying socket connects strictly to pinned_ip while preserving TLS SNI."""
+    from requests.adapters import HTTPAdapter
+    from urllib3 import PoolManager
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+    from urllib3.util import connection as urllib3_util_conn
+
+    target_host = expected_host.strip().lower().rstrip(".")
+
+    class _PinnedHTTPConn(HTTPConnection):
+        def _new_conn(self):
+            cur_host = str(getattr(self, "host", "") or "").strip().lower().rstrip(".")
+            if cur_host == target_host:
+                if hasattr(self, "_dns_host"):
+                    orig = self._dns_host
+                    self._dns_host = pinned_ip
+                    try:
+                        return super()._new_conn()
+                    finally:
+                        self._dns_host = orig
+                return urllib3_util_conn.create_connection(
+                    (pinned_ip, self.port),
+                    self.timeout,
+                    source_address=self.source_address,
+                    socket_options=self.socket_options,
+                )
+            return super()._new_conn()
+
+    class _PinnedHTTPSConn(HTTPSConnection):
+        def _new_conn(self):
+            cur_host = str(getattr(self, "host", "") or "").strip().lower().rstrip(".")
+            if cur_host == target_host:
+                if hasattr(self, "_dns_host"):
+                    orig = self._dns_host
+                    self._dns_host = pinned_ip
+                    try:
+                        return super()._new_conn()
+                    finally:
+                        self._dns_host = orig
+                return urllib3_util_conn.create_connection(
+                    (pinned_ip, self.port),
+                    self.timeout,
+                    source_address=self.source_address,
+                    socket_options=self.socket_options,
+                )
+            return super()._new_conn()
+
+    class _PinnedHTTPPool(HTTPConnectionPool):
+        ConnectionCls = _PinnedHTTPConn
+
+    class _PinnedHTTPSPool(HTTPSConnectionPool):
+        ConnectionCls = _PinnedHTTPSConn
+
+    class _PinnedPoolManager(PoolManager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.pool_classes_by_scheme = {"http": _PinnedHTTPPool, "https": _PinnedHTTPSPool}
+
+    class _PinnedHTTPAdapter(HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            self._pool_connections = connections
+            self._pool_maxsize = maxsize
+            self._pool_block = block
+            self.poolmanager = _PinnedPoolManager(
+                num_pools=connections,
+                maxsize=maxsize,
+                block=block,
+                **pool_kwargs,
+            )
+
+    return _PinnedHTTPAdapter()
+
+
+def _http_get_no_redirect(url: str, *, headers: dict[str, str], timeout: int, pinned_ip: str | None = None) -> Any:
+    getter = getattr(requests, "get", None)
+    is_real_requests = (
+        callable(getter)
+        and getattr(getter, "__module__", "").startswith("requests.")
+        and type(getter).__name__ == "function"
+    )
+    if pinned_ip and is_real_requests and hasattr(requests, "Session"):
+        host = (urllib.parse.urlsplit(url).hostname or "").strip().lower().rstrip(".")
+        with requests.Session() as sess:
+            adapter = _make_pinned_adapter(host, pinned_ip)
+            sess.mount("https://", adapter)
+            sess.mount("http://", adapter)
+            return sess.get(url, headers=headers, timeout=timeout, allow_redirects=False)
+
+    kw: dict[str, Any] = {"headers": headers, "timeout": timeout}
+    if _supports_allow_redirects(requests.get):
+        kw["allow_redirects"] = False
+    try:
+        return requests.get(url, **kw)
+    except TypeError:
+        kw.pop("allow_redirects", None)
+        return requests.get(url, **kw)
+
+
+def _is_skipped_paywall_domain(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlsplit(str(url or "")).hostname or "").strip().lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    return any(host == dom or host.endswith(f".{dom}") for dom in _FULLTEXT_SKIP_DOMAINS)
+
+
+def _looks_like_bot_challenge(text: str) -> bool:
+    low = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    if not low:
+        return False
+    if len(low) < 1200 and any(tok in low for tok in _BOT_CHALLENGE_TOKENS):
+        return True
+    head = low[:300]
+    return any(tok in head for tok in _STRONG_CHALLENGE_TOKENS)
+
+
+def _find_balanced_container_end(html_str: str, open_end: int, tag_name: str) -> int:
+    tag_re = re.compile(rf"<(/?){tag_name}\b[^>]*>", re.IGNORECASE)
+    depth = 1
+    for m in tag_re.finditer(html_str, open_end):
+        if m.group(1) == "/":
+            depth -= 1
+            if depth == 0:
+                return m.start()
+        else:
+            depth += 1
+    return -1
+
+
+def _extract_main_html_fragment(raw_html: str) -> str:
+    """Extract primary article HTML container cleanly without external HTML parser deps."""
+    cleaned = re.sub(
+        r"<(script|style|noscript|svg|iframe|header|nav|footer|aside|form)\b[^>]*>.*?</\1>",
+        " ",
+        str(raw_html or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    def _plain_len(frag: str) -> int:
+        txt = re.sub(r"<[^>]+>", " ", frag)
+        return len(re.sub(r"\s+", " ", html.unescape(txt)).strip())
+
+    for tag in ("article", "main"):
+        matches = re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        if matches:
+            best = max(matches, key=_plain_len)
+            if _plain_len(best) >= 250:
+                return best
+
+    container_re = re.compile(
+        r"<(div|section)\b[^>]*(?:class|id)\s*=\s*[\"'][^\"']*"
+        r"(?:article[-_]?content|post[-_]?content|entry[-_]?content|story[-_]?body|markdown[-_]?body|\bprose\b)"
+        r"[^\"']*[\"'][^>]*>",
+        re.IGNORECASE,
+    )
+    best_div = ""
+    best_len = 0
+    for m in container_re.finditer(cleaned):
+        end_idx = _find_balanced_container_end(cleaned, m.end(), m.group(1))
+        if end_idx > m.end():
+            frag = cleaned[m.end() : end_idx]
+            plen = _plain_len(frag)
+            if plen > best_len:
+                best_len = plen
+                best_div = frag
+    if best_len >= 250:
+        return best_div
+
+    body_m = re.search(r"<body\b[^>]*>(.*?)</body>", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    body_scope = body_m.group(1) if body_m else cleaned
+    blocks: list[str] = []
+    for bm in re.finditer(
+        r"<(?:p|h[1-4]|li|blockquote)\b[^>]*>.*?</(?:p|h[1-4]|li|blockquote)>",
+        body_scope,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        frag = bm.group(0)
+        if _plain_len(frag) >= 25:
+            blocks.append(frag)
+    return "\n".join(blocks)
+
+
+def _decode_response_text(resp: Any) -> str:
+    raw_bytes = getattr(resp, "content", b"") or b""
+    if not raw_bytes:
+        return str(getattr(resp, "text", "") or "")
+    enc = str(getattr(resp, "encoding", "") or "").strip()
+    if enc and enc.lower() not in ("iso-8859-1", "latin-1", "latin1"):
+        try:
+            return raw_bytes.decode(enc, errors="replace")
+        except LookupError:
+            pass
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
+def fetch_url_fulltext_markdown(
+    url: str,
+    *,
+    timeout: int = 10,
+    max_chars: int = 16000,
+    allow_jina_fallback: bool = True,
+    use_cache: bool = True,
+    cache_path: Path | None = None,
+) -> tuple[str, str]:
+    """Safely fetch and extract clean Markdown fulltext from X or public web articles."""
+    target_url = str(url or "").strip()
+    safe_ok, initial_ips = _resolve_safe_public_ips(target_url)
+    if not safe_ok:
+        return ("", "blocked_ssrf")
+    if _is_skipped_paywall_domain(target_url):
+        return ("", "skipped_paywall")
+    if requests is None:
+        return ("", "failed")
+
+    cache_key = f"url:{target_url}"
+    if use_cache:
+        hit = _get_cached_fulltext(cache_key, cache_path=cache_path)
+        if hit is not None:
+            return (hit[0][:max_chars], hit[1])
+
+    # Route 1: X / Twitter status URLs via api.fxtwitter.com (no auto-redirects)
+    m_x = re.match(r"^https?://(?:www\.)?(?:x|twitter)\.com/([^/]+)/status/(\d+)", target_url, re.I)
+    if m_x:
+        author, tid = m_x.group(1), m_x.group(2)
+        fx_url = f"https://api.fxtwitter.com/{urllib.parse.quote(author)}/status/{tid}"
+        fx_ok, fx_ips = _resolve_safe_public_ips(fx_url)
+        if not fx_ok:
+            return ("", "blocked_ssrf")
+        try:
+            resp = _http_get_no_redirect(
+                fx_url,
+                headers={**_HEADERS, "Accept": "application/json"},
+                timeout=timeout,
+                pinned_ip=fx_ips[0] if fx_ips else None,
+            )
+            if resp.status_code in (301, 302, 303, 307, 308):
+                return ("", "failed")
+            if resp.status_code == 200 and resp.content:
+                fx = json.loads(_decode_response_text(resp))
+                tw = (fx or {}).get("tweet") or {}
+                art = tw.get("article") or {}
+                parts: list[str] = []
+                art_title = str(art.get("title") or "").strip() if isinstance(art, dict) else ""
+                if isinstance(art, dict) and art:
+                    blocks = (art.get("content") or {}).get("blocks") or []
+                    if isinstance(blocks, list):
+                        parts = [
+                            str(b.get("text") or "").strip()
+                            for b in blocks
+                            if isinstance(b, dict) and str(b.get("text") or "").strip()
+                        ]
+                    if not parts and art.get("preview_text"):
+                        parts = [str(art.get("preview_text") or "").strip()]
+                body_txt = "\n\n".join(parts) if parts else str(tw.get("text") or "").strip()
+                if art_title and body_txt and not body_txt.startswith(art_title):
+                    body_txt = f"# {art_title}\n\n{body_txt}"
+                body_clean = _scrub_forbidden(re.sub(r"\n{3,}", "\n\n", body_txt).strip())
+                if len(body_clean) >= 200 and not _looks_like_bot_challenge(body_clean):
+                    body_out = body_clean[:max_chars]
+                    if use_cache:
+                        _save_cached_fulltext(cache_key, text=body_out, status="fxtwitter", cache_path=cache_path)
+                    return (body_out, "fxtwitter")
+        except Exception:
+            pass
+        return ("", "failed")
+
+    # Route 2: Direct HTML fetch & extraction (manual hop-by-hop redirect + pinned DNS validation)
+    hit_bot_challenge = False
+    try:
+        cur_url = target_url
+        resp = None
+        req_headers = {**_HEADERS, "Accept": "text/html,application/xhtml+xml"}
+        for _hop in range(5):
+            if _hop == 0:
+                safe_ok, resolved_ips = True, initial_ips
+            else:
+                safe_ok, resolved_ips = _resolve_safe_public_ips(cur_url)
+            if not safe_ok:
+                return ("", "blocked_ssrf")
+            if _is_skipped_paywall_domain(cur_url):
+                if use_cache:
+                    _save_cached_fulltext(cache_key, text="", status="skipped_paywall", cache_path=cache_path)
+                return ("", "skipped_paywall")
+            resp = _http_get_no_redirect(
+                cur_url,
+                headers=req_headers,
+                timeout=timeout,
+                pinned_ip=resolved_ips[0] if resolved_ips else None,
+            )
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = str((getattr(resp, "headers", None) or {}).get("Location") or (getattr(resp, "headers", None) or {}).get("location") or "").strip()
+                if not loc:
+                    break
+                cur_url = urllib.parse.urljoin(cur_url, loc)
+                continue
+            break
+        if resp is None:
+            return ("", "failed")
+        final_url = str(getattr(resp, "url", "") or cur_url)
+        if final_url and final_url != cur_url and not _is_safe_public_url(final_url):
+            return ("", "blocked_ssrf")
+        if final_url and _is_skipped_paywall_domain(final_url):
+            if use_cache:
+                _save_cached_fulltext(cache_key, text="", status="skipped_paywall", cache_path=cache_path)
+            return ("", "skipped_paywall")
+        if resp.status_code == 200 and resp.content and len(resp.content) <= 2_500_000:
+            raw_html = _decode_response_text(resp)
+            m_title = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
+            page_title = _clean_text(m_title.group(1), max_len=200) if m_title else ""
+            if _looks_like_bot_challenge(page_title) or _looks_like_bot_challenge(raw_html[:3000]):
+                hit_bot_challenge = True
+            else:
+                frag = _extract_main_html_fragment(raw_html)
+                md = html_to_clean_markdown(frag, max_chars=max_chars)
+                if _looks_like_bot_challenge(md):
+                    hit_bot_challenge = True
+                elif len(md) >= 400:
+                    if use_cache:
+                        _save_cached_fulltext(cache_key, text=md, status="direct_html", cache_path=cache_path)
+                    return (md, "direct_html")
+    except Exception:
+        pass
+
+    if hit_bot_challenge:
+        return ("", "failed")
+
+    # Route 3: Jina Reader fallback for JS-rendered pages (never bypasses bot challenges, no auto-redirects)
+    if allow_jina_fallback:
+        jina_url = f"https://r.jina.ai/{target_url}"
+        j_ok, j_ips = _resolve_safe_public_ips(jina_url)
+        if j_ok:
+            try:
+                resp_j = _http_get_no_redirect(
+                    jina_url,
+                    headers={**_HEADERS, "Accept": "text/markdown, text/plain"},
+                    timeout=timeout,
+                    pinned_ip=j_ips[0] if j_ips else None,
+                )
+                if resp_j.status_code in (301, 302, 303, 307, 308):
+                    return ("", "failed")
+                if resp_j.status_code == 200 and resp_j.content and len(resp_j.content) <= 2_500_000:
+                    jina_raw = _decode_response_text(resp_j).strip()
+                    marker = "Markdown Content:"
+                    if marker in jina_raw[:1500]:
+                        jina_raw = jina_raw.split(marker, 1)[1].strip()
+                    jina_clean = _scrub_forbidden(re.sub(r"\n{3,}", "\n\n", jina_raw).strip())
+                    if not _looks_like_bot_challenge(jina_clean) and len(jina_clean) >= 400:
+                        jina_out = jina_clean[:max_chars]
+                        if use_cache:
+                            _save_cached_fulltext(cache_key, text=jina_out, status="jina", cache_path=cache_path)
+                        return (jina_out, "jina")
+            except Exception:
+                pass
+
+    return ("", "failed")
+
+
+def _fetch_cls_article_detail(
+    art_id: str,
+    timeout: int = 8,
+    *,
+    use_cache: bool = True,
+    cache_path: Path | None = None,
+) -> str:
+    """Fetch full HTML body of a CLS depth article via signed v3/article/detail API."""
+    clean_id = str(art_id or "").strip()
+    if not clean_id or requests is None:
+        return ""
+    cache_key = f"cls:{clean_id}"
+    if use_cache:
+        hit = _get_cached_fulltext(cache_key, cache_path=cache_path)
+        if hit is not None and hit[0]:
+            return hit[0]
+
+    params: dict[str, Any] = {
+        "appName": "CailianpressWeb",
+        "id": clean_id,
+        "os": "web",
+        "sv": "8.7.9",
+    }
+    params["sign"] = _cls_sign(params)
+    try:
+        resp = requests.get(
+            "https://www.cls.cn/v3/article/detail",
+            params=params,
+            headers={**_HEADERS, "Referer": f"https://www.cls.cn/detail/{clean_id}"},
+            timeout=timeout,
+        )
+        if resp.status_code != 200 or not resp.content:
+            return ""
+        payload = json.loads(_decode_response_text(resp))
+        if int(payload.get("errno") or 0) != 0:
+            return ""
+        data = payload.get("data") or {}
+        raw_content = str(data.get("content") or "").strip()
+        if not raw_content:
+            return ""
+        md = html_to_clean_markdown(raw_content, max_chars=16000)
+        if len(md) >= 200:
+            if use_cache:
+                _save_cached_fulltext(cache_key, text=md, status="cls_v3", cache_path=cache_path)
+            return md
+    except Exception:
+        pass
+    return ""
+
+
 def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
     if requests is None:
         return []
@@ -1378,12 +2082,12 @@ def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
         )
         if resp.status_code != 200 or not resp.content:
             return []
-        data = (json.loads(resp.content.decode("utf-8", errors="replace")).get("data")) or {}
+        data = (json.loads(_decode_response_text(resp)).get("data")) or {}
     except Exception:
         return []
 
     raw_rows = list(data.get("top_article") or []) + list(data.get("depth_list") or [])
-    candidates: list[dict[str, Any]] = []
+    prepped: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for row in raw_rows:
         if not isinstance(row, dict):
@@ -1406,34 +2110,418 @@ def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
         except Exception:
             dt = datetime.now(UTC)
         time_bjt = dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
-
         sub_src = _clean_text(row.get("source") or "财联社深度", max_len=40) or "财联社深度"
         summary = _clean_text(brief.replace("\n", " "), max_len=200)
-        body_md = (
-            f"# {title}\n\n"
-            f"- **来源**：{sub_src}（财联社深度）\n"
-            f"- **发布时间**：{time_bjt} (BJT)\n"
-            f"- **原文链接**：[{url}]({url})\n\n"
-            f"---\n\n{brief}\n"
+        prepped.append(
+            {
+                "art_id": art_id,
+                "title": title,
+                "brief": brief,
+                "summary": summary,
+                "sub_src": sub_src,
+                "time_bjt": time_bjt,
+                "url": url,
+            }
         )
+        if len(prepped) >= 8:
+            break
+
+    if not prepped:
+        return []
+
+    detail_map: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {pool.submit(_fetch_cls_article_detail, item["art_id"], timeout): item["art_id"] for item in prepped}
+        for fut in as_completed(futs):
+            aid = futs[fut]
+            try:
+                detail_map[aid] = fut.result() or ""
+            except Exception:
+                detail_map[aid] = ""
+
+    candidates: list[dict[str, Any]] = []
+    for item in prepped:
+        art_id = item["art_id"]
+        title = item["title"]
+        brief = item["brief"]
+        summary = item["summary"]
+        sub_src = item["sub_src"]
+        time_bjt = item["time_bjt"]
+        url = item["url"]
+        full_md = detail_map.get(art_id) or ""
+
+        if len(full_md) >= 200:
+            body_md = (
+                f"# {title}\n\n"
+                f"- **来源**：{sub_src}（财联社深度）\n"
+                f"- **发布时间**：{time_bjt} (BJT)\n"
+                f"- **原文链接**：[{url}]({url})\n\n"
+                f"> **核心要点**：{summary}\n\n"
+                f"---\n\n{full_md}\n"
+            )
+            combined_for_meta = f"{title} {brief} {full_md[:1200]}"
+        else:
+            body_md = (
+                f"# {title}\n\n"
+                f"- **来源**：{sub_src}（财联社深度）\n"
+                f"- **发布时间**：{time_bjt} (BJT)\n"
+                f"- **原文链接**：[{url}]({url})\n\n"
+                f"---\n\n{brief}\n"
+            )
+            combined_for_meta = f"{title} {brief}"
+
         candidates.append(
             {
                 "id": f"art-cls-{art_id}",
                 "source": "财联社深度",
                 "publisher": "财联社深度",
-                "category": _infer_cn_category(f"{title} {brief}", "equities"),
+                "category": _infer_cn_category(combined_for_meta, "equities"),
                 "source_tier": "T1_5",
-                "direction": _infer_direction(f"{title} {brief}"),
+                "direction": _infer_direction(combined_for_meta),
                 "time_bjt": time_bjt,
                 "title": title,
                 "summary": summary,
                 "why_it_matters": "财联社深度板块精华研判，跟踪中国资本市场、产业政策与科技产业链动向。",
-                "tickers": extract_tickers(f"{title} {brief}"),
+                "tickers": extract_tickers(combined_for_meta),
                 "url": url,
                 "body_md": body_md,
             }
         )
     return candidates
+
+
+def _fetch_wscn_article_detail(
+    art_id: str,
+    timeout: int = 8,
+    *,
+    use_cache: bool = True,
+    cache_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Fetch free WallStreetCN article fulltext; return None for VIP/paid gated articles."""
+    clean_id = str(art_id or "").strip()
+    if not clean_id or requests is None:
+        return None
+    cache_key = f"wscn:{clean_id}"
+    if use_cache:
+        hit = _get_cached_fulltext(cache_key, cache_path=cache_path)
+        if hit is not None:
+            if hit[1] == "skipped_paywall":
+                return None
+            try:
+                cached_obj = json.loads(hit[0])
+                if isinstance(cached_obj, dict) and cached_obj.get("content_md"):
+                    return cached_obj
+            except Exception:
+                pass
+
+    try:
+        resp = requests.get(
+            f"https://api-one.wallstcn.com/apiv1/content/articles/{urllib.parse.quote(clean_id)}",
+            params={"extract": 0},
+            headers=_HEADERS,
+            timeout=timeout,
+        )
+        if resp.status_code != 200 or not resp.content:
+            return None
+        d = (json.loads(_decode_response_text(resp)).get("data")) or {}
+        if not isinstance(d, dict):
+            return None
+        if d.get("is_paid") or d.get("is_priced"):
+            if use_cache:
+                _save_cached_fulltext(cache_key, text="", status="skipped_paywall", cache_path=cache_path)
+            return None
+        content_md = html_to_clean_markdown(str(d.get("content") or ""), max_chars=16000)
+        if len(content_md) < 300:
+            return None
+        author_obj = d.get("author") if isinstance(d.get("author"), dict) else {}
+        detail = {
+            "id": clean_id,
+            "title": _clean_text(d.get("title") or "", max_len=140),
+            "summary": _clean_text(d.get("content_short") or "", max_len=200),
+            "author": _clean_text((author_obj or {}).get("display_name") or "", max_len=40),
+            "display_time": d.get("display_time"),
+            "uri": str(d.get("uri") or "").strip(),
+            "content_md": content_md,
+        }
+        if use_cache:
+            _save_cached_fulltext(
+                cache_key,
+                text=json.dumps(detail, ensure_ascii=False),
+                status="wscn_detail",
+                cache_path=cache_path,
+            )
+        return detail
+    except Exception:
+        return None
+
+
+def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
+    """Fetch WallStreetCN daily hot articles (free fulltext only)."""
+    if requests is None:
+        return []
+    try:
+        resp = requests.get(
+            "https://api-one.wallstcn.com/apiv1/content/articles/hot",
+            params={"period": "all"},
+            headers=_HEADERS,
+            timeout=timeout,
+        )
+        if resp.status_code != 200 or not resp.content:
+            return []
+        data = (json.loads(_decode_response_text(resp)).get("data")) or {}
+    except Exception:
+        return []
+
+    day_items = list(data.get("day_items") or [])[:8]
+    if not day_items:
+        return []
+
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    ordered_ids: list[str] = []
+    for row in day_items:
+        if not isinstance(row, dict):
+            continue
+        aid = str(row.get("id") or "").strip()
+        if aid and aid not in rows_by_id:
+            rows_by_id[aid] = row
+            ordered_ids.append(aid)
+
+    details: dict[str, dict[str, Any] | None] = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {pool.submit(_fetch_wscn_article_detail, aid, timeout): aid for aid in ordered_ids}
+        for fut in as_completed(futs):
+            aid = futs[fut]
+            try:
+                details[aid] = fut.result()
+            except Exception:
+                details[aid] = None
+
+    candidates: list[dict[str, Any]] = []
+    for aid in ordered_ids:
+        row = rows_by_id[aid]
+        det = details.get(aid)
+        if not det:
+            continue
+        title = det.get("title") or _clean_text(row.get("title") or "", max_len=140)
+        content_md = str(det.get("content_md") or "").strip()
+        if not title or len(content_md) < 300:
+            continue
+        raw_uri = det.get("uri") or str(row.get("uri") or "").strip()
+        url = raw_uri if raw_uri.startswith(("http://", "https://")) else f"https://wallstreetcn.com/articles/{aid}"
+        ts_val = det.get("display_time") or row.get("display_time") or 0
+        try:
+            dt = datetime.fromtimestamp(int(ts_val), tz=UTC)
+        except Exception:
+            dt = datetime.now(UTC)
+        time_bjt = dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
+        first_para = next((ln for ln in content_md.splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
+        summary = det.get("summary") or _clean_text(first_para, max_len=200) or title
+        author = det.get("author") or "华尔街见闻"
+        pageviews = row.get("pageviews")
+        pv_str = f" · 热度 {int(pageviews)}" if isinstance(pageviews, (int, float)) and pageviews > 0 else ""
+
+        body_md = (
+            f"# {title}\n\n"
+            f"- **来源**：{author}（华尔街见闻热门{pv_str}）\n"
+            f"- **发布时间**：{time_bjt} (BJT)\n"
+            f"- **原文链接**：[{url}]({url})\n\n"
+            f"---\n\n{content_md}\n"
+        )
+        combined = f"{title} {summary} {content_md[:1200]}"
+        candidates.append(
+            {
+                "id": f"art-wscn-{aid}",
+                "source": "华尔街见闻热门",
+                "publisher": "华尔街见闻热门",
+                "category": _infer_cn_category(combined, "macro"),
+                "source_tier": "T1_5",
+                "direction": _infer_direction(combined),
+                "time_bjt": time_bjt,
+                "title": title,
+                "summary": summary,
+                "why_it_matters": "华尔街见闻热门全网高阅读深度稿，聚焦全球宏观、利率定价与科技龙头催化。",
+                "tickers": extract_tickers(combined),
+                "url": url,
+                "body_md": body_md,
+            }
+        )
+    return candidates
+
+
+def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
+    """Fetch fulltext articles from AIHOT hot-topics & selected AI items (skipping paywalls/WeChat)."""
+    if requests is None:
+        return []
+    actor_id = (os.environ.get("AIHOT_ACTOR_ID") or "macrocockpit-agent-v2").strip()
+    aihot_headers = {
+        **_HEADERS,
+        "User-Agent": f"aihot-skill/2.0.0 (+https://aihot.news/aihot-skill/) aihot-actor/{actor_id}",
+        "Accept": "application/json",
+    }
+
+    def _get_json(ep: str) -> dict[str, Any]:
+        try:
+            r = requests.get(ep, headers=aihot_headers, timeout=timeout)
+            if r.status_code == 200 and r.content:
+                data = json.loads(_decode_response_text(r))
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        return {}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ht_fut = pool.submit(_get_json, "https://aihot.news/api/v1/hot-topics")
+        sel_fut = pool.submit(_get_json, "https://aihot.news/api/v1/items?mode=selected&limit=12")
+        ht_items = list((ht_fut.result() or {}).get("items") or [])
+        sel_items = list((sel_fut.result() or {}).get("items") or [])
+
+    sel_by_id: dict[str, dict[str, Any]] = {}
+    sel_by_url: dict[str, dict[str, Any]] = {}
+    for it in sel_items:
+        if not isinstance(it, dict):
+            continue
+        iid = str(it.get("id") or "").strip()
+        orig = str(((it.get("links") or {}).get("original")) or "").strip()
+        if iid:
+            sel_by_id[iid] = it
+        if orig:
+            sel_by_url[orig] = it
+
+    merged_specs: list[dict[str, Any]] = []
+    seen_orig: set[str] = set()
+    for raw in ht_items + sel_items:
+        if not isinstance(raw, dict):
+            continue
+        aid = str(raw.get("id") or "").strip()
+        orig = str(((raw.get("links") or {}).get("original")) or "").strip()
+        if not orig or not _is_safe_public_url(orig) or _is_skipped_paywall_domain(orig):
+            continue
+        host = (urllib.parse.urlsplit(orig).hostname or "").lower()
+        if host in ("aihot.news", "www.aihot.news"):
+            continue
+        if orig in seen_orig:
+            continue
+        seen_orig.add(orig)
+
+        paired = sel_by_id.get(aid) or sel_by_url.get(orig) or {}
+        src_name = _clean_text(
+            ((raw.get("source") or {}).get("name")) or ((paired.get("source") or {}).get("name")) or "AIHOT",
+            max_len=60,
+        )
+        title = _clean_text(raw.get("title") or paired.get("title") or "", max_len=140)
+        if not title:
+            continue
+        summary_raw = str(raw.get("summary") or paired.get("summary") or "").strip()
+        reason_raw = str(raw.get("reason") or paired.get("reason") or "").strip()
+        ts_raw = raw.get("latestAt") or raw.get("publishedAt") or paired.get("publishedAt") or ""
+        dt = _parse_rss_datetime(str(ts_raw)) or datetime.now(UTC)
+        merged_specs.append(
+            {
+                "id": aid or hashlib.sha1(orig.encode("utf-8")).hexdigest()[:10],
+                "rank": raw.get("rank"),
+                "title": title,
+                "orig_url": orig,
+                "src_name": src_name,
+                "aihot_summary": _clean_text(summary_raw, max_len=240),
+                "aihot_reason": _clean_text(reason_raw, max_len=200),
+                "time_bjt": dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M"),
+            }
+        )
+        if len(merged_specs) >= 8:
+            break
+
+    if not merged_specs:
+        return []
+
+    fulltext_map: dict[str, tuple[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {
+            pool.submit(fetch_url_fulltext_markdown, sp["orig_url"], timeout=timeout, max_chars=16000): sp["orig_url"]
+            for sp in merged_specs
+        }
+        for fut in as_completed(futs):
+            u = futs[fut]
+            try:
+                fulltext_map[u] = fut.result()
+            except Exception:
+                fulltext_map[u] = ("", "failed")
+
+    candidates: list[dict[str, Any]] = []
+    for sp in merged_specs:
+        orig = sp["orig_url"]
+        full_md, status = fulltext_map.get(orig, ("", "failed"))
+        if status not in ("fxtwitter", "direct_html", "jina") or len(full_md) < 400:
+            continue
+        rank_tag = f"第 {int(sp['rank'])} 名" if isinstance(sp.get("rank"), int) else "精选"
+        meta_lines = [
+            f"# {sp['title']}",
+            "",
+            f"- **来源**：AIHOT 热榜{rank_tag}（原信源：{sp['src_name']}）",
+            f"- **发布时间**：{sp['time_bjt']} (BJT)",
+            f"- **原文链接**：[{orig}]({orig})",
+        ]
+        if sp["aihot_summary"]:
+            meta_lines.append(f"\n> **AIHOT 摘要**：{sp['aihot_summary']}")
+        body_md = _scrub_forbidden("\n".join(meta_lines) + f"\n\n---\n\n{full_md}\n")
+
+        first_line = next((ln for ln in full_md.splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
+        summary = sp["aihot_summary"] or _clean_text(first_line, max_len=200) or sp["title"]
+        combined = f"{sp['title']} {summary} {full_md[:1200]}"
+        candidates.append(
+            {
+                "id": f"art-aihot-{sp['id']}",
+                "source": "AIHOT热榜",
+                "publisher": "AIHOT热榜",
+                "category": "ai",
+                "source_tier": "T1_5",
+                "direction": _infer_direction(combined),
+                "time_bjt": sp["time_bjt"],
+                "title": sp["title"],
+                "summary": summary,
+                "why_it_matters": sp["aihot_reason"] or "AIHOT 全网热门议题原文全文，追踪大模型与 AI 产业链前沿动向。",
+                "tickers": extract_tickers(combined),
+                "url": orig,
+                "body_md": body_md,
+            }
+        )
+    return candidates
+
+
+def _select_balanced_articles(
+    deduped: list[dict[str, Any]],
+    *,
+    limit: int = 14,
+    max_per_publisher: int = 4,
+) -> list[dict[str, Any]]:
+    """Select top articles by score/time while preventing a single publisher from dominating."""
+    ordered = sorted(
+        deduped,
+        key=lambda x: (int(x.get("attention_score") or x.get("score") or 0), str(x.get("time_bjt") or "")),
+        reverse=True,
+    )
+    picked: list[dict[str, Any]] = []
+    picked_ids: set[int] = set()
+    pub_counts: dict[str, int] = {}
+
+    for idx, it in enumerate(ordered):
+        if len(picked) >= limit:
+            break
+        pub = str(it.get("publisher") or it.get("source") or "AI与金融研报").strip()
+        if pub_counts.get(pub, 0) >= max_per_publisher:
+            continue
+        picked.append(it)
+        picked_ids.add(idx)
+        pub_counts[pub] = pub_counts.get(pub, 0) + 1
+
+    if len(picked) < limit:
+        for idx, it in enumerate(ordered):
+            if idx in picked_ids:
+                continue
+            picked.append(it)
+            if len(picked) >= limit:
+                break
+
+    return picked
 
 
 def _yaml_quote(value: str) -> str:
@@ -1483,13 +2571,13 @@ def collect_curated_articles(
     articles_dir: Path = ARTICLES_DIR,
     cache_path: Path = ARTICLE_CACHE_PATH,
 ) -> list[dict[str, Any]]:
-    """Fetch, filter, score and persist top 10 curated AI/finance articles as articles/feed_*.md."""
+    """Fetch, filter, score and persist balanced fulltext AI/finance articles as articles/feed_*.md."""
     if not force_refresh and cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             age = time.time() - float(cached.get("ts") or 0.0)
             arts = cached.get("articles") or []
-            if cached.get("schema_tag") == "wave1_5" and age <= ARTICLE_CACHE_TTL and isinstance(arts, list) and arts:
+            if cached.get("schema_tag") == "wave2_fulltext" and age <= ARTICLE_CACHE_TTL and isinstance(arts, list) and arts:
                 if not list(articles_dir.glob("feed_*.md")):
                     _write_curated_article_files(arts, articles_dir=articles_dir)
                 return [dict(x) for x in arts if isinstance(x, dict)]
@@ -1499,18 +2587,21 @@ def collect_curated_articles(
     from backend.kazike_engine import cluster_and_dedup, prefilter_financial, score_five_axes
 
     raw_candidates: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         futs = [pool.submit(_fetch_article_candidates_from_feed, sp, timeout) for sp in CURATED_ARTICLE_FEEDS]
         cls_fut = pool.submit(_fetch_cls_depth_candidates, timeout)
+        wscn_fut = pool.submit(_fetch_wscn_hot_articles, timeout)
+        aihot_fut = pool.submit(_fetch_aihot_hot_articles, max(timeout, 10))
         for fut in as_completed(futs):
             try:
                 raw_candidates.extend(fut.result())
             except Exception:
                 pass
-        try:
-            raw_candidates.extend(cls_fut.result())
-        except Exception:
-            pass
+        for extra_fut in (cls_fut, wscn_fut, aihot_fut):
+            try:
+                raw_candidates.extend(extra_fut.result())
+            except Exception:
+                pass
 
     scored_candidates: list[dict[str, Any]] = []
     for cand in raw_candidates:
@@ -1525,26 +2616,23 @@ def collect_curated_articles(
 
     if scored_candidates:
         deduped = cluster_and_dedup(scored_candidates)
-        deduped.sort(
-            key=lambda x: (int(x.get("attention_score") or 0), str(x.get("time_bjt") or "")),
-            reverse=True,
-        )
+        balanced = _select_balanced_articles(deduped, limit=14, max_per_publisher=4)
         top_articles = [
             {
                 "filename": "",
-                "title": str(it.get("title") or ""),
-                "summary": str(it.get("summary") or ""),
+                "title": _scrub_forbidden(str(it.get("title") or "")),
+                "summary": _scrub_forbidden(str(it.get("summary") or "")),
                 "publisher": str(it.get("publisher") or it.get("source") or "AI与金融研报"),
                 "url": str(it.get("url") or ""),
                 "score": int(it.get("attention_score") or 0),
                 "time_bjt": str(it.get("time_bjt") or ""),
-                "body_md": str(it.get("body_md") or ""),
+                "body_md": _scrub_forbidden(str(it.get("body_md") or "")),
             }
-            for it in deduped[:10]
+            for it in balanced
         ]
         _write_curated_article_files(top_articles, articles_dir=articles_dir)
         try:
-            atomic_write_json(cache_path, {"schema_tag": "wave1_5", "ts": time.time(), "articles": top_articles})
+            atomic_write_json(cache_path, {"schema_tag": "wave2_fulltext", "ts": time.time(), "articles": top_articles})
         except Exception:
             pass
         return top_articles
@@ -1577,6 +2665,7 @@ def build_opml_export(output_path: Path | str | None = None) -> str:
         "AI 官方与前沿研究": [],
         "数字资产": [],
         "深度长文与周刊": [],
+        "大佬分享与深度访谈": [],
     }
     cat_group_map = {
         "macro": "宏观与央行",
@@ -1613,6 +2702,25 @@ def build_opml_export(output_path: Path | str | None = None) -> str:
                 "type": "rss",
                 "xmlUrl": u,
                 "htmlUrl": sp.get("html_url") or u,
+            }
+        )
+    try:
+        from backend.guru_sources import GURU_ARTICLE_FEEDS
+    except ImportError:
+        GURU_ARTICLE_FEEDS = ()
+    for sp in GURU_ARTICLE_FEEDS:
+        u = str(sp.get("url") or "").strip()
+        if not u or u in seen_urls:
+            continue
+        seen_urls.add(u)
+        label = str(sp.get("publisher") or sp.get("author") or sp.get("id") or "大佬专栏")
+        groups["大佬分享与深度访谈"].append(
+            {
+                "text": label,
+                "title": label,
+                "type": "rss",
+                "xmlUrl": u,
+                "htmlUrl": str(sp.get("html_url") or u),
             }
         )
 

@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from backend.fred_and_market import DATA_DIR, atomic_write_json
+from backend.zh_brief import attach_zh_briefs_batch, is_primarily_english
 
 BJT = timezone(timedelta(hours=8))
 UTC = timezone.utc
 
 HOT_RULE_VERSION = "heat-v1-48h-halflife24h"
-JUDGE_VERSION = "judge-v2"
+JUDGE_VERSION = "judge-v3"
 HEAT_WINDOW_HOURS = 48.0
 HALF_LIFE_HOURS = 24.0
 RECALL_WINDOW_DAYS = 14
@@ -52,10 +53,31 @@ CONTENT_TYPE_WEIGHTS: dict[str, tuple[int, int, int, int, int]] = {
 }
 
 _LISTING_NOISE_RE = re.compile(
-    r"(?i)(will\s+list\b|launch(?:es|ing)?\s+.*\bperp(?:etual)?\b|上线.*永续合约|新增.*交易对|监控标签|种子标签|下架.*币对)"
+    r"(?i)(will\s+list\b|launch(?:es|ing)?\s+.*\bperp(?:etual)?\b|上线.*永续合约|新增.*交易对|监控标签|种子标签|下架.*币对|"
+    r"新增.*交易支持|交易支持公告|新增.*币对|上线.*现货|暂停.*充提|恢复.*充提|支持.*网络升级|market\s+support\s+for)"
+)
+_ACADEMIC_HUMAN_NOISE_RE = re.compile(r"数学难题|菲尔兹奖|院士.*提名|高考状元|招生简章")
+_MARKET_ANCHOR_RE = re.compile(
+    r"(?i)(?:\b(?:NVDA|AAPL|MSFT|GOOG|META|AMZN|TSLA|AMD|AVGO|TSM|INTC|MU|BTC|ETH|SOL|SPY|QQQ|FED|FOMC|CPI|PCE|GDP|SEC|ETF|LLM|OpenAI|Anthropic|DeepSeek)\b|"
+    r"美股|A股|港股|纳指|标普|创业板|科创板|芯片|算力|半导体|大模型|央行|美联储|国债|美债|汇率|黄金|原油|比特币|财报|营收|市值)"
 )
 _CLICKBAIT_RE = re.compile(r"(震惊|揭秘|速看|紧急通知|太可怕了)")
-_ROUNDUP_RE = re.compile(r"(?i)(早报|周报|月报|盘点|合集|汇总|digest|roundup|recap|briefing)")
+_ROUNDUP_RE = re.compile(
+    r"(?i)(?:^live\s+updates?\s*:|^live\s+blog\s*:|market\s+wrap\b|stock\s+market\s+today\b|"
+    r"what\s+to\s+watch\s+today|早报|周报|月报|盘点|合集|汇总|digest|roundup|recap|briefing)"
+)
+_PERSONAL_FINANCE_NOISE_RE = re.compile(
+    r"(?i)(?:\bmy\s+(?:husband|wife|ex-wife|ex-husband|partner|boyfriend|girlfriend|mother-in-law|father-in-law|kids?|parents?)\b|"
+    r"\b(?:alimony|divorce\s+settlement|wedding\s+budget|pay\s+off\s+my\s+mortgage)\b|"
+    r"\bi['’]m\s+\d{2}\s+and\s+(?:have|earn|want\s+to\s+retire)\b)"
+)
+_PERSONAL_DEBT_ADVICE_RE = re.compile(
+    r"(?i)(?:\b(?:credit\s+card\s+debt|social\s+security\s+check)\b.*\b(?:my|i|should\s+i|retire|husband|wife|alimony|advice)\b|"
+    r"\b(?:my|i|should\s+i|retire|husband|wife|alimony|advice)\b.*\b(?:credit\s+card\s+debt|social\s+security\s+check)\b)"
+)
+_INSTITUTIONAL_MACRO_ANCHOR_RE = re.compile(
+    r"(?i)\b(?:federal\s+reserve|ny\s+fed|fred|treasury|bls|census|bureau|delinquency\s+rate|household\s+debt)\b|美联储|央行|财政部"
+)
 _TEASER_RE = re.compile(r"(?i)(即将推出|预告|敬请期待|coming\s+soon|waitlist|抢先体验|teaser)")
 
 _TRACKING_PARAMS = frozenset(
@@ -164,7 +186,6 @@ def infer_source_tier(item: dict[str, Any]) -> str:
             "seeking alpha",
             "ft ",
             "cnbc",
-            "coindesk",
             "the batch",
             "方程式",
             "aihot",
@@ -173,7 +194,7 @@ def infer_source_tier(item: dict[str, Any]) -> str:
         )
     ):
         return "T1_5"
-    if any(k in src for k in ("量子位", "ars technica")):
+    if any(k in src for k in ("量子位", "ars technica", "coindesk", "cointelegraph")):
         return "T2"
     if any(k in text for k in ("fed", "fomc", "sec", "cftc", "treasury", "美联储", "央行", "财政部", "官方", "fred")):
         return "T1"
@@ -192,6 +213,14 @@ def prefilter_financial(item: dict[str, Any]) -> tuple[str, str]:
         return ("BLOCK", "内容为空")
     if _LISTING_NOISE_RE.search(combined):
         return ("BLOCK", "上币或常规交易对维护噪声")
+    if _ACADEMIC_HUMAN_NOISE_RE.search(combined) and not _MARKET_ANCHOR_RE.search(combined):
+        return ("BLOCK", "非金融学术或人物花边噪声")
+    if _PERSONAL_FINANCE_NOISE_RE.search(combined) or (
+        _PERSONAL_DEBT_ADVICE_RE.search(combined)
+        and str(item.get("source_tier") or "") != "T1"
+        and not _INSTITUTIONAL_MACRO_ANCHOR_RE.search(combined)
+    ):
+        return ("BLOCK", "个人家庭理财故事噪声")
     if _CLICKBAIT_RE.search(title) or (
         _CLICKBAIT_RE.search(combined) and str(item.get("source_tier") or "") != "T1"
     ):
@@ -242,9 +271,13 @@ def _load_receipts(path: Path = RECEIPTS_PATH) -> dict[str, Any]:
 
 def _receipt_hash(item: dict[str, Any]) -> str:
     tickers_norm = ",".join(sorted({str(t).strip().upper() for t in (item.get("tickers") or []) if str(t).strip()}))
+    src_norm = str(item.get("source") or "").strip().lower()
+    tier_norm = str(item.get("source_tier") or infer_source_tier(item)).strip().upper()
     payload = "|".join(
         [
             JUDGE_VERSION,
+            src_norm,
+            tier_norm,
             str(item.get("title") or "").strip(),
             str(item.get("summary") or "").strip()[:400],
             str(item.get("why_it_matters") or "").strip()[:240],
@@ -299,7 +332,7 @@ def _deterministic_five_axes(item: dict[str, Any]) -> dict[str, Any]:
     weights = CONTENT_TYPE_WEIGHTS[content_type]
 
     # Blind-style axis estimation (uses only textual substance & numbers, ignoring source tier)
-    if len(title) < 8 or (len(summary) < 10 and len(title) < 20):
+    if len(title) < 8:
         axes = {"impact": 2, "surprise": 2, "cred": 3, "breadth": 2, "action": 2}
         raw_score = min(30, sum(a * w for a, w in zip(axes.values(), weights)))
         return {
@@ -311,7 +344,13 @@ def _deterministic_five_axes(item: dict[str, Any]) -> dict[str, Any]:
 
     # 1. impact (0..10): substantive pricing weight
     impact = 5
-    if any(k in low for k in ("fed", "fomc", "sec", "cpi", "gdp", "nvda", "btc", "sp500", "nasdaq", "美联储", "英伟达", "美债", "流动性", "清仓", "暴跌", "飙升", "万亿")):
+    has_crypto_catalyst = any(
+        k in low
+        for k in ("etf", "sec", "hack", "exploit", "liquidation", "爆仓", "清算", "闪崩", "黑客")
+    ) or bool(re.search(r"(?:\b[89]\d?%|\b1\d{2}%|\-\s*[89](?:\.\d+)?%|\-\s*\d{2}(?:\.\d+)?%)", low))
+    if any(k in low for k in ("fed", "fomc", "sec", "cpi", "gdp", "nvda", "sp500", "nasdaq", "美联储", "英伟达", "美债", "流动性", "清仓", "暴跌", "飙升", "万亿")):
+        impact += 3
+    elif "btc" in low and has_crypto_catalyst:
         impact += 3
     if any(k in low for k in ("10%", "20%", "45天", "6万亿", "-14%", "bps", "capex", "调查", "裁员", "违约", "破产", "停摆")):
         impact += 2
@@ -369,9 +408,16 @@ def _deterministic_five_axes(item: dict[str, Any]) -> dict[str, Any]:
         "action": max(0, min(10, action)),
     }
     raw_score = sum(axes[k] * w for k, w in zip(("impact", "surprise", "cred", "breadth", "action"), weights))
-    # Cap fragmented or low-substance items cleanly
-    if len(title) + len(summary) < 35:
+    # Cap fragmented or low-substance items cleanly (do not penalize empty deduped summaries)
+    if (not summary and len(title) < 16) or (summary and (len(title) + len(summary)) < 35):
         raw_score = min(raw_score, 30)
+    if "arxiv" in str(item.get("source") or "").lower():
+        raw_score = min(raw_score, 68)
+    # Hermes-style soft compression above 75 so only tier-S macro/earnings catalysts break 85+
+    if raw_score > 75:
+        import math as _math
+
+        raw_score = round(75.0 + 25.0 * (1.0 - _math.exp(-(raw_score - 75.0) / 45.0)))
 
     return {
         "content_type": content_type,
@@ -440,12 +486,14 @@ def lexical_similarity(text_a: str, text_b: str) -> float:
 
 
 def _select_best_representative(group: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Pick representative copy prioritizing T1 > T1_5 > T2, then attention_score, then summary len."""
+    """Pick representative copy prioritizing T1 > T1_5 > T2, above-floor quality, score (+3 Chinese near-tie), summary len."""
     ordered = sorted(
         group,
         key=lambda it: (
             TIER_PRIORITY.get(str(it.get("source_tier") or "T2"), 1),
-            int(it.get("attention_score") or 0),
+            1 if int(it.get("attention_score") or 0) >= BROWSE_FLOOR else 0,
+            int(it.get("attention_score") or 0) + (0 if is_primarily_english(str(it.get("title") or "")) else 3),
+            0 if is_primarily_english(str(it.get("title") or "")) else 1,
             len(str(it.get("summary") or "")),
         ),
         reverse=True,
@@ -569,8 +617,11 @@ def cluster_and_dedup(
         num_anchors = _extract_numeric_anchors(f"{title} {summary[:160]}")
         iso_keys = _extract_isolation_keys(it)
 
+        item_is_crypto = str(it.get("category") or "").lower() == "crypto"
+        domain_tag = "crypto" if item_is_crypto else "mkt"
+
         if _ROUNDUP_RE.search(title):
-            cid = f"clu-{hashlib.sha1(title.encode('utf-8')).hexdigest()[:10]}"
+            cid = f"clu-{hashlib.sha1(f'roundup|{domain_tag}|{title}'.encode('utf-8')).hexdigest()[:10]}"
             it["cluster_id"] = cid
             it["group_relation"] = "新事件"
             it["relation_code"] = "ROUNDUP"
@@ -583,6 +634,8 @@ def cluster_and_dedup(
 
         for cl in clusters:
             if cl["latest_ts"] < cutoff:
+                continue
+            if item_is_crypto != bool(cl.get("is_crypto")):
                 continue
             if _isolation_conflict(iso_keys, cl["iso_keys"]):
                 continue
@@ -607,7 +660,7 @@ def cluster_and_dedup(
                     matched_sim = eff_sim
 
         if matched_cluster is None:
-            cid = f"clu-{hashlib.sha1((norm_u or title).encode('utf-8')).hexdigest()[:10]}"
+            cid = f"clu-{hashlib.sha1(f'{domain_tag}|{norm_u or title}'.encode('utf-8')).hexdigest()[:10]}"
             it["cluster_id"] = cid
             it["group_relation"] = "新事件"
             it["relation_code"] = "UNRELATED"
@@ -619,6 +672,7 @@ def cluster_and_dedup(
                     "tickers": set(tickers),
                     "num_anchors": set(num_anchors),
                     "iso_keys": {k: set(v) for k, v in iso_keys.items()},
+                    "is_crypto": str(it.get("category") or "").lower() == "crypto",
                     "latest_ts": ts,
                     "members": [it],
                 }
@@ -855,6 +909,7 @@ def process_financial_signals(
 
     # Per-source rate cap (always exempt "美股盘面" summary cards) + 5-sector balance guarantee
     core_sectors = ("equities", "ashare", "ai", "crypto", "macro")
+    crypto_cap = max(2, max_visible // 8) if max_visible > 0 else 0
 
     # Group non-wrap items by source, keeping round-robin sector diversity within each source
     by_source: dict[str, list[dict[str, Any]]] = {}
@@ -897,24 +952,45 @@ def process_financial_signals(
         allowed_ids.update(id(x) for x in picked_for_src)
 
     capped = [item for item in candidates if id(item) in allowed_ids]
+    non_crypto_total = sum(1 for x in capped if str(x.get("category") or "").lower() != "crypto")
+    if len(capped) > 4:
+        eff_crypto_cap = max(2, min(crypto_cap if crypto_cap > 0 else len(capped), len(capped) // 4))
+    else:
+        eff_crypto_cap = crypto_cap if crypto_cap > 0 else len(capped)
 
     if max_visible > 0 and len(capped) > max_visible:
         # Reserve balanced sector floor (up to min_per_sector each across 5 core sectors) + market wraps
         min_per_sector = min(8, max(2, max_visible // 10))
         chosen_ids: set[int] = {id(w) for w in market_wraps}
+        chosen_crypto = sum(1 for w in market_wraps if str(w.get("category") or "").lower() == "crypto")
         for sec in core_sectors:
+            sec_limit = min(min_per_sector, eff_crypto_cap) if sec == "crypto" else min_per_sector
             sec_hits = [
                 x for x in capped
                 if id(x) not in chosen_ids and str(x.get("category") or "").lower() == sec
             ]
-            for x in sec_hits[:min_per_sector]:
+            for x in sec_hits[:sec_limit]:
                 if len(chosen_ids) < max_visible:
                     chosen_ids.add(id(x))
+                    if sec == "crypto":
+                        chosen_crypto += 1
         for x in capped:
             if len(chosen_ids) >= max_visible:
                 break
-            if id(x) not in chosen_ids:
-                chosen_ids.add(id(x))
+            if id(x) in chosen_ids:
+                continue
+            is_cr = str(x.get("category") or "").lower() == "crypto"
+            if is_cr and chosen_crypto >= eff_crypto_cap:
+                continue
+            chosen_ids.add(id(x))
+            if is_cr:
+                chosen_crypto += 1
+        if len(chosen_ids) < max_visible and non_crypto_total < max_visible:
+            for x in capped:
+                if len(chosen_ids) >= max_visible:
+                    break
+                if id(x) not in chosen_ids and str(x.get("category") or "").lower() != "crypto":
+                    chosen_ids.add(id(x))
         # Ensure market_wraps are never truncated if max_visible < len(market_wraps)
         visible = [x for x in capped if id(x) in chosen_ids][:max_visible]
         present_ids = {id(x) for x in visible}
@@ -934,7 +1010,42 @@ def process_financial_signals(
                 reverse=True,
             )
     else:
-        visible = capped
+        # Enforce crypto quota even when total candidates <= max_visible
+        visible = []
+        cr_seen = 0
+        for x in capped:
+            is_cr = str(x.get("category") or "").lower() == "crypto"
+            if is_cr and len(capped) > 4:
+                if cr_seen >= eff_crypto_cap:
+                    continue
+                cr_seen += 1
+            visible.append(x)
+
+    if len(visible) > 2:
+        head_kept: list[dict[str, Any]] = []
+        non_cr_tail: list[dict[str, Any]] = []
+        cr_tail: list[dict[str, Any]] = []
+        cr_head = 0
+        for x in visible:
+            is_cr = str(x.get("category") or "").lower() == "crypto"
+            if len(head_kept) < 15:
+                if is_cr and cr_head >= 2:
+                    cr_tail.append(x)
+                else:
+                    head_kept.append(x)
+                    if is_cr:
+                        cr_head += 1
+            elif is_cr:
+                cr_tail.append(x)
+            else:
+                non_cr_tail.append(x)
+        visible = head_kept + non_cr_tail + cr_tail
+
+    attach_zh_briefs_batch(
+        visible + bounded_candidates[:80],
+        allow_network=not bool(os.environ.get("PYTEST_CURRENT_TEST")),
+        max_network_items=60,
+    )
 
     source_tally: dict[str, int] = {}
     for x in visible:

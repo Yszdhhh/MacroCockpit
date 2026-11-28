@@ -4,6 +4,28 @@ MacroCockpit 2.0 是一个面向跨市场（美股、A股·港股、AI 前沿、
 
 ---
 
+## 最新版本更新说明（2026-11）
+
+1. **全网舆论风向聚合与资金宽度对照（[`backend/forum_sentiment.py`](backend/forum_sentiment.py)）**
+   - 汇聚雪球、东财股吧人气榜、全网主流热榜（微博/百度/头条/抖音/知乎/华尔街见闻/财联社）、Reddit/HN、小红书 5 路社区讨论，结合沪深两市成交额、两融余额、港股通南向资金与大众热榜占榜率进行温差与分歧对照。
+   - 首页「全网舆论风向」卡片精简为综合情绪指数、宏观资金宽度与四大核心赛道专业/散户聚合指数（移动端自动单列对齐）；完整热度指标与热议原帖收拢至舆论详情页，并要求至少 2 个国内平台同向升温且看多密集才提示「热度偏高」，避免单平台或偏空讨论误报见顶。
+
+2. **英文快讯与海外热帖中文简介（[`backend/zh_brief.py`](backend/zh_brief.py)）**
+   - 自动识别英文财经快讯与海外社区热帖（如 CNBC、MarketWatch、CoinDesk、Cointelegraph、Reddit），在标题下方展示简明中文简介并将较长英文原文默认折叠至「展开全文」内按需查看。
+   - 仅缓存有效网络译文并跳过兜底草稿，且在请求外部翻译前先经本地隐私文本过滤器拦截，杜绝敏感或疑似持仓文本外发。
+
+3. **快讯评分护栏升级与加密降噪（[`backend/kazike_engine.py`](backend/kazike_engine.py)、[`backend/curation.py`](backend/curation.py)）**
+   - 引入高分对数软压缩（`75+`）、个人家庭理财水文过滤（保留美联储等正式宏观债务报告）、`Live updates` / `Stock market today` 等盘中综述降权、以及中性/综述条目的持仓加权折减。
+   - 严禁加密与美股快讯跨板块合并事件簇，调降媒体级加密源分级并取消加密新闻对 `QQQ`/`SPY` 等美股指数别名的误匹配；在核心精选、个人排序与离线快照中将默认精选前 15 条的加密货币上限严格收敛在 2 条以内。
+
+4. **KOL 零前视胜率核验、信源导航与周期深研（[`backend/kol_intel_engine.py`](backend/kol_intel_engine.py)、[`backend/market_synthesis.py`](backend/market_synthesis.py)、[`backend/source_matrix.py`](backend/source_matrix.py)、[`backend/periodic_report.py`](backend/periodic_report.py)）**
+   - 新增高胜率 KOL 零前视历史观点胜率核验、海外大佬长文专栏全文抓取、市场四维定调与跨源共振/背离分析、6 大资产类别信源导航与中美产业链映射，以及周/月度深研报告自动生成。
+
+5. **私密持仓防倒退云同步、隐私加固与双端适配（[`backend/vps_sync.py`](backend/vps_sync.py)、[`backend/public_snapshot.py`](backend/public_snapshot.py)、[`backend/mcp_server.py`](backend/mcp_server.py)）**
+   - 新增经 `PORTFOLIO_RW` 令牌防倒退同步本机账户/现货/合约/筛选规则至云端登录态账本，同时在公开快照投影与只读 MCP 输出中加强信号、中文简介及信源矩阵的隐私文本和结构校验；优化桌面与手机端排版及资源缓存控制。
+
+---
+
 ## 核心架构
 
 1. **双云拆分采集、单一全局去重（零本机依赖）**
@@ -28,6 +50,8 @@ pip install -r requirements.txt
 cp .env.example .env  # 填入凭据，严禁提交 .env
 ```
 
+- **启动本地免密驾驶舱**：
+  `powershell -ExecutionPolicy Bypass -File .\start_local_cockpit.ps1`
 - **启动消费托管服务**：
   `python -m backend.server --host 127.0.0.1 --port 18280 --role consumer`
 - **国内节点单次合并且发布**：

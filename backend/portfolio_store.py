@@ -211,7 +211,12 @@ def _extract_public_quotes(public_state: dict[str, Any] | None) -> dict[str, dic
             px = row.get("price")
             if sym and px is not None:
                 try:
-                    quotes[sym] = {"price": parse_decimal_str(str(px)), "quote_currency": "USD", "source": "us_equities"}
+                    quotes[sym] = {
+                        "price": parse_decimal_str(str(px)),
+                        "quote_currency": "USD",
+                        "kind": "equity_spot",
+                        "source": "us_equities",
+                    }
                 except ValueError:
                     pass
 
@@ -224,6 +229,7 @@ def _extract_public_quotes(public_state: dict[str, Any] | None) -> dict[str, dic
                 quotes[str(sym).upper()] = {
                     "price": parse_decimal_str(str(px)),
                     "quote_currency": "USD",
+                    "kind": "equity_spot",
                     "source": "stock_profiles",
                 }
             except ValueError:
@@ -648,13 +654,22 @@ class PortfolioStore:
                 db.execute("DELETE FROM spot_balance WHERE id=?", (sid,))
                 return (op_type, entity, sid, before, None)
 
+            aid_target = self._resolve_account_id_in_tx(db, payload.get("account_id"))
+            iid_target = str(payload.get("instrument_id") or payload.get("symbol") or "").strip().upper()
             existing = db.execute("SELECT * FROM spot_balance WHERE id=?", (str(explicit_id),)).fetchone() if explicit_id else None
+            if (
+                existing is not None
+                and str(payload.get("source") or "") == "local_sync"
+                and iid_target
+                and (str(existing["account_id"]), str(existing["instrument_id"]).upper()) != (aid_target, iid_target)
+            ):
+                # Do not clobber a renamed remote row when local_sync asks to upsert a different natural key
+                existing = None
+                explicit_id = f"spot:{aid_target}:{iid_target}:{uuid.uuid4().hex[:8]}"
             if existing is None:
-                aid = self._resolve_account_id_in_tx(db, payload.get("account_id"))
-                iid = str(payload.get("instrument_id") or "").strip().upper()
                 existing = db.execute(
                     "SELECT * FROM spot_balance WHERE account_id=? AND instrument_id=?",
-                    (aid, iid),
+                    (aid_target, iid_target),
                 ).fetchone()
             before = dict(existing) if existing else None
             changes = payload
@@ -1230,11 +1245,16 @@ class PortfolioStore:
                 "default_account_id": DEFAULT_ACCOUNT_ID,
                 "alert_prefs": {},
             }
+            stored_settings: dict[str, Any] = {}
             for r in db.execute("SELECT key, value_json FROM user_setting ORDER BY key").fetchall():
                 try:
-                    prefs[str(r["key"])] = json.loads(r["value_json"])
+                    parsed_val = json.loads(r["value_json"])
                 except Exception:
-                    prefs[str(r["key"])] = r["value_json"]
+                    parsed_val = r["value_json"]
+                skey = str(r["key"])
+                prefs[skey] = parsed_val
+                if skey != "hide_amounts":
+                    stored_settings[skey] = parsed_val
 
             db_quotes: dict[str, dict[str, Any]] = {}
             for r in db.execute(
@@ -1248,6 +1268,54 @@ class PortfolioStore:
                 "SELECT pair, rate, basis, label, source, market_at, received_at, status FROM fx_quote ORDER BY market_at DESC, id DESC LIMIT 1"
             ).fetchone()
             db_fx = dict(db_fx_row) if db_fx_row else None
+
+            def _max_ts_from_queries(queries: tuple[str, ...]) -> str:
+                candidates: list[tuple[float, str]] = []
+                for sql_q in queries:
+                    try:
+                        row_ts = db.execute(sql_q).fetchone()
+                        if row_ts and row_ts[0]:
+                            raw_ts = str(row_ts[0]).strip()
+                            try:
+                                dt = datetime.fromisoformat(raw_ts)
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=_BJT)
+                                candidates.append((dt.timestamp(), raw_ts))
+                            except ValueError:
+                                pass
+                    except sqlite3.Error:
+                        pass
+                return max(candidates, key=lambda pair: pair[0])[1] if candidates else ""
+
+            holdings_updated_at = _max_ts_from_queries(
+                (
+                    "SELECT MAX(updated_at) FROM account WHERE archived=0",
+                    "SELECT MAX(updated_at) FROM spot_balance",
+                    "SELECT MAX(updated_at) FROM derivative_position",
+                    "SELECT MAX(ci.created_at) FROM change_item ci WHERE ci.entity IN ('account','spot','derivative')",
+                )
+            )
+            prefs_updated_at = _max_ts_from_queries(
+                (
+                    "SELECT MAX(updated_at) FROM curation_rule",
+                    "SELECT MAX(updated_at) FROM user_setting WHERE key != 'hide_amounts'",
+                    "SELECT MAX(ci.created_at) FROM change_item ci WHERE ci.entity IN ('rule','setting')",
+                )
+            )
+            portfolio_updated_at = _max_ts_from_queries(
+                (
+                    "SELECT MAX(updated_at) FROM account WHERE archived=0",
+                    "SELECT MAX(updated_at) FROM spot_balance",
+                    "SELECT MAX(updated_at) FROM derivative_position",
+                    "SELECT MAX(updated_at) FROM curation_rule",
+                    "SELECT MAX(updated_at) FROM user_setting WHERE key != 'hide_amounts'",
+                    "SELECT MAX(ci.created_at) FROM change_item ci WHERE ci.entity IN ('account','spot','derivative','rule','setting')",
+                )
+            )
+            last_cs_row = db.execute(
+                "SELECT request_id, summary, new_revision, actor_id, created_at FROM change_set ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            last_change_set = dict(last_cs_row) if last_cs_row else None
 
             trades = [
                 JournalStore._row(r, ("tags_json",))
@@ -1271,15 +1339,34 @@ class PortfolioStore:
         merged_quotes = dict(db_quotes)
         merged_quotes.update(_extract_public_quotes(public_state))
 
-        need_crypto = any(
-            str(s.get("instrument_id") or "").upper() not in merged_quotes
-            and not bool(s.get("is_cash"))
+        def _has_quote(inst_id: str) -> bool:
+            iid = str(inst_id or "").strip().upper()
+            if not iid:
+                return True
+            if iid in merged_quotes:
+                return True
+            base = iid.split("-")[0]
+            if base in merged_quotes or f"{base}-USDT" in merged_quotes:
+                return True
+            if iid.endswith("USDT") and len(iid) > 4:
+                b2 = iid[:-4]
+                if f"{b2}-USDT-SWAP" in merged_quotes or f"{b2}-USDT" in merged_quotes:
+                    return True
+            return False
+
+        missing_crypto = [
+            str(s.get("instrument_id") or "").upper()
             for s in spot_rows
-        ) or any(
-            str(d.get("instrument_id") or "").upper() not in merged_quotes
+            if not bool(s.get("is_cash")) and not _has_quote(str(s.get("instrument_id") or ""))
+        ] + [
+            str(d.get("instrument_id") or "").upper()
             for d in deriv_rows
-        )
-        if need_crypto and not (isinstance(public_state, dict) and public_state.get("crypto_quotes")):
+            if not _has_quote(str(d.get("instrument_id") or ""))
+        ]
+        hybrid_targets = [sym for sym in ("QQQUSDT", "ZHIPUUSDT") if sym in missing_crypto]
+        std_missing = [sym for sym in missing_crypto if sym not in ("QQQUSDT", "ZHIPUUSDT")]
+
+        if std_missing:
             try:
                 cq = fetch_crypto_quotes(timeout=3)
                 for k, entry in (cq.get("quotes") or {}).items():
@@ -1287,6 +1374,16 @@ class PortfolioStore:
                 for k, entry in (cq.get("swap") or {}).items():
                     merged_quotes.setdefault(str(k).upper(), entry)
                 for k, entry in (cq.get("spot") or {}).items():
+                    merged_quotes.setdefault(str(k).upper(), entry)
+            except Exception:
+                pass
+
+        if hybrid_targets:
+            try:
+                from backend.market_quotes import fetch_hybrid_perp_quotes
+
+                hq = fetch_hybrid_perp_quotes(symbols=hybrid_targets, timeout=3)
+                for k, entry in (hq or {}).items():
                     merged_quotes.setdefault(str(k).upper(), entry)
             except Exception:
                 pass
@@ -1435,6 +1532,7 @@ class PortfolioStore:
 
         workspace: dict[str, Any] = {
             "revision": revision,
+            "portfolio_updated_at": portfolio_updated_at,
             "generated_at": _now_iso(),
             "equity_mode": projected["equity_mode"],
             "base_currency": projected["base_currency"],
@@ -1477,6 +1575,17 @@ class PortfolioStore:
             "strategy_comparison_by_id": projected["strategy_comparison"],
             "curation_rules": rules,
             "preferences": prefs,
+            "raw_portfolio": {
+                "accounts": accounts,
+                "instruments": list(instruments.values()),
+                "spot_balances": spot_rows,
+                "derivative_positions": deriv_rows,
+                "curation_rules": rules,
+                "stored_settings": stored_settings,
+                "holdings_updated_at": holdings_updated_at,
+                "prefs_updated_at": prefs_updated_at,
+                "last_change_set": last_change_set,
+            },
             "unpriced_items": projected["unpriced_items"],
             "journal": {
                 "trade_reviews": trades,

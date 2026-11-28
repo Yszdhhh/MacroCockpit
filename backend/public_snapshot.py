@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -35,6 +36,10 @@ PUBLIC_STATE_KEYS: frozenset[str] = frozenset(
         "kazike_stats",
         "correlations",
         "kol_digest",
+        "kol_scorecards",
+        "market_analysis",
+        "forum_sentiment",
+        "asset_source_matrix",
         "articles",
         "push_channels",
         "calendar_events",
@@ -49,6 +54,14 @@ _PUBLISH_LOCK = threading.RLock()
 _PRIVATE_ARTICLE_TEXT = re.compile(
     r"占\s*(?:总\s*)?净值|净值\s*占比|portfolio_exposure"
     r"|(?:现货|合约|实际|私人)持仓明细"
+    r"|(?:当前|目前|个人|账户|实盘)\s*(?:持仓|仓位|权益|现金)\s*[：:=]"
+    r"|(?:手头现金|可用现金|现金余额|保证金余额)\s*[：:=]?\s*[+-]?\s*(?:HK\$|US\$|CN¥|RMB|HKD|USD|CNY|USDT|USDC|[$¥￥€£])?\s*[+-]?\s*\d"
+    r"|\b(?:my\s+(?:actual\s+)?(?:portfolio|holdings?|positions?|trades?|account(?:\s+balance)?)|account\s+balance\s*(?:is|:|=)?\s*[+-]?\s*\$?\d[\d,.]*)\b"
+    r"|\b(?:current|personal|private|actual|live|account)\s+(?:portfolio|holdings?|positions?)\s*[:=]"
+    r"|\b(?:cash\s+on\s+hand|available\s+cash|cash\s+balance|margin\s+balance|net\s+liquidation|account\s+equity)(?:\s+is|\s*[:=])?\s*[+-]?\s*(?:HK\$|US\$|CN¥|RMB|HKD|USD|CNY|USDT|USDC|[$¥￥€£])?\s*[+-]?\s*\d"
+    r"|\b[A-Z]{2,10}\s+\d[\d,.]*\s+(?:shares?|contracts?|lots?)\b"
+    r"|\b(?:bought|sold|holding)\s+\d[\d,.]*\s+(?:shares?|contracts?|lots?|btc|eth|sol|bnb|paxg)\b[^.\n]{0,40}\b(?:at|@)\s*\$?\d"
+    r"|\b(?:unrealized\s+p(?:&|n)l|liquidation\s+price)\s*(?:is|:|=)?\s*[+-]?\$?\d"
     r"|(?<![A-Z0-9_-])(?:sk-|Bearer\s+|gh[pousr]_[A-Z0-9]+)"
     r"|(?<![A-Z0-9])(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|secret)\s*[\x22\x27]?\s*[:=]",
     re.IGNORECASE,
@@ -72,16 +85,24 @@ def has_private_debate_text(text: str) -> bool:
     return has_private_article_text(text) or bool(_PRIVATE_DEBATE_TEXT.search(text))
 
 
+def _iter_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_strings(item)
+
+
 def has_private_article_content(article: Any) -> bool:
     if not isinstance(article, dict):
         return False
     filename = article.get("filename")
     is_debate = isinstance(filename, str) and filename.lower().startswith("ta_")
     check = has_private_debate_text if is_debate else has_private_article_text
-    return any(
-        isinstance(text, str) and check(text)
-        for text in (article.get(key) for key in ("body_md", "content", "excerpt", "title", "summary"))
-    )
+    return any(check(text) for text in _iter_strings(article))
 
 
 @contextmanager
@@ -263,6 +284,111 @@ def private_article_filenames(articles: list[dict[str, Any]]) -> set[str]:
     }
 
 
+_MARKET_PULSE_FLOAT_KEYS: frozenset[str] = frozenset(
+    {
+        "a_turnover_yi",
+        "sh_pct",
+        "cyb_pct",
+        "kc50_pct",
+        "hk_turnover_yi_hkd",
+        "hsi_pct",
+        "hstech_pct",
+        "rzrq_balance_yi",
+        "rzrq_buy_yi",
+        "rzrq_net_buy_yi",
+        "rzrq_float_pct",
+        "southbound_net_yi_hkd",
+        "southbound_deal_yi_hkd",
+        "southbound_5d_net_yi_hkd",
+        "mass_penetration_pct",
+    }
+)
+_MARKET_PULSE_INT_KEYS: frozenset[str] = frozenset(
+    {"mass_total_slots", "mass_finance_hits", "mass_ahk_hits"}
+)
+_MARKET_PULSE_DATE_KEYS: frozenset[str] = frozenset({"rzrq_date", "southbound_date"})
+_ALLOWED_MASS_PLATFORMS: frozenset[str] = frozenset(
+    {"微博", "百度", "今日头条", "头条", "抖音", "知乎", "B站", "小红书"}
+)
+
+
+def _format_yi_cny_display(val: float) -> str:
+    return f"{val / 10000.0:.2f}万亿" if val >= 10000.0 else f"{val:.0f}亿"
+
+
+def project_market_pulse(raw_mp: Any) -> dict[str, Any]:
+    """Strictly allowlist scalar market-breadth fields and recompute displays from finite numbers."""
+    if not isinstance(raw_mp, dict):
+        return {}
+    clean: dict[str, Any] = {}
+    for k in _MARKET_PULSE_FLOAT_KEYS:
+        v = raw_mp.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v)):
+            clean[k] = round(float(v), 2)
+    for k in _MARKET_PULSE_INT_KEYS:
+        v = raw_mp.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            clean[k] = int(v)
+    for k in _MARKET_PULSE_DATE_KEYS:
+        v = raw_mp.get(k)
+        if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.strip()):
+            clean[k] = v.strip()
+    if isinstance(clean.get("a_turnover_yi"), float) and clean["a_turnover_yi"] > 0:
+        clean["a_turnover_display"] = _format_yi_cny_display(clean["a_turnover_yi"])
+    if isinstance(clean.get("rzrq_balance_yi"), float) and clean["rzrq_balance_yi"] > 0:
+        clean["rzrq_balance_display"] = _format_yi_cny_display(clean["rzrq_balance_yi"])
+    plats = raw_mp.get("mass_platforms")
+    if isinstance(plats, list):
+        safe_plats = [str(p).strip() for p in plats if isinstance(p, str) and p.strip() in _ALLOWED_MASS_PLATFORMS]
+        if safe_plats:
+            clean["mass_platforms"] = safe_plats[:6]
+    return clean
+
+
+_FORUM_CHANNEL_KEYS = ("id", "name", "status", "count", "note")
+_FORUM_HOT_SCALAR_KEYS = ("platform", "topic", "title", "zh_brief", "sentiment", "heat", "url", "channel")
+_FORUM_DIV_SCALAR_KEYS = (
+    "topic",
+    "desk_score",
+    "desk_bias",
+    "desk_count",
+    "street_score",
+    "street_heat",
+    "street_count",
+    "divergence_tag",
+    "tone",
+    "action_hint",
+    "crowd_temp",
+    "divergence_label",
+)
+
+
+def _scalar_only_copy(obj: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k in keys:
+        if k not in obj:
+            continue
+        v = obj[k]
+        if v is None or isinstance(v, (str, bool, int, float)):
+            if isinstance(v, float) and not math.isfinite(v):
+                continue
+            out[k] = v
+    return out
+
+
+def _project_forum_sample(sample: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    if not isinstance(sample, dict):
+        return None
+    clean = {
+        k: str(sample.get(k) or "")
+        for k in keys
+        if k in sample and (sample.get(k) is None or isinstance(sample.get(k), (str, int, float)))
+    }
+    if not clean or has_private_article_text(json.dumps(clean, ensure_ascii=False)):
+        return None
+    return clean
+
+
 def project_public_state(
     raw_state: dict[str, Any],
     *,
@@ -291,6 +417,147 @@ def project_public_state(
         ]
         if len(projected["articles"]) != len(articles) and isinstance(projected.get("coverage"), dict):
             projected["coverage"]["articles_count"] = len(projected["articles"])
+
+    for sig_key in ("signals", "signal_candidates"):
+        raw_sigs = projected.get(sig_key)
+        if raw_sigs is not None and not isinstance(raw_sigs, list):
+            projected.pop(sig_key, None)
+        elif isinstance(raw_sigs, list):
+            projected[sig_key] = [
+                sig for sig in raw_sigs
+                if isinstance(sig, dict)
+                and not any(has_private_article_text(txt) for txt in _iter_strings(sig))
+            ]
+
+    raw_matrix = projected.get("asset_source_matrix")
+    if raw_matrix is not None and not isinstance(raw_matrix, dict):
+        projected.pop("asset_source_matrix", None)
+    elif isinstance(raw_matrix, dict):
+        raw_cats = raw_matrix.get("categories")
+        clean_cats: list[dict[str, Any]] = []
+        if isinstance(raw_cats, list):
+            for cat in raw_cats:
+                if not isinstance(cat, dict):
+                    continue
+                cid = cat.get("id")
+                if not isinstance(cid, str) or not cid.strip():
+                    continue
+                clean_cat = {
+                    k: v
+                    for k, v in cat.items()
+                    if k not in ("primary_venues", "top_kols", "guru_longforms", "crowd_warning_channel", "supply_chain_bridges")
+                    and not any(has_private_article_text(t) for t in _iter_strings(v))
+                }
+                clean_cat["id"] = cid.strip()
+                for list_k in ("primary_venues", "top_kols", "guru_longforms", "supply_chain_bridges"):
+                    sub_v = cat.get(list_k)
+                    if isinstance(sub_v, list):
+                        clean_cat[list_k] = [
+                            row for row in sub_v
+                            if isinstance(row, dict)
+                            and not any(has_private_article_text(t) for t in _iter_strings(row))
+                        ]
+                warn_c = cat.get("crowd_warning_channel")
+                if isinstance(warn_c, dict) and not any(has_private_article_text(t) for t in _iter_strings(warn_c)):
+                    clean_cat["crowd_warning_channel"] = warn_c
+                if not any(has_private_article_text(t) for t in _iter_strings(clean_cat)):
+                    clean_cats.append(clean_cat)
+        if not clean_cats or has_private_article_text(str(raw_matrix.get("updated_at_bjt") or "")):
+            projected.pop("asset_source_matrix", None)
+        else:
+            clean_matrix: dict[str, Any] = {"categories": clean_cats}
+            if isinstance(raw_matrix.get("updated_at_bjt"), str):
+                clean_matrix["updated_at_bjt"] = raw_matrix["updated_at_bjt"]
+            if isinstance(raw_matrix.get("summary"), dict) and not any(has_private_article_text(t) for t in _iter_strings(raw_matrix["summary"])):
+                clean_matrix["summary"] = dict(raw_matrix["summary"])
+                clean_matrix["summary"]["categories_count"] = len(clean_cats)
+            projected["asset_source_matrix"] = clean_matrix
+
+    scorecards = projected.get("kol_scorecards")
+    if scorecards is not None and not isinstance(scorecards, list):
+        projected.pop("kol_scorecards", None)
+    elif isinstance(scorecards, list):
+        projected["kol_scorecards"] = [
+            card for card in scorecards
+            if isinstance(card, dict)
+            and not has_private_article_text(json.dumps(card, ensure_ascii=False))
+        ]
+
+    kol_digest = projected.get("kol_digest")
+    if kol_digest is not None and not isinstance(kol_digest, list):
+        projected.pop("kol_digest", None)
+    elif isinstance(kol_digest, list):
+        projected["kol_digest"] = [
+            item for item in kol_digest
+            if isinstance(item, dict)
+            and not has_private_article_text(json.dumps(item, ensure_ascii=False))
+        ]
+
+    forum_sentiment = projected.get("forum_sentiment")
+    if forum_sentiment is not None and not isinstance(forum_sentiment, dict):
+        projected.pop("forum_sentiment", None)
+    elif isinstance(forum_sentiment, dict):
+        clean_channels = []
+        for ch in (forum_sentiment.get("channels_status") or []):
+            if not isinstance(ch, dict):
+                continue
+            ch_copy = _scalar_only_copy(ch, _FORUM_CHANNEL_KEYS)
+            if has_private_article_text(str(ch_copy.get("name") or "")):
+                continue
+            if has_private_article_text(str(ch_copy.get("note") or "")):
+                ch_copy["note"] = "渠道状态正常"
+            if not ch_copy or has_private_article_text(json.dumps(ch_copy, ensure_ascii=False)):
+                continue
+            clean_channels.append(ch_copy)
+        clean_hot = []
+        for h in (forum_sentiment.get("hot_discussions") or []):
+            if not isinstance(h, dict):
+                continue
+            h_copy = _scalar_only_copy(h, _FORUM_HOT_SCALAR_KEYS)
+            raw_tks = h.get("tickers")
+            if isinstance(raw_tks, list):
+                h_copy["tickers"] = [str(t) for t in raw_tks if isinstance(t, (str, int, float))][:6]
+            if h_copy and not has_private_article_text(json.dumps(h_copy, ensure_ascii=False)):
+                clean_hot.append(h_copy)
+        clean_divs = []
+        for div in (forum_sentiment.get("divergences") or []):
+            if not isinstance(div, dict):
+                continue
+            d_copy = _scalar_only_copy(div, _FORUM_DIV_SCALAR_KEYS)
+            if "desk_samples" in div:
+                d_copy["desk_samples"] = [
+                    s for s in (_project_forum_sample(x, ("author", "summary", "zh_brief", "url")) for x in (div.get("desk_samples") or []))
+                    if s is not None
+                ]
+            if "street_samples" in div:
+                d_copy["street_samples"] = [
+                    s for s in (_project_forum_sample(x, ("platform", "title", "zh_brief", "url")) for x in (div.get("street_samples") or []))
+                    if s is not None
+                ]
+            if has_private_article_text(str(d_copy.get("action_hint") or "")):
+                d_copy["action_hint"] = "按既定风控纪律跟踪市场波动。"
+            clean_divs.append(d_copy)
+        rebuilt_forum: dict[str, Any] = _scalar_only_copy(
+            forum_sentiment, ("updated_at_bjt", "overall_crowd_temp", "overall_label")
+        )
+        rebuilt_forum["market_pulse"] = project_market_pulse(forum_sentiment.get("market_pulse"))
+        rebuilt_forum["channels_status"] = clean_channels
+        rebuilt_forum["divergences"] = clean_divs
+        rebuilt_forum["hot_discussions"] = clean_hot
+        if has_private_article_text(json.dumps(rebuilt_forum, ensure_ascii=False)):
+            projected.pop("forum_sentiment", None)
+        else:
+            projected["forum_sentiment"] = rebuilt_forum
+            if isinstance(projected.get("coverage"), dict) and not clean_hot:
+                ch_total = sum(int(c.get("count") or 0) for c in clean_channels)
+                if ch_total == 0:
+                    projected["coverage"]["forum_items_count"] = 0
+
+    market_analysis = projected.get("market_analysis")
+    if market_analysis is not None and not isinstance(market_analysis, dict):
+        projected.pop("market_analysis", None)
+    elif isinstance(market_analysis, dict) and has_private_article_text(json.dumps(market_analysis, ensure_ascii=False)):
+        projected.pop("market_analysis", None)
 
     projected["schema_version"] = int(projected.get("schema_version") or 2)
     projected["strategy_targets"] = _build_structured_strategy_targets(projected if "positions" in projected else raw_state)

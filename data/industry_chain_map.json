@@ -1,0 +1,1055 @@
+{
+  "version": "1.0",
+  "updated": "2026-11-26",
+  "description": "中美核心产业链与跨市场资产映射图谱（离线与云端独立精简版）",
+  "summary": {
+    "us_leaders_count": 29,
+    "cn_hk_cores_count": 4,
+    "resource_bridges_count": 4,
+    "chains_count": 9
+  },
+  "us_leaders": [
+    {
+      "symbol": "NVDA",
+      "name": "NVIDIA",
+      "sector": "半导体与设备",
+      "role": "AI加速卡龙头",
+      "focus": "Rubin出货节奏与客户集中度",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "688041.SS",
+          "name": "海光信息",
+          "sector": "国产AI计算"
+        },
+        {
+          "symbol": "688256.SS",
+          "name": "寒武纪",
+          "sector": "国产AI计算"
+        },
+        {
+          "symbol": "300476.SZ",
+          "name": "胜宏科技",
+          "sector": "高速PCB"
+        },
+        {
+          "symbol": "600183.SS",
+          "name": "生益科技",
+          "sector": "高速CCL"
+        }
+      ]
+    },
+    {
+      "symbol": "TSM",
+      "name": "Taiwan Semiconductor Manufacturing",
+      "sector": "半导体与设备",
+      "role": "先进制程代工",
+      "focus": "N2良率与CoWoS产能爬坡",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "688120.SS",
+          "name": "华海清科",
+          "sector": "晶圆制造设备"
+        },
+        {
+          "symbol": "002916.SZ",
+          "name": "深南电路",
+          "sector": "PCB与封装载板"
+        },
+        {
+          "symbol": "688535.SS",
+          "name": "华海诚科",
+          "sector": "先进封装材料"
+        },
+        {
+          "symbol": "688019.SS",
+          "name": "安集科技",
+          "sector": "晶圆制造耗材"
+        }
+      ]
+    },
+    {
+      "symbol": "ASML",
+      "name": "ASML Holding",
+      "sector": "半导体与设备",
+      "role": "EUV设备唯一供应商",
+      "focus": "High-NA订单与中国出口结构",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "002371.SZ",
+          "name": "北方华创",
+          "sector": "半导体设备"
+        },
+        {
+          "symbol": "688012.SS",
+          "name": "中微公司",
+          "sector": "半导体设备"
+        },
+        {
+          "symbol": "688072.SS",
+          "name": "拓荆科技",
+          "sector": "半导体设备"
+        },
+        {
+          "symbol": "300604.SZ",
+          "name": "长川科技",
+          "sector": "半导体测试设备"
+        }
+      ]
+    },
+    {
+      "symbol": "COHR",
+      "name": "Coherent",
+      "sector": "光子学与光通信",
+      "role": "光模块与激光器",
+      "focus": "800G/1.6T出货与客户分散度",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300308.SZ",
+          "name": "中际旭创",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "300502.SZ",
+          "name": "新易盛",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "300394.SZ",
+          "name": "天孚通信",
+          "sector": "光器件"
+        },
+        {
+          "symbol": "002281.SZ",
+          "name": "光迅科技",
+          "sector": "光模块与光器件"
+        }
+      ]
+    },
+    {
+      "symbol": "LITE",
+      "name": "Lumentum Holdings",
+      "sector": "光子学与光通信",
+      "role": "光器件与数据中心互联",
+      "focus": "数据中心互联订单",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300394.SZ",
+          "name": "天孚通信",
+          "sector": "光器件"
+        },
+        {
+          "symbol": "002281.SZ",
+          "name": "光迅科技",
+          "sector": "光模块与光器件"
+        },
+        {
+          "symbol": "000988.SZ",
+          "name": "华工科技",
+          "sector": "光模块与激光"
+        },
+        {
+          "symbol": "688498.SS",
+          "name": "源杰科技",
+          "sector": "光芯片"
+        }
+      ]
+    },
+    {
+      "symbol": "MU",
+      "name": "Micron Technology",
+      "sector": "数据存储",
+      "role": "DRAM与HBM",
+      "focus": "HBM3E/HBM4客户认证、美国本土内存/HBM供应链地位、AI服务器存储价格周期",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300604.SZ",
+          "name": "长川科技",
+          "sector": "半导体测试设备"
+        },
+        {
+          "symbol": "301308.SZ",
+          "name": "江波龙",
+          "sector": "存储模组与企业级SSD"
+        },
+        {
+          "symbol": "688525.SS",
+          "name": "佰维存储",
+          "sector": "存储模组"
+        },
+        {
+          "symbol": "001309.SZ",
+          "name": "德明利",
+          "sector": "存储模组"
+        }
+      ]
+    },
+    {
+      "symbol": "SNDK",
+      "name": "Sandisk",
+      "sector": "数据存储",
+      "role": "NAND与企业级SSD",
+      "focus": "企业级SSD占比与NAND周期",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "301308.SZ",
+          "name": "江波龙",
+          "sector": "存储模组与企业级SSD"
+        },
+        {
+          "symbol": "688525.SS",
+          "name": "佰维存储",
+          "sector": "存储模组"
+        },
+        {
+          "symbol": "001309.SZ",
+          "name": "德明利",
+          "sector": "存储模组"
+        },
+        {
+          "symbol": "000021.SZ",
+          "name": "深科技",
+          "sector": "存储制造与封测"
+        }
+      ]
+    },
+    {
+      "symbol": "DELL",
+      "name": "Dell Technologies",
+      "sector": "数据中心基础设施",
+      "role": "AI服务器",
+      "focus": "AI订单backlog与服务器利润率",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "000938.SZ",
+          "name": "紫光股份",
+          "sector": "AI网络与服务器"
+        },
+        {
+          "symbol": "601138.SS",
+          "name": "工业富联",
+          "sector": "AI服务器与网络设备"
+        },
+        {
+          "symbol": "000977.SZ",
+          "name": "浪潮信息",
+          "sector": "AI服务器"
+        },
+        {
+          "symbol": "002463.SZ",
+          "name": "沪电股份",
+          "sector": "高速PCB"
+        }
+      ]
+    },
+    {
+      "symbol": "VRT",
+      "name": "Vertiv Holdings",
+      "sector": "数据中心基础设施",
+      "role": "液冷与配电",
+      "focus": "液冷渗透率与订单兑现",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "002028.SZ",
+          "name": "思源电气",
+          "sector": "电网与数据中心电力"
+        },
+        {
+          "symbol": "002837.SZ",
+          "name": "英维克",
+          "sector": "液冷与温控"
+        },
+        {
+          "symbol": "301018.SZ",
+          "name": "申菱环境",
+          "sector": "液冷与温控"
+        },
+        {
+          "symbol": "300870.SZ",
+          "name": "欧陆通",
+          "sector": "服务器电源"
+        }
+      ]
+    },
+    {
+      "symbol": "CRWV",
+      "name": "CoreWeave",
+      "sector": "数据中心基础设施",
+      "role": "GPU云",
+      "focus": "合同期限与资本结构",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300442.SZ",
+          "name": "润泽科技",
+          "sector": "AIDC与算力运营"
+        }
+      ]
+    },
+    {
+      "symbol": "NBIS",
+      "name": "Nebius Group",
+      "sector": "数据中心基础设施",
+      "role": "AI基础设施服务",
+      "focus": "客户结构与现金消耗",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300442.SZ",
+          "name": "润泽科技",
+          "sector": "AIDC与算力运营"
+        }
+      ]
+    },
+    {
+      "symbol": "GEV",
+      "name": "GE Vernova",
+      "sector": "能源",
+      "role": "电网与燃气轮机",
+      "focus": "燃气轮机及电网订单backlog",
+      "category_id": "gold_commodities",
+      "a_share_mappings": [
+        {
+          "symbol": "002028.SZ",
+          "name": "思源电气",
+          "sector": "电网与数据中心电力"
+        },
+        {
+          "symbol": "600875.SS",
+          "name": "东方电气",
+          "sector": "燃机核电与能源装备"
+        },
+        {
+          "symbol": "002851.SZ",
+          "name": "麦格米特",
+          "sector": "电源与电力电子"
+        },
+        {
+          "symbol": "688676.SS",
+          "name": "金盘科技",
+          "sector": "数据中心电力设备"
+        }
+      ]
+    },
+    {
+      "symbol": "BE",
+      "name": "Bloom Energy",
+      "sector": "能源",
+      "role": "燃料电池与分布式供电",
+      "focus": "数据中心PPA落地",
+      "category_id": "gold_commodities",
+      "a_share_mappings": [
+        {
+          "symbol": "600875.SS",
+          "name": "东方电气",
+          "sector": "燃机核电与能源装备"
+        }
+      ]
+    },
+    {
+      "symbol": "SMR",
+      "name": "NuScale Power",
+      "sector": "核能",
+      "role": "小型模块化反应堆",
+      "focus": "监管批文与首堆并网时间表",
+      "category_id": "gold_commodities",
+      "a_share_mappings": [
+        {
+          "symbol": "600875.SS",
+          "name": "东方电气",
+          "sector": "燃机核电与能源装备"
+        },
+        {
+          "symbol": "601985.SS",
+          "name": "中国核电",
+          "sector": "核电运营"
+        },
+        {
+          "symbol": "003816.SZ",
+          "name": "中国广核",
+          "sector": "核电运营"
+        }
+      ]
+    },
+    {
+      "symbol": "OKLO",
+      "name": "Oklo",
+      "sector": "核能",
+      "role": "微型反应堆",
+      "focus": "现金跑道与客户项目落地",
+      "category_id": "gold_commodities",
+      "a_share_mappings": [
+        {
+          "symbol": "601985.SS",
+          "name": "中国核电",
+          "sector": "核电运营"
+        },
+        {
+          "symbol": "003816.SZ",
+          "name": "中国广核",
+          "sector": "核电运营"
+        }
+      ]
+    },
+    {
+      "symbol": "TSLA",
+      "name": "Tesla",
+      "sector": "电动车",
+      "role": "EV、FSD、Dojo与机器人",
+      "focus": "FSD商业化节奏",
+      "category_id": "cn_hk_equities",
+      "a_share_mappings": [
+        {
+          "symbol": "002050.SZ",
+          "name": "三花智控",
+          "sector": "机器人与热管理"
+        },
+        {
+          "symbol": "601689.SS",
+          "name": "拓普集团",
+          "sector": "机器人与汽车零部件"
+        }
+      ]
+    },
+    {
+      "symbol": "ANET",
+      "name": "Arista Networks",
+      "sector": "数据中心网络",
+      "role": "AI集群以太网交换机与网络操作系统",
+      "focus": "AI网络收入、客户集中与Etherlink竞争格局",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "002463.SZ",
+          "name": "沪电股份",
+          "sector": "高速PCB"
+        }
+      ]
+    },
+    {
+      "symbol": "AMKR",
+      "name": "Amkor Technology",
+      "sector": "先进封装",
+      "role": "OSAT与先进封装服务",
+      "focus": "美国本土先进封装扩产、2.5D/3D封装客户导入、毛利率和资本开支兑现",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "002156.SZ",
+          "name": "通富微电",
+          "sector": "半导体封装测试"
+        },
+        {
+          "symbol": "002436.SZ",
+          "name": "兴森科技",
+          "sector": "PCB与封装基板"
+        }
+      ]
+    },
+    {
+      "symbol": "AVGO",
+      "name": "Broadcom",
+      "sector": "ASIC与网络芯片",
+      "role": "AI ASIC与以太网交换芯片龙头",
+      "focus": "定制AI芯片收入增速、Tomahawk交换芯片升级与云客户订单",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300308.SZ",
+          "name": "中际旭创",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "002463.SZ",
+          "name": "沪电股份",
+          "sector": "高速PCB"
+        },
+        {
+          "symbol": "688256.SS",
+          "name": "寒武纪",
+          "sector": "国产AI计算"
+        },
+        {
+          "symbol": "002916.SZ",
+          "name": "深南电路",
+          "sector": "PCB与封装载板"
+        }
+      ]
+    },
+    {
+      "symbol": "AMD",
+      "name": "AMD",
+      "sector": "半导体与设备",
+      "role": "AI加速卡与数据中心CPU核心挑战者",
+      "focus": "MI350/MI400系列出货爬坡、EPYC服务器市占率与客户认证",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "002156.SZ",
+          "name": "通富微电",
+          "sector": "半导体封装测试"
+        },
+        {
+          "symbol": "688041.SS",
+          "name": "海光信息",
+          "sector": "国产AI计算"
+        },
+        {
+          "symbol": "002463.SZ",
+          "name": "沪电股份",
+          "sector": "高速PCB"
+        }
+      ]
+    },
+    {
+      "symbol": "AAPL",
+      "name": "Apple",
+      "sector": "端侧AI与消费电子",
+      "role": "全球端侧硬件与生态分发龙头",
+      "focus": "端侧AI换机周期、统一内存升级与服务毛利率",
+      "category_id": "quant_allocation",
+      "a_share_mappings": [
+        {
+          "symbol": "601138.SS",
+          "name": "工业富联",
+          "sector": "AI服务器与网络设备"
+        },
+        {
+          "symbol": "002916.SZ",
+          "name": "深南电路",
+          "sector": "PCB与封装载板"
+        },
+        {
+          "symbol": "300408.SZ",
+          "name": "三环集团",
+          "sector": "电子陶瓷与被动元件材料"
+        }
+      ]
+    },
+    {
+      "symbol": "MSFT",
+      "name": "Microsoft",
+      "sector": "云与软件",
+      "role": "Azure云与AI资本开支总龙头",
+      "focus": "Azure AI收入增速、Copilot付费转化与季度资本开支节奏",
+      "category_id": "macro_rates",
+      "a_share_mappings": [
+        {
+          "symbol": "601138.SS",
+          "name": "工业富联",
+          "sector": "AI服务器与网络设备"
+        },
+        {
+          "symbol": "300308.SZ",
+          "name": "中际旭创",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "002837.SZ",
+          "name": "英维克",
+          "sector": "液冷与温控"
+        }
+      ]
+    },
+    {
+      "symbol": "GOOGL",
+      "name": "Alphabet",
+      "canonical_symbol": "GOOG",
+      "sector": "云与软件",
+      "role": "GCP云、Gemini模型与TPU自研算力",
+      "focus": "TPU集群扩产、GCP盈利能力与搜索AI广告变现",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300308.SZ",
+          "name": "中际旭创",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "300502.SZ",
+          "name": "新易盛",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "002463.SZ",
+          "name": "沪电股份",
+          "sector": "高速PCB"
+        }
+      ]
+    },
+    {
+      "symbol": "META",
+      "name": "Meta Platforms",
+      "sector": "云与软件",
+      "role": "开源大模型与算力资本开支风向标",
+      "focus": "年度资本开支指引、AI广告投放回报与定制芯片部署",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300308.SZ",
+          "name": "中际旭创",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "601138.SS",
+          "name": "工业富联",
+          "sector": "AI服务器与网络设备"
+        },
+        {
+          "symbol": "000977.SZ",
+          "name": "浪潮信息",
+          "sector": "AI服务器"
+        }
+      ]
+    },
+    {
+      "symbol": "AMAT",
+      "name": "Applied Materials",
+      "sector": "半导体设备",
+      "role": "晶圆制造沉积与刻蚀设备龙头",
+      "focus": "先进制程资本开支、新架构工艺与服务收入",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "002371.SZ",
+          "name": "北方华创",
+          "sector": "半导体设备"
+        },
+        {
+          "symbol": "688072.SS",
+          "name": "拓荆科技",
+          "sector": "半导体设备"
+        }
+      ]
+    },
+    {
+      "symbol": "LRCX",
+      "name": "Lam Research",
+      "sector": "半导体设备",
+      "role": "刻蚀与存储制造设备龙头",
+      "focus": "HBM先进封装与多层NAND带动的设备支出",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "688012.SS",
+          "name": "中微公司",
+          "sector": "半导体设备"
+        },
+        {
+          "symbol": "002371.SZ",
+          "name": "北方华创",
+          "sector": "半导体设备"
+        }
+      ]
+    },
+    {
+      "symbol": "MRVL",
+      "name": "Marvell Technology",
+      "sector": "ASIC与网络芯片",
+      "role": "高速光DSP与定制计算芯片龙头",
+      "focus": "800G/1.6T光互联DSP出货与云厂商定制ASIC放量",
+      "category_id": "us_ai_semi",
+      "a_share_mappings": [
+        {
+          "symbol": "300308.SZ",
+          "name": "中际旭创",
+          "sector": "光模块与硅光"
+        },
+        {
+          "symbol": "300394.SZ",
+          "name": "天孚通信",
+          "sector": "光器件"
+        }
+      ]
+    },
+    {
+      "symbol": "COIN",
+      "name": "Coinbase Global",
+      "sector": "加密与区块链",
+      "role": "美国合规数字资产交易与托管枢纽",
+      "focus": "现货ETF托管规模、稳定币分成与衍生品交易量",
+      "category_id": "crypto_onchain",
+      "a_share_mappings": [
+        {
+          "symbol": "601138.SS",
+          "name": "工业富联",
+          "sector": "算力服务器与数字底座"
+        },
+        {
+          "symbol": "002028.SZ",
+          "name": "思源电气",
+          "sector": "数据中心电力配套"
+        }
+      ]
+    },
+    {
+      "symbol": "MSTR",
+      "name": "Strategy (MicroStrategy)",
+      "sector": "加密与区块链",
+      "role": "美股比特币资产负债表杠杆代理",
+      "focus": "每股BTC含币量增厚、融资成本与溢价率波动",
+      "category_id": "crypto_onchain",
+      "a_share_mappings": [
+        {
+          "symbol": "300442.SZ",
+          "name": "润泽科技",
+          "sector": "AIDC与算力运营"
+        },
+        {
+          "symbol": "688676.SS",
+          "name": "金盘科技",
+          "sector": "数据中心电力设备"
+        }
+      ]
+    }
+  ],
+  "cn_hk_cores": [
+    {
+      "symbol": "0700.HK",
+      "name": "腾讯控股",
+      "market": "HK",
+      "sector": "港股互联网与AI应用",
+      "role": "云生态、大模型与回购核心标杆",
+      "focus": "广告AI提效、云业务资本开支与年度回购节奏",
+      "category_id": "cn_hk_equities",
+      "a_share_mappings": [
+        {
+          "symbol": "000938.SZ",
+          "name": "紫光股份",
+          "sector": "AI网络与服务器"
+        },
+        {
+          "symbol": "300442.SZ",
+          "name": "润泽科技",
+          "sector": "AIDC与算力运营"
+        },
+        {
+          "symbol": "000977.SZ",
+          "name": "浪潮信息",
+          "sector": "AI服务器"
+        }
+      ]
+    },
+    {
+      "symbol": "BABA",
+      "name": "阿里巴巴 (9988.HK)",
+      "market": "HK/US",
+      "sector": "云计算与电商平台",
+      "role": "阿里云AI资本开支与通义开源生态核心",
+      "focus": "阿里云AI收入占比、资本开支强度与电商企稳",
+      "category_id": "cn_hk_equities",
+      "a_share_mappings": [
+        {
+          "symbol": "300442.SZ",
+          "name": "润泽科技",
+          "sector": "AIDC与算力运营"
+        },
+        {
+          "symbol": "002837.SZ",
+          "name": "英维克",
+          "sector": "液冷与温控"
+        },
+        {
+          "symbol": "002463.SZ",
+          "name": "沪电股份",
+          "sector": "高速PCB"
+        }
+      ]
+    },
+    {
+      "symbol": "0981.HK",
+      "name": "中芯国际",
+      "market": "HK",
+      "sector": "晶圆制造与国产替代",
+      "role": "中国大陆晶圆代工核心",
+      "focus": "产能利用率、资本开支强度与本土设备材料导入",
+      "category_id": "cn_hk_equities",
+      "a_share_mappings": [
+        {
+          "symbol": "002371.SZ",
+          "name": "北方华创",
+          "sector": "半导体设备"
+        },
+        {
+          "symbol": "688012.SS",
+          "name": "中微公司",
+          "sector": "半导体设备"
+        },
+        {
+          "symbol": "688019.SS",
+          "name": "安集科技",
+          "sector": "晶圆制造耗材"
+        },
+        {
+          "symbol": "688041.SS",
+          "name": "海光信息",
+          "sector": "国产AI计算"
+        }
+      ]
+    },
+    {
+      "symbol": "1810.HK",
+      "name": "小米集团",
+      "market": "HK",
+      "sector": "智能终端与新能源汽车",
+      "role": "端侧AI与智能汽车出海核心标的",
+      "focus": "汽车交付利润率、高端手机出货与端侧生态协同",
+      "category_id": "cn_hk_equities",
+      "a_share_mappings": [
+        {
+          "symbol": "002050.SZ",
+          "name": "三花智控",
+          "sector": "机器人与热管理"
+        },
+        {
+          "symbol": "601689.SS",
+          "name": "拓普集团",
+          "sector": "机器人与汽车零部件"
+        },
+        {
+          "symbol": "300124.SZ",
+          "name": "汇川技术",
+          "sector": "工业自动化与机器人"
+        }
+      ]
+    }
+  ],
+  "resource_bridges": [
+    {
+      "symbol": "GOLD",
+      "name": "黄金与贵金属 (XAU/GLD)",
+      "sector": "贵金属与货币对冲",
+      "role": "央行购金与实际利率定价核心锚",
+      "focus": "美债实际利率、全球央行购金净量与地缘避险溢价",
+      "category_id": "gold_commodities",
+      "a_share_mappings": [
+        {
+          "symbol": "601899.SS",
+          "name": "紫金矿业",
+          "sector": "黄金与铜矿资源"
+        },
+        {
+          "symbol": "600547.SS",
+          "name": "山东黄金",
+          "sector": "黄金采选龙头"
+        },
+        {
+          "symbol": "600489.SS",
+          "name": "中金黄金",
+          "sector": "黄金冶炼与矿产"
+        }
+      ]
+    },
+    {
+      "symbol": "WTI",
+      "name": "原油与能源航运 (WTI/Brent)",
+      "sector": "传统能源与通胀传导",
+      "role": "全球通胀预期与能源供给弹性基准",
+      "focus": "产油国产量纪律、商业库存与地缘运输溢价",
+      "category_id": "gold_commodities",
+      "a_share_mappings": [
+        {
+          "symbol": "600938.SS",
+          "name": "中国海油",
+          "sector": "海上油气高股息"
+        },
+        {
+          "symbol": "601857.SS",
+          "name": "中国石油",
+          "sector": "油气开采与炼化"
+        },
+        {
+          "symbol": "605090.SS",
+          "name": "九丰能源",
+          "sector": "特种气体与清洁能源"
+        }
+      ]
+    },
+    {
+      "symbol": "UUUU",
+      "name": "战略稀土与关键小金属",
+      "sector": "战略资源与AI材料底座",
+      "role": "稀土、钨、锗、铀等供应链安全品种",
+      "focus": "开采配额、出口管制清单、PCB微钻钨粉与铀价周期",
+      "category_id": "gold_commodities",
+      "a_share_mappings": [
+        {
+          "symbol": "600111.SS",
+          "name": "北方稀土",
+          "sector": "稀土资源与冶炼"
+        },
+        {
+          "symbol": "000657.SZ",
+          "name": "中钨高新",
+          "sector": "钨资源与硬质合金"
+        },
+        {
+          "symbol": "002428.SZ",
+          "name": "云南锗业",
+          "sector": "锗资源与光电材料"
+        },
+        {
+          "symbol": "000962.SZ",
+          "name": "东方钽业",
+          "sector": "钽铌电子材料"
+        }
+      ]
+    },
+    {
+      "symbol": "SP500",
+      "name": "全球宽基与现金流核心 (SPY/SP500)",
+      "sector": "跨市场配置基准",
+      "role": "权益风险溢价与系统化指数配置锚",
+      "focus": "标普500等权宽度、波动率期限结构与沪深300股息率差",
+      "category_id": "quant_allocation",
+      "a_share_mappings": [
+        {
+          "symbol": "510300.SS",
+          "name": "沪深300ETF",
+          "sector": "A股核心宽基"
+        },
+        {
+          "symbol": "601138.SS",
+          "name": "工业富联",
+          "sector": "AI服务器与网络设备"
+        },
+        {
+          "symbol": "002916.SZ",
+          "name": "深南电路",
+          "sector": "PCB与封装载板"
+        }
+      ]
+    }
+  ],
+  "chains": [
+    {
+      "name": "芯片→服务器→机房",
+      "path": [
+        "ASML",
+        "TSM",
+        "NVDA",
+        "DELL",
+        "VRT"
+      ],
+      "labels": [
+        "设备",
+        "代工",
+        "芯片",
+        "服务器",
+        "机房"
+      ]
+    },
+    {
+      "name": "光通信链",
+      "path": [
+        "GLW",
+        "COHR",
+        "NVDA",
+        "CRWV"
+      ],
+      "labels": [
+        "光纤",
+        "光通信",
+        "GPU",
+        "算力云"
+      ]
+    },
+    {
+      "name": "能源链",
+      "path": [
+        "LNG",
+        "GEV",
+        "VRT"
+      ],
+      "labels": [
+        "天然气",
+        "电网",
+        "数据中心配电"
+      ]
+    },
+    {
+      "name": "云厂商资本开支",
+      "path": [
+        "MSFT",
+        "NVDA",
+        "MU"
+      ],
+      "labels": [
+        "云厂商",
+        "GPU",
+        "HBM存储"
+      ]
+    },
+    {
+      "name": "芯片→ODM→GPU云",
+      "path": [
+        "NVDA",
+        "CLS",
+        "CRWV"
+      ],
+      "labels": [
+        "芯片",
+        "ODM制造",
+        "GPU云"
+      ]
+    },
+    {
+      "name": "核燃料链",
+      "path": [
+        "UUUU",
+        "SMR",
+        "CRWV"
+      ],
+      "labels": [
+        "铀矿",
+        "小型堆",
+        "数据中心用电"
+      ]
+    },
+    {
+      "name": "储能需求映射",
+      "path": [
+        "FLNC",
+        "NBIS"
+      ],
+      "labels": [
+        "储能",
+        "AI基础设施"
+      ]
+    },
+    {
+      "name": "光DSP链",
+      "path": [
+        "MRVL",
+        "COHR",
+        "NVDA"
+      ],
+      "labels": [
+        "光DSP",
+        "光模块",
+        "AI芯片"
+      ]
+    },
+    {
+      "name": "高速互联链",
+      "path": [
+        "CRDO",
+        "ANET",
+        "NVDA"
+      ],
+      "labels": [
+        "AEC/SerDes",
+        "以太网交换",
+        "AI集群"
+      ]
+    }
+  ]
+}

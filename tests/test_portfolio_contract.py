@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -593,3 +594,646 @@ def test_mobile_push_card_v2_masking_and_wecom_wechat_payloads(tmp_path: Path) -
         mobile_push.dispatch_mobile_push(
             state, dry_run=True, feishu_open_id="oc_00000000000000000000000000000000"
         )
+
+
+def test_load_push_env_rw_token_gating(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify MACROCOCKPIT_RW_TOKEN remains blocked unless include_rw_token=True, and password is always blocked."""
+    env_file = tmp_path / "hermes.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MACROCOCKPIT_ACCESS_PASSWORD=pw_secret",
+                "MACROCOCKPIT_READ_TOKEN=ro_secret",
+                "MACROCOCKPIT_RW_TOKEN=rw_secret",
+                "MACROCOCKPIT_SYNC_TOKEN=sync_secret",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for k in (
+        "MACROCOCKPIT_ACCESS_PASSWORD",
+        "MACROCOCKPIT_READ_TOKEN",
+        "MACROCOCKPIT_RW_TOKEN",
+        "MACROCOCKPIT_SYNC_TOKEN",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(mobile_push, "HERMES_ENV_PATHS", (env_file,))
+
+    mobile_push.load_push_env(include_sync_token=True)
+    assert os.environ.get("MACROCOCKPIT_SYNC_TOKEN") == "sync_secret"
+    assert "MACROCOCKPIT_RW_TOKEN" not in os.environ
+    assert "MACROCOCKPIT_ACCESS_PASSWORD" not in os.environ
+    assert "MACROCOCKPIT_READ_TOKEN" not in os.environ
+
+    mobile_push.load_push_env(include_sync_token=True, include_rw_token=True)
+    assert os.environ.get("MACROCOCKPIT_RW_TOKEN") == "rw_secret"
+    assert "MACROCOCKPIT_ACCESS_PASSWORD" not in os.environ
+    assert "MACROCOCKPIT_READ_TOKEN" not in os.environ
+
+
+def test_vps_sync_portfolio_rw_anti_rollback_and_rbac(tmp_path: Path) -> None:
+    """Verify PORTFOLIO_RW portfolio sync, idempotent noop, anti-rollback protection, and consumer RBAC."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from backend import public_snapshot, server, vps_sync
+    from backend.portfolio_store import PortfolioStore
+
+    # 1. Seed local private DB with 2 accounts, 2 spots, 1 derivative, 1 curation rule, watchlist
+    local_db = tmp_path / "local_journal.db"
+    local_store = PortfolioStore(local_db)
+    local_store.apply_changes(
+        request_id="seed-local-1",
+        expected_revision=0,
+        actor_id="owner",
+        role="PORTFOLIO_RW",
+        summary="seed local portfolio",
+        ops=[
+            {"op": "put", "entity": "account", "id": "acct_default", "data": {"name": "主账户", "kind": "spot"}},
+            {"op": "put", "entity": "account", "id": "acct_trading", "data": {"name": "交易账户", "kind": "futures"}},
+            {
+                "op": "put",
+                "entity": "spot",
+                "id": "spot:acct_default:BTC",
+                "data": {"account_id": "acct_default", "instrument_id": "BTC", "symbol": "BTC", "name": "比特币", "asset_class": "crypto_spot", "qty": "0.1", "avg_cost": "60000", "sleeve": "btc_trend"},
+            },
+            {
+                "op": "put",
+                "entity": "spot",
+                "id": "spot:acct_default:USDT",
+                "data": {"account_id": "acct_default", "instrument_id": "USDT", "symbol": "USDT", "name": "USDT", "asset_class": "cash", "is_cash": True, "qty": "2500"},
+            },
+            {
+                "op": "put",
+                "entity": "derivative",
+                "id": "deriv:acct_trading:ZHIPUUSDT",
+                "data": {"account_id": "acct_trading", "instrument_id": "ZHIPUUSDT", "symbol": "ZHIPUUSDT", "name": "智谱永续", "side": "short", "qty": "2.59", "qty_unit": "coin", "entry_price": "37.93", "margin_usd": "50.81", "leverage": "2", "venue_liq": "386.03", "stop_loss": "40", "sleeve": "bear_basket"},
+            },
+            {
+                "op": "put",
+                "entity": "rule",
+                "id": "rule_watch_zhipu",
+                "data": {"kind": "instrument", "target": "ZHIPU", "action": "watch", "points": "0", "note": "盯盘"},
+            },
+            {
+                "op": "put",
+                "entity": "setting",
+                "id": "watchlist",
+                "data": {"key": "watchlist", "value": ["BTC", "ZHIPU"]},
+            },
+        ],
+    )
+
+    # 2. Boot a consumer server with published public snapshot
+    remote_dir = tmp_path / "remote_vps"
+    (remote_dir / "data").mkdir(parents=True)
+    pub_state = {
+        "schema_version": 2,
+        "generation": 1,
+        "generated_at_bjt": "2026-11-27 15:00:00+08:00",
+        "risk_gate": {"light": "YELLOW", "long_risk_cap": 1.0, "label": "均衡"},
+        "positions": [],
+        "signals": [],
+        "articles": [],
+        "crypto_quotes": {
+            "quotes": {
+                "BTC": {"price": "61500", "quote_currency": "USD"},
+                "ZHIPUUSDT": {"price": "39.0", "quote_currency": "USDT", "mark_price": "39.0"},
+            },
+            "spot": {"BTC-USDT": {"price": "61500", "quote_currency": "USD"}},
+            "swap": {"ZHIPUUSDT": {"price": "39.0", "quote_currency": "USDT", "mark_price": "39.0"}},
+        },
+        "fx_snapshot": {"pair": "USD/CNH", "rate": "6.69", "status": "ok"},
+    }
+    public_snapshot.publish_generation(remote_dir, pub_state, [], producer_id="windows-primary", generation=1)
+    srv = server.create_server(
+        "127.0.0.1",
+        0,
+        web_dir=COCKPIT_ROOT / "web",
+        state_path=remote_dir / "data" / "cockpit_state.json",
+        db_path=remote_dir / "data" / "user_journal.db",
+        articles_dir=remote_dir / "articles",
+        access_password="pw_user_only",
+        read_token="tok_ro",
+        rw_token="tok_rw",
+        sync_token="tok_sync",
+        role="consumer",
+    )
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        # Unauthenticated & READ_ONLY boundaries
+        with pytest.raises(urllib.error.HTTPError) as e_401:
+            urllib.request.urlopen(f"{base}/api/v2/workspace", timeout=5)
+        assert e_401.value.code == 401
+
+        req_ro_ws = urllib.request.Request(f"{base}/api/v2/workspace", headers={"Authorization": "Bearer tok_ro"})
+        with pytest.raises(urllib.error.HTTPError) as e_403:
+            urllib.request.urlopen(req_ro_ws, timeout=5)
+        assert e_403.value.code == 403
+
+        # SYNC_PUBLISH token must be rejected from reading/writing portfolio
+        ok_bad, info_bad = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_sync")
+        assert ok_bad is False and info_bad["reason"] == "HTTP_403"
+
+        # Valid PORTFOLIO_RW initial sync
+        ok1, info1 = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok1 is True and info1["portfolio_action"] == "synced"
+        assert info1["accounts_count"] == 2 and info1["spots_count"] == 2 and info1["derivatives_count"] == 1
+
+        # Verify READ_ONLY /api/state never leaks portfolio
+        req_ro_st = urllib.request.Request(f"{base}/api/state", headers={"Authorization": "Bearer tok_ro"})
+        with urllib.request.urlopen(req_ro_st, timeout=5) as resp_st:
+            pub_resp = json.loads(resp_st.read().decode("utf-8"))
+        assert "portfolio" not in pub_resp and "journal" not in pub_resp and "workspace" not in pub_resp
+
+        # Verify PORTFOLIO_RW /api/v2/workspace contains synced holdings
+        req_rw_ws = urllib.request.Request(f"{base}/api/v2/workspace", headers={"Authorization": "Bearer tok_rw"})
+        with urllib.request.urlopen(req_rw_ws, timeout=5) as resp_ws:
+            remote_ws = json.loads(resp_ws.read().decode("utf-8"))
+        assert len(remote_ws["spot_balances"]) == 2
+        assert len(remote_ws["derivative_positions"]) == 1
+        assert remote_ws["derivative_positions"][0]["stop_loss"] == "40"
+        assert remote_ws["preferences"]["watchlist"] == ["BTC", "ZHIPU"]
+
+        # Second sync is noop_in_sync
+        ok2, info2 = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok2 is True and info2["portfolio_action"] == "noop_in_sync"
+
+        # Simulate a newer mobile edit on remote (update stop_loss -> 42 and advance timestamp)
+        time.sleep(1.1)
+        srv.portfolio_store.apply_changes(
+            request_id="mobile-edit-1",
+            expected_revision=int(remote_ws["revision"]),
+            actor_id="owner:cookie",
+            role="PORTFOLIO_RW",
+            summary="mobile edit",
+            ops=[
+                {
+                    "op": "put",
+                    "entity": "derivative",
+                    "id": "deriv:acct_trading:ZHIPUUSDT",
+                    "data": {"stop_loss": "42"},
+                }
+            ],
+        )
+        ok3, info3 = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok3 is True and info3["portfolio_action"] == "skipped_remote_newer"
+
+        # Remote edit remains preserved
+        with urllib.request.urlopen(req_rw_ws, timeout=5) as resp_ws2:
+            remote_ws2 = json.loads(resp_ws2.read().decode("utf-8"))
+        assert remote_ws2["derivative_positions"][0]["stop_loss"] == "42"
+
+        # Explicit force overrides back to local
+        ok4, info4 = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw", force=True)
+        assert ok4 is True and info4["portfolio_action"] == "synced"
+        with urllib.request.urlopen(req_rw_ws, timeout=5) as resp_ws3:
+            remote_ws3 = json.loads(resp_ws3.read().decode("utf-8"))
+        assert remote_ws3["derivative_positions"][0]["stop_loss"] == "40"
+
+        # Mobile deletes ALL remaining holdings -> next local sync MUST return skipped_remote_newer (not restore deleted positions!)
+        time.sleep(1.1)
+        srv.portfolio_store.apply_changes(
+            request_id="mobile-delete-all",
+            expected_revision=int(remote_ws3["revision"]),
+            actor_id="owner:cookie",
+            role="PORTFOLIO_RW",
+            summary="mobile delete all",
+            ops=[
+                {"op": "remove", "entity": "spot", "id": "spot:acct_default:BTC"},
+                {"op": "remove", "entity": "spot", "id": "spot:acct_default:USDT"},
+                {"op": "remove", "entity": "derivative", "id": "deriv:acct_trading:ZHIPUUSDT"},
+            ],
+        )
+        ok5, info5 = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok5 is True and info5["portfolio_action"] == "skipped_remote_newer"
+        with urllib.request.urlopen(req_rw_ws, timeout=5) as resp_ws4:
+            remote_ws4 = json.loads(resp_ws4.read().decode("utf-8"))
+        assert remote_ws4["spot_balances"] == [] and remote_ws4["derivative_positions"] == []
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=3)
+
+
+def test_vps_sync_spot_natural_key_chunk_resume_https_and_proxy_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify (account_id, instrument_id) spot matching, >80-op chunk resume, HTTPS/redirect guard, and spot_proxy valuation guard."""
+    import threading
+    import urllib.request
+    from backend import market_quotes, public_snapshot, server, vps_sync
+    from backend.portfolio_store import PortfolioStore
+
+    # 1. Non-loopback HTTP & redirect guards
+    local_db = tmp_path / "chunk_local.db"
+    st = PortfolioStore(local_db)
+    ops_seed = []
+    for i in range(82):
+        sym = f"TKN{i:03d}"
+        ops_seed.append(
+            {
+                "op": "put",
+                "entity": "spot",
+                "id": f"custom_spot_{i}",
+                "data": {"account_id": "acct_default", "instrument_id": sym, "symbol": sym, "qty": "10", "avg_cost": "1.2345"},
+            }
+        )
+    # Also seed a derivative with 4-decimal margin & manual mark_price
+    ops_seed.append(
+        {
+            "op": "put",
+            "entity": "derivative",
+            "id": "deriv:acct_default:ZHIPUUSDT",
+            "data": {"account_id": "acct_default", "instrument_id": "ZHIPUUSDT", "side": "short", "qty": "2.59", "entry_price": "37.93", "margin_usd": "50.8123", "mark_price": "39.19"},
+        }
+    )
+    st.apply_changes(
+        request_id="seed-82",
+        expected_revision=0,
+        actor_id="owner",
+        role="PORTFOLIO_RW",
+        summary="seed 82 spots",
+        ops=ops_seed,
+    )
+
+    ok_http, info_http = vps_sync.sync_portfolio_via_http(local_db, url="http://evil.example.com", rw_token="tok_rw")
+    assert ok_http is False and info_http["reason"] == "insecure_http_forbidden"
+
+    class _Fake307Resp:
+        status_code = 307
+        headers = {"Location": "https://attacker.example.com/steal"}
+
+    monkeypatch.setattr(vps_sync.requests, "get", lambda *a, **kw: _Fake307Resp())
+    ok_redir, info_redir = vps_sync.sync_portfolio_via_http(local_db, url="https://news.example.com", rw_token="tok_rw")
+    assert ok_redir is False and info_redir["reason"] == "redirect_blocked_307"
+    monkeypatch.undo()
+
+    # 2. Boot consumer server pre-seeded with remote spot under DIFFERENT id for TKN000 (created earlier than local)
+    remote_dir = tmp_path / "remote_chunk"
+    (remote_dir / "data").mkdir(parents=True)
+    public_snapshot.publish_generation(
+        remote_dir,
+        {"schema_version": 2, "generation": 1, "generated_at_bjt": "2026-11-27 15:00:00+08:00", "risk_gate": {"light": "YELLOW", "long_risk_cap": 1.0, "label": "ok"}, "positions": [], "signals": [], "articles": []},
+        [],
+        producer_id="windows-primary",
+        generation=1,
+    )
+    remote_store = PortfolioStore(remote_dir / "data" / "user_journal.db")
+    remote_store.apply_changes(
+        request_id="remote-preseed",
+        expected_revision=0,
+        actor_id="owner",
+        role="PORTFOLIO_RW",
+        summary="preseed different id",
+        ops=[{"op": "put", "entity": "spot", "id": "legacy_remote_id", "data": {"account_id": "acct_default", "instrument_id": "TKN000", "symbol": "TKN000", "qty": "5"}}],
+    )
+    # Backdate remote timestamps so first sync treats local as newer
+    with sqlite3.connect(remote_dir / "data" / "user_journal.db") as rdb:
+        old_ts = "2026-11-26T01:00:00+08:00"
+        rdb.execute("UPDATE account SET updated_at=?", (old_ts,))
+        rdb.execute("UPDATE spot_balance SET updated_at=?", (old_ts,))
+        rdb.execute("UPDATE change_item SET created_at=?", (old_ts,))
+        rdb.commit()
+
+    srv = server.create_server(
+        "127.0.0.1",
+        0,
+        web_dir=COCKPIT_ROOT / "web",
+        state_path=remote_dir / "data" / "cockpit_state.json",
+        db_path=remote_dir / "data" / "user_journal.db",
+        articles_dir=remote_dir / "articles",
+        access_password="pw",
+        read_token="tok_ro",
+        rw_token="tok_rw",
+        sync_token="tok_sync",
+        role="consumer",
+    )
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        # Simulate failure on chunk 2 (post #2 fails), then retry succeeds!
+        real_post = vps_sync.requests.post
+        post_calls = {"n": 0}
+
+        def _flaky_post(*a, **kw):
+            post_calls["n"] += 1
+            if post_calls["n"] == 2:
+                raise vps_sync.requests.ConnectionError("transient drop on chunk 2")
+            return real_post(*a, **kw)
+
+        monkeypatch.setattr(vps_sync.requests, "post", _flaky_post)
+        ok_part, info_part = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok_part is False and info_part["reason"] == "ConnectionError"
+
+        monkeypatch.undo()
+        ok_resume, info_resume = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok_resume is True and info_resume["portfolio_action"] == "synced"
+
+        # Immediately running again MUST return noop_in_sync (spot ID mismatch & 4-dec margin_usd & manual mark_price all aligned!)
+        ok_noop, info_noop = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok_noop is True and info_noop["portfolio_action"] == "noop_in_sync"
+
+        req_ws = urllib.request.Request(f"{base}/api/v2/workspace", headers={"Authorization": "Bearer tok_rw"})
+        with urllib.request.urlopen(req_ws, timeout=5) as r:
+            ws = json.loads(r.read().decode("utf-8"))
+        assert len(ws["spot_balances"]) == 82
+        assert any(s["instrument_id"] == "TKN000" and s["qty"] == "10" for s in ws["spot_balances"])
+        assert ws["raw_portfolio"]["derivative_positions"][0]["mark_price"] == "39.19"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=3)
+
+    # 3. spot_proxy must NEVER be used as derivative mark_price in valuation
+    monkeypatch.setattr(market_quotes, "DATA_DIR", tmp_path)
+
+    class _FakeResp:
+        def __init__(self, *, status_code: int = 200, content: bytes = b"") -> None:
+            self.status_code = status_code
+            self.content = content
+
+    class _ProxyOnlyReq:
+        @staticmethod
+        def get(url: str, **kw) -> _FakeResp:
+            if "bitget.com" in url:
+                return _FakeResp(status_code=503)
+            if "qt.gtimg.cn" in url:
+                return _FakeResp(content='v_usQQQ="200~QQQ~QQQ~650.00~";'.encode("gbk"))
+            return _FakeResp(status_code=404)
+
+    monkeypatch.setattr(market_quotes, "requests", _ProxyOnlyReq)
+    pq = market_quotes.fetch_hybrid_perp_quotes(symbols=["QQQUSDT"], force_refresh=True, timeout=2)
+    assert pq["QQQUSDT"]["kind"] == "spot_proxy" and pq["QQQUSDT"]["is_proxy"] is True
+    assert "mark_price" not in pq["QQQUSDT"]
+
+    ev = valuation.evaluate_portfolio(
+        spot_balances=[],
+        derivative_positions=[{"id": "d1", "account_id": "acct_default", "instrument_id": "QQQUSDT", "symbol": "QQQUSDT", "side": "long", "qty": "1", "qty_unit": "coin", "entry_price": "640", "margin_usd": "100"}],
+        quotes=pq,
+    )
+    assert ev["derivative_positions"][0]["mark_price"] is None
+    assert ev["derivative_positions"][0]["price_source"] == "missing"
+    assert ev["unpriced_items"] == ["QQQUSDT"]
+
+    # 4. #13: QQQUSDT perp with symbol='QQQ' must NEVER steal public us_equities 'QQQ' spot price
+    eq_only_quotes = PortfolioStore._extract_public_quotes({"us_equities": {"indices": [{"symbol": "QQQ", "price": "650"}], "mag7_and_ai": [], "sectors": []}}) if hasattr(PortfolioStore, "_extract_public_quotes") else {}
+    from backend.portfolio_store import _extract_public_quotes
+
+    pub_q = _extract_public_quotes({"us_equities": {"indices": [{"symbol": "QQQ", "price": "650"}], "mag7_and_ai": [], "sectors": []}})
+    assert pub_q["QQQ"]["kind"] == "equity_spot"
+    ev_qqq = valuation.evaluate_portfolio(
+        spot_balances=[],
+        derivative_positions=[{"id": "d2", "account_id": "acct_default", "instrument_id": "QQQUSDT", "symbol": "QQQ", "side": "long", "qty": "1", "qty_unit": "coin", "entry_price": "640", "margin_usd": "100"}],
+        quotes=pub_q,
+    )
+    assert ev_qqq["derivative_positions"][0]["mark_price"] is None
+    assert ev_qqq["unpriced_items"] == ["QQQUSDT"]
+
+
+def test_vps_sync_round2_domain_isolation_dropped_ack_spot_rename_and_url_safety(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cover Round-2 fixes #2 (watchlist vs deleted holdings & local clear-all), #3 (dropped HTTP ack), #4 (spot rename), #6 (funding_rate/liq_asof), #8 (--url isolation)."""
+    import threading
+    import urllib.request
+    from backend import market_quotes, portfolio_store, public_snapshot, server, vps_sync
+    from backend.portfolio_store import PortfolioStore
+
+    monkeypatch.setattr(portfolio_store, "fetch_crypto_quotes", lambda **kw: {"quotes": {}, "spot": {}, "swap": {}})
+    monkeypatch.setattr(market_quotes, "fetch_hybrid_perp_quotes", lambda **kw: {"ZHIPUUSDT": {"inst_id": "ZHIPUUSDT", "mark_price": "40.0", "price": "40.0"}})
+
+    remote_dir = tmp_path / "r2_remote"
+    (remote_dir / "data").mkdir(parents=True)
+    public_snapshot.publish_generation(
+        remote_dir,
+        {"schema_version": 2, "generation": 1, "generated_at_bjt": "2026-11-27 15:00:00+08:00", "risk_gate": {"light": "YELLOW", "long_risk_cap": 1.0, "label": "ok"}, "positions": [], "signals": [], "articles": []},
+        [],
+        producer_id="windows-primary",
+        generation=1,
+    )
+    srv = server.create_server(
+        "127.0.0.1",
+        0,
+        web_dir=COCKPIT_ROOT / "web",
+        state_path=remote_dir / "data" / "cockpit_state.json",
+        db_path=remote_dir / "data" / "user_journal.db",
+        articles_dir=remote_dir / "articles",
+        access_password="pw",
+        read_token="tok_ro",
+        rw_token="tok_rw",
+        sync_token="tok_sync",
+        role="consumer",
+    )
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        # #2 + #6: Seed local DB with 2 spots + 1 derivative incl funding_rate & liq_asof
+        local_db = tmp_path / "r2_local.db"
+        lst = PortfolioStore(local_db)
+        lst.apply_changes(
+            request_id="r2-seed",
+            expected_revision=0,
+            actor_id="owner",
+            role="PORTFOLIO_RW",
+            summary="seed",
+            ops=[
+                {"op": "put", "entity": "spot", "id": "spot:acct_default:SPY", "data": {"account_id": "acct_default", "instrument_id": "SPY", "symbol": "SPY", "qty": "2"}},
+                {"op": "put", "entity": "spot", "id": "spot:acct_default:TSLA", "data": {"account_id": "acct_default", "instrument_id": "TSLA", "symbol": "TSLA", "qty": "3"}},
+                {
+                    "op": "put",
+                    "entity": "derivative",
+                    "id": "deriv:acct_default:ZHIPUUSDT",
+                    "data": {
+                        "account_id": "acct_default",
+                        "instrument_id": "ZHIPUUSDT",
+                        "side": "short",
+                        "qty": "2.59",
+                        "entry_price": "37.93",
+                        "funding_rate": "-0.00234",
+                        "liq_asof": "2026-11-27 12:00",
+                    },
+                },
+            ],
+        )
+        ok1, info1 = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok1 is True and info1["portfolio_action"] == "synced"
+
+        # Verify #6 funding_rate & liq_asof arrived on remote
+        req_ws = urllib.request.Request(f"{base}/api/v2/workspace", headers={"Authorization": "Bearer tok_rw"})
+        with urllib.request.urlopen(req_ws, timeout=5) as r:
+            ws1 = json.loads(r.read().decode("utf-8"))
+        d0 = ws1["raw_portfolio"]["derivative_positions"][0]
+        assert d0["funding_rate"] == "-0.00234"
+        assert d0["liq_asof"] == "2026-11-27 12:00"
+
+        # #2: Mobile deletes all holdings; local tweaks watchlist same-second & later -> deleted holdings MUST NOT come back
+        time.sleep(1.1)
+        srv.portfolio_store.apply_changes(
+            request_id="r2-mob-clear",
+            expected_revision=int(ws1["revision"]),
+            actor_id="owner:cookie",
+            role="PORTFOLIO_RW",
+            summary="clear holdings",
+            ops=[
+                {"op": "remove", "entity": "spot", "id": "spot:acct_default:SPY"},
+                {"op": "remove", "entity": "spot", "id": "spot:acct_default:TSLA"},
+                {"op": "remove", "entity": "derivative", "id": "deriv:acct_default:ZHIPUUSDT"},
+            ],
+        )
+        lst.apply_changes(
+            request_id="r2-watch-1",
+            expected_revision=1,
+            actor_id="owner",
+            role="PORTFOLIO_RW",
+            summary="watchlist",
+            ops=[{"op": "put", "entity": "setting", "id": "watchlist", "data": {"key": "watchlist", "value": ["NVDA"]}}],
+        )
+        ok2, info2 = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok2 is True and info2["portfolio_action"] == "synced"
+        assert info2["holdings_synced"] is False and info2["prefs_synced"] is True
+        with urllib.request.urlopen(req_ws, timeout=5) as r:
+            ws2 = json.loads(r.read().decode("utf-8"))
+        assert ws2["spot_balances"] == [] and ws2["derivative_positions"] == []
+        assert ws2["preferences"]["watchlist"] == ["NVDA"]
+
+        # Re-sync local with force so both sides have SPY+TSLA, then test #4 spot rename on remote + local sync
+        ok_f, _ = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw", force=True)
+        assert ok_f is True
+        with urllib.request.urlopen(req_ws, timeout=5) as r:
+            ws_f = json.loads(r.read().decode("utf-8"))
+        time.sleep(1.1)
+        srv.portfolio_store.apply_changes(
+            request_id="r2-rename-tsla-to-spy",
+            expected_revision=int(ws_f["revision"]),
+            actor_id="owner:cookie",
+            role="PORTFOLIO_RW",
+            summary="rename spot",
+            ops=[
+                {"op": "remove", "entity": "spot", "id": "spot:acct_default:SPY"},
+                {"op": "put", "entity": "spot", "id": "spot:acct_default:TSLA", "data": {"account_id": "acct_default", "instrument_id": "SPY", "symbol": "SPY", "qty": "9"}},
+            ],
+        )
+        # Local touches TSLA newer -> local now puts BOTH TSLA and SPY without overwriting remote's renamed SPY row!
+        time.sleep(1.1)
+        lst.apply_changes(
+            request_id="r2-local-tsla-newer",
+            expected_revision=2,
+            actor_id="owner",
+            role="PORTFOLIO_RW",
+            summary="touch tsla",
+            ops=[{"op": "put", "entity": "spot", "id": "spot:acct_default:TSLA", "data": {"account_id": "acct_default", "instrument_id": "TSLA", "symbol": "TSLA", "qty": "4"}}],
+        )
+        ok_ren, info_ren = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok_ren is True and info_ren["portfolio_action"] == "synced"
+        with urllib.request.urlopen(req_ws, timeout=5) as r:
+            ws_ren = json.loads(r.read().decode("utf-8"))
+        iids_ren = {s["instrument_id"] for s in ws_ren["spot_balances"]}
+        assert iids_ren == {"SPY", "TSLA"}
+
+        # #2 reverse: local intentionally clears all holdings after prior sync -> next sync clears remote too!
+        time.sleep(1.1)
+        lst.apply_changes(
+            request_id="r2-local-clear-all",
+            expected_revision=3,
+            actor_id="owner",
+            role="PORTFOLIO_RW",
+            summary="close all",
+            ops=[
+                {"op": "remove", "entity": "spot", "id": "spot:acct_default:SPY"},
+                {"op": "remove", "entity": "spot", "id": "spot:acct_default:TSLA"},
+                {"op": "remove", "entity": "derivative", "id": "deriv:acct_default:ZHIPUUSDT"},
+            ],
+        )
+        ok_clr, info_clr = vps_sync.sync_portfolio_via_http(local_db, url=base, rw_token="tok_rw")
+        assert ok_clr is True and info_clr["portfolio_action"] == "synced"
+        with urllib.request.urlopen(req_ws, timeout=5) as r:
+            ws_clr = json.loads(r.read().decode("utf-8"))
+        assert ws_clr["spot_balances"] == [] and ws_clr["derivative_positions"] == []
+
+        # #3: 161 items -> dropped HTTP response after server commits chunk 1 -> retry resumes chunk 2 & 3 to exact 161!
+        ack_db = tmp_path / "r2_161.db"
+        st161 = PortfolioStore(ack_db)
+        ops_161 = [
+            {
+                "op": "put",
+                "entity": "spot",
+                "id": f"sp_{i:03d}",
+                "data": {"account_id": "acct_default", "instrument_id": f"M{i:03d}", "symbol": f"M{i:03d}", "qty": "1"},
+            }
+            for i in range(161)
+        ]
+        st161.apply_changes(
+            request_id="seed-161-a",
+            expected_revision=0,
+            actor_id="owner",
+            role="PORTFOLIO_RW",
+            summary="seed 161 a",
+            ops=ops_161[:100],
+        )
+        st161.apply_changes(
+            request_id="seed-161-b",
+            expected_revision=1,
+            actor_id="owner",
+            role="PORTFOLIO_RW",
+            summary="seed 161 b",
+            ops=ops_161[100:],
+        )
+        real_post = vps_sync.requests.post
+        post_n = {"n": 0}
+
+        def _drop_ack_after_commit(*a, **kw):
+            resp = real_post(*a, **kw)
+            post_n["n"] += 1
+            if post_n["n"] == 1:
+                raise vps_sync.requests.ConnectionError("ack lost after server committed chunk 1")
+            return resp
+
+        time.sleep(1.1)
+        from unittest.mock import patch
+
+        with patch.object(vps_sync.requests, "post", side_effect=_drop_ack_after_commit):
+            ok_drop, info_drop = vps_sync.sync_portfolio_via_http(ack_db, url=base, rw_token="tok_rw")
+            assert ok_drop is False and info_drop["reason"] == "ConnectionError"
+        ok_rec, info_rec = vps_sync.sync_portfolio_via_http(ack_db, url=base, rw_token="tok_rw")
+        assert ok_rec is True and info_rec["portfolio_action"] == "synced"
+        with urllib.request.urlopen(req_ws, timeout=5) as r:
+            ws_161 = json.loads(r.read().decode("utf-8"))
+        assert len(ws_161["spot_balances"]) == 161
+
+        # #8: --url public publish destination must NEVER override MACROCOCKPIT_PORTFOLIO_URL
+        seen_pf_urls: list[str] = []
+        state_tmp = tmp_path / "cockpit_state.json"
+        state_tmp.write_text(
+            json.dumps({"schema_version": 2, "generation": 1, "generated_at_bjt": "2026-11-27 15:00:00+08:00", "signals": [], "articles": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MACROCOCKPIT_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("MACROCOCKPIT_SYNC_TOKEN", "tok_sync")
+        monkeypatch.setenv("MACROCOCKPIT_RW_TOKEN", "tok_rw")
+        monkeypatch.setenv("MACROCOCKPIT_PORTFOLIO_URL", "https://private-portfolio.example.com")
+        monkeypatch.setattr(vps_sync, "load_push_env", lambda **kw: None)
+        monkeypatch.setattr(vps_sync, "publish_via_http", lambda payload, url=None, **kw: (True, {"action": "mock", "pub_url": url}))
+        monkeypatch.setattr(
+            vps_sync,
+            "sync_portfolio_via_http",
+            lambda db_p, url=None, **kw: (seen_pf_urls.append(str(url)) or True, {"portfolio_action": "noop_in_sync"}),
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["vps_sync", "--url", "https://public-only.example.com/api/v2/publish", "--sync-portfolio", "--journal-db", str(ack_db)],
+        )
+        monkeypatch.setattr(vps_sync, "STATE_PATH", state_tmp)
+        vps_sync.main()
+        assert seen_pf_urls == ["None"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=3)
+
+

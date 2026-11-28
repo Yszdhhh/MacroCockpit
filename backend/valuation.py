@@ -213,18 +213,38 @@ def _resolve_instrument_price(
         if rate is not None:
             return (rate, "par" if rate == 1 else "quote")
 
-    base = (iid or sym).split("-")[0] if prefer_mark else sym
-    quote_ccys = (quote_currency, "USDT", "USD", "USDC")
-    swaps = [f"{base}-{ccy}-SWAP" for ccy in quote_ccys]
-    spots = [iid, sym, base, *(f"{base}-{ccy}" for ccy in quote_ccys)]
     if prefer_mark:
+        swap_bases: list[str] = []
+        raw_base = iid.split("-")[0] if "-" in iid else sym
+        if raw_base:
+            swap_bases.append(raw_base)
+        if "-" not in iid:
+            for sfx in ("USDT", "USDC", "USD"):
+                if iid.endswith(sfx) and len(iid) > len(sfx):
+                    b2 = iid[: -len(sfx)]
+                    if b2 not in swap_bases:
+                        swap_bases.append(b2)
+                    break
+        quote_ccys = (quote_currency, "USDT", "USD", "USDC")
+        swaps = [f"{b}-{ccy}-SWAP" for b in swap_bases for ccy in quote_ccys]
         exact = [iid] if iid.endswith(("-SWAP", "-PERP")) else []
-        candidates = [*exact, *swaps, *spots]
+        other_exact = [iid] if iid and iid not in exact else []
+        candidates = [*exact, *swaps, *other_exact]
     else:
+        base = sym
+        quote_ccys = (quote_currency, "USDT", "USD", "USDC")
+        swaps = [f"{base}-{ccy}-SWAP" for ccy in quote_ccys]
+        spots = [iid, sym, base, *(f"{base}-{ccy}" for ccy in quote_ccys)]
         candidates = [*spots, *swaps]
 
     for key in dict.fromkeys(candidates):
         entry = quotes.get(key)
+        if prefer_mark and isinstance(entry, dict) and (
+            entry.get("kind") in ("spot", "spot_proxy", "equity_spot")
+            or entry.get("is_proxy") is True
+            or entry.get("source") in ("us_equities", "stock_profiles")
+        ):
+            continue
         price = _quote_price_decimal(entry)
         if price is None or price <= 0:
             continue

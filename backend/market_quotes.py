@@ -40,6 +40,7 @@ DEFAULT_CRYPTO_SPOT_SYMBOLS: tuple[str, ...] = (
     "SOL-USDT",
     "BNB-USDT",
     "DOGE-USDT",
+    "PAXG-USDT",
     "USDT-USD",
     "USDC-USD",
 )
@@ -50,6 +51,11 @@ DEFAULT_CRYPTO_SWAP_SYMBOLS: tuple[str, ...] = (
     "BNB-USDT-SWAP",
     "DOGE-USDT-SWAP",
 )
+
+BITGET_MIX_TICKER_URL = "https://api.bitget.com/api/v2/mix/market/ticker"
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={codes}"
+HKD_PER_USDT_REF = Decimal("7.79")
+HYBRID_PERP_SYMBOLS: tuple[str, ...] = ("QQQUSDT", "ZHIPUUSDT")
 
 # OKX SWAP standard contract multipliers (ctVal)
 KNOWN_SWAP_MULTIPLIERS: dict[str, dict[str, str]] = {
@@ -515,6 +521,12 @@ def fetch_crypto_quotes(
             base, _, currency = instrument.partition("-")
             if currency == "USDT" or instrument in ("USDT-USD", "USDC-USD"):
                 flat.setdefault(base, entry)
+        for swap_id, entry in swaps.items():
+            if not isinstance(entry, dict):
+                continue
+            parts = swap_id.split("-")
+            if len(parts) == 3 and parts[1] == "USDT" and parts[2] in ("SWAP", "PERP"):
+                flat.setdefault(f"{parts[0]}USDT", entry)
         return flat
 
     payload = {
@@ -536,3 +548,140 @@ def fetch_crypto_quotes(
         except OSError:
             pass
     return payload
+
+
+def _parse_tencent_spot_prices(raw_text: str) -> dict[str, Decimal]:
+    """Parse Tencent qt.gtimg.cn semicolon-delimited quote payload into code -> latest price Decimal."""
+    prices: dict[str, Decimal] = {}
+    for stmt in str(raw_text or "").split(";"):
+        s = stmt.strip()
+        if not s or '="' not in s:
+            continue
+        head, _, body = s.partition('="')
+        code = head.split("_")[-1].strip()
+        fields = body.rstrip('"').split("~")
+        if len(fields) > 3:
+            px_str = _safe_dec_str(fields[3])
+            if px_str is not None and Decimal(px_str) > 0:
+                prices[code] = Decimal(px_str)
+    return prices
+
+
+def fetch_hybrid_perp_quotes(
+    symbols: list[str] | tuple[str, ...] | None = None,
+    timeout: int | float = 4,
+    *,
+    force_refresh: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Fetch USDT-perp mark prices for equity/HK-linked contracts (QQQUSDT, ZHIPUUSDT) via Bitget with Tencent fallback."""
+    targets = tuple(dict.fromkeys(str(s or "").strip().upper() for s in (symbols or HYBRID_PERP_SYMBOLS) if str(s or "").strip()))
+    if not targets:
+        return {}
+
+    cache_path = DATA_DIR / "hybrid_perp_cache.json"
+    cached = _read_json(cache_path)
+    now_epoch = time.time()
+    if (
+        not force_refresh
+        and cached
+        and isinstance(cached.get("quotes"), dict)
+        and _cache_is_fresh(cached, now_epoch, CRYPTO_CACHE_TTL_SECONDS)
+    ):
+        c_quotes = cached["quotes"]
+        if all(t in c_quotes for t in targets):
+            return {t: dict(c_quotes[t], cached=True) for t in targets}
+
+    received_at = _now_iso()
+    quotes_out: dict[str, dict[str, Any]] = {}
+
+    if requests is not None:
+        for sym in targets:
+            try:
+                resp = requests.get(
+                    BITGET_MIX_TICKER_URL,
+                    params={"productType": "USDT-FUTURES", "symbol": sym},
+                    headers=_HEADERS,
+                    timeout=timeout,
+                )
+                if resp.status_code == 200:
+                    data = (resp.json() or {}).get("data") or []
+                    row = data[0] if isinstance(data, list) and data else None
+                    if isinstance(row, dict):
+                        px_str = _safe_dec_str(row.get("markPr")) or _safe_dec_str(row.get("lastPr"))
+                        if px_str is not None and Decimal(px_str) > 0:
+                            fund_str = _safe_dec_str(row.get("fundingRate"))
+                            mkt_at = _epoch_to_iso(row.get("ts"), milliseconds=True)
+                            quotes_out[sym] = {
+                                "inst_id": sym,
+                                "symbol": sym,
+                                "quote_currency": "USDT",
+                                "kind": "mark",
+                                "price": px_str,
+                                "mark_price": px_str,
+                                "funding_rate": fund_str,
+                                "market_at": mkt_at,
+                                "received_at": received_at,
+                                "source": "bitget",
+                                "session": "24x7",
+                            }
+            except Exception:
+                pass
+
+        missing = [t for t in targets if t not in quotes_out]
+        if missing:
+            tc_map = {"QQQUSDT": "usQQQ", "ZHIPUUSDT": "hk02513"}
+            codes = [tc_map[t] for t in missing if t in tc_map]
+            if codes:
+                try:
+                    resp = requests.get(
+                        TENCENT_QUOTE_URL.format(codes=",".join(codes)),
+                        headers=_HEADERS,
+                        timeout=timeout,
+                    )
+                    if resp.status_code == 200:
+                        raw_txt = resp.content.decode("gbk", errors="replace")
+                        parsed = _parse_tencent_spot_prices(raw_txt)
+                        if "QQQUSDT" in missing and "usQQQ" in parsed:
+                            px_str = decimal_str(parsed["usQQQ"], 2)
+                            quotes_out["QQQUSDT"] = {
+                                "inst_id": "QQQUSDT",
+                                "symbol": "QQQUSDT",
+                                "quote_currency": "USDT",
+                                "kind": "spot_proxy",
+                                "is_proxy": True,
+                                "price": px_str,
+                                "market_at": received_at,
+                                "received_at": received_at,
+                                "source": "tencent_us",
+                            }
+                        if "ZHIPUUSDT" in missing and "hk02513" in parsed:
+                            with localcontext() as ctx:
+                                ctx.prec = 38
+                                usd_px = parsed["hk02513"] / HKD_PER_USDT_REF
+                            px_str = decimal_str(usd_px, 4)
+                            quotes_out["ZHIPUUSDT"] = {
+                                "inst_id": "ZHIPUUSDT",
+                                "symbol": "ZHIPUUSDT",
+                                "quote_currency": "USDT",
+                                "kind": "spot_proxy",
+                                "is_proxy": True,
+                                "price": px_str,
+                                "market_at": received_at,
+                                "received_at": received_at,
+                                "source": "tencent_hk_fx",
+                            }
+                except Exception:
+                    pass
+
+    if quotes_out:
+        try:
+            merged_cache = {**((cached or {}).get("quotes") or {}), **quotes_out}
+            _atomic_write_json(cache_path, {"fetched_epoch": now_epoch, "quotes": merged_cache})
+        except OSError:
+            pass
+        return quotes_out
+
+    old_quotes = (cached or {}).get("quotes")
+    if isinstance(old_quotes, dict):
+        return {t: dict(old_quotes[t], stale=True, cached=True) for t in targets if isinstance(old_quotes.get(t), dict)}
+    return {}

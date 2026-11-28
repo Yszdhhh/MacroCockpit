@@ -1,10 +1,10 @@
 [Unit]
-Description=Run MacroCockpit Domestic Collector every 20 minutes
+Description=Run MacroCockpit Domestic Collector every 5 minutes
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=20min
-RandomizedDelaySec=20s
+OnUnitActiveSec=5min
+RandomizedDelaySec=10s
 Persistent=true
 
 [Install]

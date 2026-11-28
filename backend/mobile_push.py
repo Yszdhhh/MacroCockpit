@@ -58,13 +58,19 @@ MODE_LABELS: dict[str, tuple[str, str]] = {
 }
 
 
-def load_push_env(force: bool = False, include_sync_token: bool = False) -> None:
+def load_push_env(
+    force: bool = False,
+    include_sync_token: bool = False,
+    *,
+    include_rw_token: bool = False,
+) -> None:
     """Safely load push env vars from Hermes .env without leaking auth credentials."""
     blocked = {
         "MACROCOCKPIT_ACCESS_PASSWORD",
         "MACROCOCKPIT_READ_TOKEN",
-        "MACROCOCKPIT_RW_TOKEN",
     }
+    if not include_rw_token:
+        blocked.add("MACROCOCKPIT_RW_TOKEN")
     if not include_sync_token:
         blocked.add("MACROCOCKPIT_SYNC_TOKEN")
 
@@ -444,6 +450,21 @@ def _is_headwind_radar(radar: Any) -> bool:
     return "逆风" in str(radar or "")
 
 
+def _dedup_signals_by_key(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("id") or item.get("title") or "")
+        if sid and sid in seen_keys:
+            continue
+        if sid:
+            seen_keys.add(sid)
+        deduped.append(item)
+    return deduped
+
+
 def _resolve_signal_pool_for_alerts(state: dict[str, Any], workspace: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Resolve curated/holding-radar signal pool from workspace, computing on demand if absent."""
     ws_sigs: list[dict[str, Any]] = []
@@ -455,7 +476,10 @@ def _resolve_signal_pool_for_alerts(state: dict[str, Any], workspace: dict[str, 
         elif isinstance(legacy_ws_sigs, list) and any(isinstance(s, dict) and s.get("holding_radar") for s in legacy_ws_sigs):
             ws_sigs = [s for s in legacy_ws_sigs if isinstance(s, dict)]
         else:
-            raw_pool = list(state.get("signal_candidates") or state.get("signals") or [])
+            raw_pool = _dedup_signals_by_key(
+                [x for x in (state.get("signals") or []) if isinstance(x, dict)]
+                + [x for x in (state.get("signal_candidates") or []) if isinstance(x, dict)]
+            )
             if raw_pool:
                 try:
                     from backend.curation import rank_curated_signals
@@ -464,22 +488,14 @@ def _resolve_signal_pool_for_alerts(state: dict[str, Any], workspace: dict[str, 
                         raw_pool,
                         rules=workspace.get("curation_rules") if isinstance(workspace.get("curation_rules"), list) else None,
                         workspace=workspace,
+                        limit=max(len(raw_pool), 85),
                     )
                 except Exception:
                     ws_sigs = [s for s in (legacy_ws_sigs or []) if isinstance(s, dict)]
             elif isinstance(legacy_ws_sigs, list):
                 ws_sigs = [s for s in legacy_ws_sigs if isinstance(s, dict)]
 
-    combined: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
-    for s in ws_sigs + [x for x in (state.get("signals") or []) if isinstance(x, dict)]:
-        sid = str(s.get("id") or s.get("title") or "")
-        if sid and sid in seen_keys:
-            continue
-        if sid:
-            seen_keys.add(sid)
-        combined.append(s)
-    return combined
+    return _dedup_signals_by_key(ws_sigs + [x for x in (state.get("signals") or []) if isinstance(x, dict)])
 
 
 def _collect_headwind_lines(state: dict[str, Any], workspace: dict[str, Any] | None) -> list[str]:

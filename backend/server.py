@@ -26,7 +26,7 @@ if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
 from backend.curation import rank_curated_signals
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR
+from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
 from backend.import_positions import PreviewExpiredError, PreviewValidationError, commit_import, preview_import
 from backend.journal_store import RevisionConflictError
 from backend.mcp_server import (
@@ -38,6 +38,7 @@ from backend.mcp_server import (
 from backend.mobile_push import build_muse_markdown_digest, dispatch_mobile_push, load_push_env
 from backend.portfolio_store import ConstraintViolationError, IdempotencyConflictError, PortfolioStore
 from backend.public_snapshot import (
+    file_lock,
     load_published_generation,
     lookup_published_article,
     project_public_state,
@@ -663,10 +664,18 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                         break
             except Exception:
                 pass
+            fallback_src = "同步深度长文"
+            lower_name = safe_name.lower()
+            if lower_name.startswith(("weekly_", "monthly_", "dr_")):
+                fallback_src = "周月度深研"
+            elif lower_name.startswith("ta_"):
+                fallback_src = "多智能体深研"
+            elif lower_name.startswith("guru_"):
+                fallback_src = "大佬分享"
             return {
                 "filename": safe_name,
                 "title": str(meta_entry.get("title") or title),
-                "source": str(meta_entry.get("source") or "同步深度长文"),
+                "source": str(meta_entry.get("source") or fallback_src),
                 "mtime": str(meta_entry.get("mtime") or ""),
                 "excerpt": str(meta_entry.get("excerpt") or title),
                 "body_md": body_md,
@@ -763,6 +772,11 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/login":
+            if not self.server.access_password and self._authenticate(allow_query_token=False) is not None:
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
             page = (
                 '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
                 '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -1519,6 +1533,118 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, out_pub)
                 return
 
+            if path == "/api/research/ingest":
+                if self.server.role == "consumer":
+                    self._send_json(403, {"error": "consumer_mode_ingest_disabled"})
+                    return
+                body_md = str(b.get("body_md") or "").strip()
+                if not body_md:
+                    self._send_json(400, {"error": "body_md 不能为空"})
+                    return
+                try:
+                    from backend.periodic_report import ingest_deep_research_markdown
+                except ImportError:
+                    self._send_json(503, {"error": "research ingest dependencies unavailable"})
+                    return
+                raw_tickers = b.get("tickers")
+                if isinstance(raw_tickers, str) and not raw_tickers.strip():
+                    raw_tickers = None
+                try:
+                    art_summary = ingest_deep_research_markdown(
+                        body_md,
+                        title=str(b.get("title") or ""),
+                        tickers=raw_tickers,
+                        related_period=str(b.get("related_period") or ""),
+                        articles_dir=self.server.articles_dir,
+                        url=str(b.get("url") or ""),
+                    )
+                except ValueError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+
+                fname = str(art_summary.get("filename") or "")
+                parsed = parse_markdown_article(self.server.articles_dir / fname, "周月度深研") if fname else None
+                if isinstance(parsed, dict):
+                    merged_art = dict(parsed)
+                    for k in ("report_kind", "publisher", "author_role", "tickers", "score", "url"):
+                        if k not in merged_art and k in art_summary:
+                            merged_art[k] = art_summary[k]
+                    merged_art["source"] = "周月度深研"
+                    art_summary = merged_art
+                else:
+                    art_summary["source"] = "周月度深研"
+
+                with _REFRESH_LOCK:
+                    try:
+                        cur_state = dict(self._state())
+                    except Exception:
+                        cur_state = {}
+                    prev_articles = [
+                        a
+                        for a in (cur_state.get("articles") or [])
+                        if isinstance(a, dict) and a.get("filename") != fname
+                    ]
+                    cur_state["articles"] = [art_summary, *prev_articles]
+                    cov = dict(cur_state.get("coverage") or {})
+                    cov["articles_count"] = len(cur_state["articles"])
+                    cov["periodic_reports_count"] = sum(
+                        1 for a in cur_state["articles"] if isinstance(a, dict) and a.get("source") == "周月度深研"
+                    )
+                    cur_state["coverage"] = cov
+
+                    manifest_path = self.server.base_dir / "data" / "current_generation.json"
+                    if manifest_path.is_file():
+                        loaded_pub = load_published_generation(self.server.base_dir)
+                        pub_gen = int(loaded_pub.get("generation") or 0)
+                        pub_manifest = loaded_pub.get("manifest")
+                        gen_art_dir = self.server.base_dir / "data" / "generations" / f"gen_{pub_gen}" / "articles"
+                        arts_payload: list[dict[str, str]] = []
+                        seen_payload: set[str] = set()
+                        new_file = self.server.articles_dir / fname
+                        if fname and new_file.is_file():
+                            arts_payload.append({"filename": fname, "content": new_file.read_text(encoding="utf-8")})
+                            seen_payload.add(fname)
+                        art_entries = (
+                            (pub_manifest.get("articles") if isinstance(pub_manifest, dict) else None)
+                            or cur_state.get("articles")
+                            or []
+                        )
+                        for entry in art_entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            ef = safe_article_filename(entry.get("filename"))
+                            if not ef or ef in seen_payload:
+                                continue
+                            seen_payload.add(ef)
+                            cand = gen_art_dir / ef
+                            if not cand.is_file():
+                                cand = self.server.articles_dir / ef
+                            if not cand.is_file():
+                                cand = self.server.base_dir / "articles" / ef
+                            if cand.is_file():
+                                try:
+                                    arts_payload.append({"filename": ef, "content": cand.read_text(encoding="utf-8")})
+                                except OSError:
+                                    pass
+                        manifest = publish_generation(
+                            self.server.base_dir,
+                            cur_state,
+                            arts_payload,
+                            producer_id="research-ingest",
+                        )
+                        out_gen = int(manifest.get("generation") or 0)
+                        compat_state = self.server.base_dir / "data" / "cockpit_state.json"
+                        if self.server.state_path != compat_state and compat_state.is_file():
+                            with file_lock(self.server.state_path):
+                                atomic_write_json(self.server.state_path, json.loads(compat_state.read_text(encoding="utf-8")))
+                    else:
+                        with file_lock(self.server.state_path):
+                            atomic_write_json(self.server.state_path, cur_state)
+                        out_gen = int(cur_state.get("generation") or 0)
+
+                self._send_json(200, {"ok": True, "article": art_summary, "generation": out_gen})
+                return
+
             if path == "/api/push":
                 include_amounts = b.get("include_amounts")
                 if include_amounts is not None and not isinstance(include_amounts, bool):
@@ -1682,6 +1808,8 @@ def main() -> None:
     ap.add_argument("--refresh-once", action="store_true")
     ap.add_argument("--refresh-fred", action="store_true")
     ap.add_argument("--build-static", action="store_true")
+    ap.add_argument("--no-auth", action="store_true", help="Force passwordless mode on loopback standalone server")
+    ap.add_argument("--require-password", action="store_true", help="Require access password even on loopback standalone")
     ap.add_argument("--data-dir", type=Path)
     a = ap.parse_args()
 
@@ -1715,15 +1843,23 @@ def main() -> None:
 
     access_pw = os.environ.get("MACROCOCKPIT_ACCESS_PASSWORD", "").strip()
     sync_tok = os.environ.get("MACROCOCKPIT_SYNC_TOKEN", "").strip()
+    is_loopback_bind = a.host in ("127.0.0.1", "localhost", "::1")
     if a.role == "consumer" and (not access_pw or not sync_tok):
         print(
             "Refusing consumer startup without both MACROCOCKPIT_ACCESS_PASSWORD and MACROCOCKPIT_SYNC_TOKEN",
             file=sys.stderr,
         )
         raise SystemExit(2)
-    if a.host not in ("127.0.0.1", "localhost", "::1") and not access_pw:
+    if not is_loopback_bind and not access_pw:
         print("Refusing non-loopback bind without MACROCOCKPIT_ACCESS_PASSWORD", file=sys.stderr)
         raise SystemExit(2)
+
+    local_require_pw = bool(
+        a.require_password or os.environ.get("MACROCOCKPIT_LOCAL_REQUIRE_PASSWORD", "").strip() == "1"
+    )
+    effective_access_pw = access_pw
+    if a.role == "standalone" and is_loopback_bind and (a.no_auth or not local_require_pw):
+        effective_access_pw = ""
 
     if a.role == "standalone":
         _load_or_build_state(state_path, role="standalone")
@@ -1734,6 +1870,7 @@ def main() -> None:
         state_path=state_path,
         db_path=a.data_dir / "user_journal.db" if a.data_dir else None,
         articles_dir=a.data_dir.parent / "articles" if a.data_dir else None,
+        access_password=effective_access_pw,
         role=a.role,
     )
     print(f"MacroCockpit ({a.role}) serving on http://{a.host}:{a.port}/")

@@ -51,9 +51,13 @@ from backend.public_snapshot import (
 from backend.rss_sources import (
     CURATED_ARTICLE_FEEDS,
     CURATED_RSS_FEEDS,
+    _fetch_aihot_hot_articles,
     _fetch_article_candidates_from_feed,
     _fetch_cls_depth_candidates,
     _fetch_one_feed,
+    _fetch_wscn_hot_articles,
+    _scrub_forbidden,
+    _select_balanced_articles,
     _write_curated_article_files,
     build_opml_export,
     collect_cn_finance_wires,
@@ -61,16 +65,52 @@ from backend.rss_sources import (
 )
 from backend.sec_edgar import collect_recent_sec_signals, fetch_sec_filings_map
 from backend.signal_aggregator import (
+    KOL_ROOT,
     _build_positions_and_risk_gate,
     _build_strategy_targets,
     _collect_aihot_signals,
     _collect_equity_signals,
-    _dedup_articles,
     _ensure_signal_topics,
     _read_json,
+    _sanitize_state_value,
+    _sort_and_balance_articles,
     parse_markdown_article,
     read_article_markdown,
 )
+
+try:
+    from backend.guru_sources import collect_guru_articles, collect_guru_signals
+except ImportError:
+    collect_guru_articles = None  # type: ignore[assignment]
+    collect_guru_signals = None  # type: ignore[assignment]
+
+try:
+    from backend.kol_intel_engine import (
+        build_kol_actionable_signals,
+        build_kol_digest,
+        build_kol_scorecards,
+        select_quality_kol_articles,
+    )
+except ImportError:
+    build_kol_actionable_signals = None  # type: ignore[assignment]
+    build_kol_digest = None  # type: ignore[assignment]
+    build_kol_scorecards = None  # type: ignore[assignment]
+    select_quality_kol_articles = None  # type: ignore[assignment]
+
+try:
+    from backend.market_synthesis import build_market_synthesis
+except ImportError:
+    build_market_synthesis = None  # type: ignore[assignment]
+
+try:
+    from backend.forum_sentiment import build_sentiment_divergence
+except ImportError:
+    build_sentiment_divergence = None  # type: ignore[assignment]
+
+try:
+    from backend.source_matrix import build_asset_source_matrix
+except ImportError:
+    build_asset_source_matrix = None  # type: ignore[assignment]
 from backend.stock_research import (
     CACHE_TTL_SECONDS as STOCK_CACHE_TTL_SECONDS,
     CORE_RESEARCH_STOCKS,
@@ -451,6 +491,71 @@ def _bump_producer_generation(root: Path, data_dir: Path) -> int:
         return next_gen
 
 
+def _has_usable_quote_price(entry: Any) -> int:
+    if not isinstance(entry, dict):
+        return 0
+    for key in ("mark_price", "price"):
+        raw = entry.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            from decimal import Decimal, InvalidOperation
+
+            dec = Decimal(str(raw).strip())
+            if dec.is_finite() and dec > 0:
+                return 1
+        except (InvalidOperation, ValueError):
+            continue
+    return 0
+
+
+def _quote_freshness_key(entry: Any) -> tuple[int, int, float]:
+    if not isinstance(entry, dict):
+        return (0, 0, 0.0)
+    has_price = _has_usable_quote_price(entry)
+    is_official = 0 if (entry.get("kind") == "spot_proxy" or entry.get("is_proxy") is True) else 1
+    epoch = 0.0
+    for ts_key in ("market_at", "received_at"):
+        raw = str(entry.get(ts_key) or "").strip()
+        if raw:
+            try:
+                dt = datetime.fromisoformat(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=BJT)
+                epoch = max(epoch, dt.timestamp())
+            except ValueError:
+                pass
+    return (has_price, is_official, epoch)
+
+
+def _merge_fresher_quotes(cur_map: dict[str, Any], prior_map: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(cur_map)
+    for sym_k, p_val in prior_map.items():
+        if sym_k not in merged:
+            merged[sym_k] = p_val
+            continue
+        cur_val = merged.get(sym_k)
+        if _quote_freshness_key(p_val) > _quote_freshness_key(cur_val):
+            best = dict(p_val) if isinstance(p_val, dict) else p_val
+            # If cur_val was a newer funding-only update (no price), fold funding_rate onto the usable priced record
+            if isinstance(best, dict) and isinstance(cur_val, dict) and _has_usable_quote_price(cur_val) == 0:
+                if cur_val.get("funding_rate") not in (None, ""):
+                    best["funding_rate"] = cur_val["funding_rate"]
+            merged[sym_k] = best
+    return merged
+
+
+def _source_matrix_richness(matrix: Any) -> tuple[int, int, int]:
+    if not isinstance(matrix, dict):
+        return (0, 0, 0)
+    cats = matrix.get("categories") or []
+    if not isinstance(cats, list):
+        return (0, 0, 0)
+    bridges = sum(len(c.get("supply_chain_bridges") or []) for c in cats if isinstance(c, dict))
+    kols = sum(len(c.get("top_kols") or []) for c in cats if isinstance(c, dict))
+    return (bridges, kols, len(cats))
+
+
 def _count_signal_categories(signals: list[dict[str, Any]]) -> dict[str, int]:
     cat_counts: dict[str, int] = {}
     for sig in signals:
@@ -494,7 +599,10 @@ def run_cn_merge_and_publish(
         eqn_signals: list[dict[str, Any]] = []
         cn_art_cands: list[dict[str, Any]] = []
         cls_depth_cands: list[dict[str, Any]] = []
+        wscn_hot_cands: list[dict[str, Any]] = []
+        aihot_art_cands: list[dict[str, Any]] = []
         aihot_signals: list[dict[str, Any]] = []
+        guru_articles: list[dict[str, Any]] = []
         filings_map: dict[str, list[dict[str, str]]] = {}
         us_equities: dict[str, Any] = {}
         fx_snapshot: dict[str, Any] = {"status": "unavailable", "rate": None, "basis": None, "label": "人民币估值不可用"}
@@ -505,7 +613,18 @@ def run_cn_merge_and_publish(
             eqn_fut = pool.submit(collect_equation_news_with_meta, cache_path=data_dir / "eqn_rest_cache.json")
             art_futs = [pool.submit(_fetch_article_candidates_from_feed, sp, 8) for sp in cn_art_specs]
             cls_fut = pool.submit(_fetch_cls_depth_candidates, 8)
+            wscn_art_fut = pool.submit(_fetch_wscn_hot_articles, 8)
+            aihot_art_fut = pool.submit(_fetch_aihot_hot_articles, 10)
             aihot_fut = pool.submit(_collect_aihot_signals)
+            guru_fut = (
+                pool.submit(
+                    collect_guru_articles,
+                    articles_dir=articles_dir,
+                    cache_path=data_dir / "guru_articles_cache.json",
+                )
+                if collect_guru_articles is not None
+                else None
+            )
             sec_fut = pool.submit(fetch_sec_filings_map, None, force_refresh=False, timeout=6, cache_path=data_dir / "sec_filings_cache.json")
             eq_fut = pool.submit(fetch_us_equities)
             fx_fut = pool.submit(fetch_fx_snapshot)
@@ -533,9 +652,22 @@ def run_cn_merge_and_publish(
             except Exception:
                 cls_depth_cands = []
             try:
+                wscn_hot_cands = wscn_art_fut.result()
+            except Exception:
+                wscn_hot_cands = []
+            try:
+                aihot_art_cands = aihot_art_fut.result()
+            except Exception:
+                aihot_art_cands = []
+            try:
                 aihot_signals = aihot_fut.result()
             except Exception:
                 aihot_signals = []
+            if guru_fut is not None:
+                try:
+                    guru_articles = guru_fut.result()
+                except Exception:
+                    guru_articles = []
             try:
                 filings_map = sec_fut.result()
             except Exception:
@@ -553,6 +685,15 @@ def run_cn_merge_and_publish(
 
         sec_signals = collect_recent_sec_signals(filings_map)
         eq_signals = _collect_equity_signals(us_equities)
+        guru_signals: list[dict[str, Any]] = []
+        if collect_guru_signals is not None:
+            try:
+                guru_signals = collect_guru_signals(
+                    articles=guru_articles or None,
+                    cache_path=data_dir / "guru_articles_cache.json",
+                )
+            except Exception:
+                guru_signals = []
 
         # Load overseas relay fragment & prior state metadata
         relay = _read_json(data_dir / "intl_relay_bundle.json", {}) or {}
@@ -564,15 +705,98 @@ def run_cn_merge_and_publish(
         intl_signals = _strip_private_items(list(relay.get("raw_signals") or []))
         intl_articles = _strip_private_items(list(relay.get("raw_articles") or []))
 
-        # Preserve prior kol_digest if published state already had it
+        # Preserve prior kol_digest, kol_scorecards, forum_sentiment, source_matrix, crypto_quotes & curated articles
         prior_kol: list[dict[str, Any]] = []
+        prior_scorecards: list[dict[str, Any]] = []
+        prior_forum_sentiment: dict[str, Any] = {}
+        prior_source_matrix: dict[str, Any] = {}
+        prior_crypto_quotes: dict[str, Any] = {}
+        prior_article_meta: dict[str, dict[str, Any]] = {}
+        prior_gen = 0
         try:
             loaded_prior = load_published_generation(root)
-            prior_kol = list((loaded_prior.get("state") or {}).get("kol_digest") or [])
+            prior_gen = int(loaded_prior.get("generation") or 0)
+            p_state = loaded_prior.get("state") or {}
+            prior_kol = list(p_state.get("kol_digest") or [])
+            prior_scorecards = list(p_state.get("kol_scorecards") or [])
+            if isinstance(p_state.get("forum_sentiment"), dict):
+                prior_forum_sentiment = dict(p_state["forum_sentiment"])
+            if isinstance(p_state.get("asset_source_matrix"), dict):
+                prior_source_matrix = dict(p_state["asset_source_matrix"])
+            if isinstance(p_state.get("crypto_quotes"), dict):
+                prior_crypto_quotes = dict(p_state["crypto_quotes"])
+            for pa in p_state.get("articles") or []:
+                if isinstance(pa, dict) and pa.get("filename"):
+                    prior_article_meta[str(pa["filename"])] = dict(pa)
         except Exception:
             prior_state = _read_json(data_dir / "cockpit_state.json", {}) or {}
             if isinstance(prior_state, dict):
                 prior_kol = list(prior_state.get("kol_digest") or [])
+                prior_scorecards = list(prior_state.get("kol_scorecards") or [])
+                if isinstance(prior_state.get("forum_sentiment"), dict):
+                    prior_forum_sentiment = dict(prior_state["forum_sentiment"])
+                if isinstance(prior_state.get("asset_source_matrix"), dict):
+                    prior_source_matrix = dict(prior_state["asset_source_matrix"])
+                if isinstance(prior_state.get("crypto_quotes"), dict):
+                    prior_crypto_quotes = dict(prior_state["crypto_quotes"])
+                for pa in prior_state.get("articles") or []:
+                    if isinstance(pa, dict) and pa.get("filename"):
+                        prior_article_meta[str(pa["filename"])] = dict(pa)
+
+        # KOL intelligence engine (with graceful degradation when local KOL_ROOT is absent on VPS)
+        kol_scorecards: list[dict[str, Any]] = []
+        kol_digest: list[dict[str, Any]] = []
+        kol_actionable_signals: list[dict[str, Any]] = []
+        quality_kol_articles: list[dict[str, Any]] = []
+        sc_cache_path = data_dir / "kol_scorecard_cache.json"
+        if build_kol_scorecards is not None and build_kol_digest is not None and build_kol_actionable_signals is not None:
+            try:
+                if KOL_ROOT.exists():
+                    kol_scorecards = build_kol_scorecards(
+                        kol_dir=KOL_ROOT,
+                        stock_profiles_path=data_dir / "stock_profiles_cache.json",
+                        fred_cache_path=data_dir / "fred_cache.json",
+                        cache_path=sc_cache_path,
+                        force_refresh=True,
+                    )
+                    kol_digest = build_kol_digest(
+                        kol_dir=KOL_ROOT,
+                        scorecards=kol_scorecards,
+                        cache_path=sc_cache_path,
+                        limit=36,
+                    )
+                    if select_quality_kol_articles is not None and (KOL_ROOT / "articles").exists():
+                        quality_kol_articles = select_quality_kol_articles(
+                            KOL_ROOT / "articles",
+                            kol_dir=KOL_ROOT,
+                            scorecards=kol_scorecards,
+                            limit=40,
+                        )
+                else:
+                    kol_scorecards = build_kol_scorecards(
+                        kol_dir=KOL_ROOT,
+                        cache_path=sc_cache_path,
+                        force_refresh=False,
+                    )
+            except Exception:
+                kol_scorecards = []
+                kol_digest = []
+                quality_kol_articles = []
+
+        if not kol_scorecards and prior_scorecards:
+            kol_scorecards = prior_scorecards
+        if not kol_digest:
+            kol_digest = prior_kol[:36]
+        if build_kol_actionable_signals is not None and kol_digest:
+            try:
+                kol_actionable_signals = build_kol_actionable_signals(
+                    kol_digest_items=kol_digest,
+                    scorecards=kol_scorecards,
+                    min_reliability_score=68.0,
+                    limit=16,
+                )
+            except Exception:
+                kol_actionable_signals = []
 
         # Read macro_fred (from merged fred_cache.json) + pure-numpy correlations
         macro_fred = build_macro_fred({}, refresh_fred=False)
@@ -580,11 +804,21 @@ def run_cn_merge_and_publish(
         risk_gate, positions = _build_positions_and_risk_gate({}, {}, macro_fred=macro_fred, us_equities=us_equities)
         strategy_targets = _build_strategy_targets(positions, risk_gate, {}, {})
 
-        # Unified Kazike pipeline: deduplicate & score CN + INTL signals together
+        # Unified Kazike pipeline: deduplicate & score CN + INTL + KOL + Guru signals together
         raw_signals = _strip_private_items(
             [
                 _ensure_signal_topics(s)
-                for s in (cn_rss_signals + cn_wires + eqn_signals + intl_signals + sec_signals + aihot_signals + eq_signals)
+                for s in (
+                    cn_rss_signals
+                    + cn_wires
+                    + eqn_signals
+                    + intl_signals
+                    + sec_signals
+                    + aihot_signals
+                    + eq_signals
+                    + kol_actionable_signals
+                    + guru_signals
+                )
             ]
         )
         all_signals, kazike_stats = process_financial_signals(
@@ -593,9 +827,9 @@ def run_cn_merge_and_publish(
         )
         signal_candidates = kazike_stats.pop("candidates", [])
 
-        # Deduplicate & persist curated articles (feed_*.md) while retaining ta_*.md
+        # Deduplicate & persist curated articles (feed_*.md) while retaining guru_*.md & ta_*.md
         scored_arts: list[dict[str, Any]] = []
-        for cand in (cn_art_cands + cls_depth_cands + intl_articles):
+        for cand in (cn_art_cands + cls_depth_cands + wscn_hot_cands + aihot_art_cands + intl_articles):
             verdict, _reason = prefilter_financial(cand)
             if verdict == "BLOCK":
                 continue
@@ -607,120 +841,291 @@ def run_cn_merge_and_publish(
 
         if scored_arts:
             deduped_arts = cluster_and_dedup(scored_arts)
-            deduped_arts.sort(
-                key=lambda x: (int(x.get("attention_score") or 0), str(x.get("time_bjt") or "")),
-                reverse=True,
-            )
+            balanced_arts = _select_balanced_articles(deduped_arts, limit=16, max_per_publisher=4)
             top_arts = [
                 {
                     "filename": "",
-                    "title": str(it.get("title") or ""),
-                    "summary": str(it.get("summary") or ""),
+                    "title": _scrub_forbidden(str(it.get("title") or "")),
+                    "summary": _scrub_forbidden(str(it.get("summary") or "")),
                     "publisher": str(it.get("publisher") or it.get("source") or "AI与金融研报"),
                     "url": str(it.get("url") or ""),
                     "score": int(it.get("attention_score") or 0),
                     "time_bjt": str(it.get("time_bjt") or ""),
-                    "body_md": str(it.get("body_md") or ""),
+                    "body_md": _scrub_forbidden(str(it.get("body_md") or "")),
                 }
-                for it in deduped_arts[:12]
+                for it in balanced_arts
             ]
             _write_curated_article_files(top_arts, articles_dir=articles_dir)
 
         collected_articles: list[dict[str, Any]] = []
-        articles_payload: list[dict[str, str]] = []
-        for p in sorted(articles_dir.glob("*.md"), key=lambda fp: fp.stat().st_mtime, reverse=True):
-            if "异常告警" in p.name or not safe_article_filename(p.name):
-                continue
-            art = parse_markdown_article(p, "同步深度长文")
-            content = read_article_markdown(p, "同步深度长文", max_bytes=256 * 1024)
-            if art and content:
-                collected_articles.append(art)
-                articles_payload.append({"filename": p.name, "content": content})
+        content_by_name: dict[str, str] = {}
+        seen_names: set[str] = set()
+        manifest: dict[str, Any] | None = None
+        for attempt in range(5):
+            if attempt > 0:
+                try:
+                    loaded_prior = load_published_generation(root)
+                    prior_gen = int(loaded_prior.get("generation") or 0)
+                    p_state = loaded_prior.get("state") or {}
+                    prior_kol = list(p_state.get("kol_digest") or [])
+                    prior_scorecards = list(p_state.get("kol_scorecards") or [])
+                    if isinstance(p_state.get("forum_sentiment"), dict):
+                        prior_forum_sentiment = dict(p_state["forum_sentiment"])
+                    if isinstance(p_state.get("asset_source_matrix"), dict):
+                        prior_source_matrix = dict(p_state["asset_source_matrix"])
+                    if isinstance(p_state.get("crypto_quotes"), dict):
+                        prior_crypto_quotes = dict(p_state["crypto_quotes"])
+                    prior_article_meta = {
+                        str(pa["filename"]): dict(pa)
+                        for pa in (p_state.get("articles") or [])
+                        if isinstance(pa, dict) and pa.get("filename")
+                    }
+                    if not kol_scorecards and prior_scorecards:
+                        kol_scorecards = prior_scorecards
+                    if not kol_digest:
+                        kol_digest = prior_kol[:36]
+                except Exception:
+                    pass
 
-        collected_articles = _dedup_articles(collected_articles)
-        kept_names = {a["filename"] for a in collected_articles}
-        articles_payload = [a for a in articles_payload if a["filename"] in kept_names][:max_articles]
+            collected_articles = []
+            content_by_name = {}
+            seen_names = set()
+            prior_gen_articles_dir = (data_dir / "generations" / f"gen_{prior_gen}" / "articles") if prior_gen > 0 else None
+            art_scan_dirs = [articles_dir]
+            if prior_gen_articles_dir is not None and prior_gen_articles_dir.is_dir():
+                art_scan_dirs.append(prior_gen_articles_dir)
+            for scan_dir in art_scan_dirs:
+                for p in sorted(scan_dir.glob("*.md"), key=lambda fp: fp.stat().st_mtime, reverse=True):
+                    if p.name in seen_names or "异常告警" in p.name or not safe_article_filename(p.name):
+                        continue
+                    meta_prev = prior_article_meta.get(p.name) or {}
+                    src_label = str(meta_prev.get("source") or "同步深度长文")
+                    art = parse_markdown_article(p, src_label)
+                    content = read_article_markdown(p, src_label, max_bytes=256 * 1024)
+                    if art and content:
+                        if meta_prev.get("title"):
+                            art["title"] = str(meta_prev["title"])
+                        if meta_prev.get("excerpt"):
+                            art["excerpt"] = str(meta_prev["excerpt"])
+                        if has_private_article_content(art) or has_private_article_content({"filename": p.name, "body_md": content}):
+                            continue
+                        seen_names.add(p.name)
+                        collected_articles.append(art)
+                        content_by_name[p.name] = content
+            for kart in quality_kol_articles:
+                if not isinstance(kart, dict):
+                    continue
+                fname = safe_article_filename(kart.get("filename"))
+                body = str(kart.get("body_md") or "")
+                if not fname or fname in seen_names or "异常告警" in fname or not body:
+                    continue
+                if has_private_article_content(kart):
+                    continue
+                seen_names.add(fname)
+                collected_articles.append(kart)
+                content_by_name[fname] = body
 
-        stock_profiles = _load_cn_stock_profiles(data_dir, filings_map=filings_map, risk_gate=risk_gate)
-        combined_for_thesis = signal_candidates or all_signals
-        for sym, prof in stock_profiles.items():
-            prof["quick_thesis"] = build_quick_thesis(
-                prof,
-                risk_gate=risk_gate,
-                signals=combined_for_thesis,
-                kol_digest=prior_kol,
+            collected_articles = _sort_and_balance_articles(collected_articles)[:max_articles]
+            articles_payload = [
+                {"filename": a["filename"], "content": content_by_name[a["filename"]]}
+                for a in collected_articles
+                if a.get("filename") in content_by_name
+            ]
+
+            stock_profiles = _load_cn_stock_profiles(data_dir, filings_map=filings_map, risk_gate=risk_gate)
+            combined_for_thesis = signal_candidates or all_signals
+            for sym, prof in stock_profiles.items():
+                prof["quick_thesis"] = build_quick_thesis(
+                    prof,
+                    risk_gate=risk_gate,
+                    signals=combined_for_thesis,
+                    kol_digest=kol_digest,
+                )
+                sym_pat = re.compile(rf"^ta_{re.escape(str(sym).upper())}_.*\.md$", re.IGNORECASE)
+                ta_matches = [a for a in collected_articles if sym_pat.match(str(a.get("filename") or ""))]
+                if ta_matches:
+                    ta_matches.sort(key=lambda a: (str(a.get("mtime") or ""), str(a.get("filename") or "")), reverse=True)
+                    prof["deep_report_file"] = str(ta_matches[0]["filename"])
+
+            calendar_events = filter_calendar_events(build_calendar_events(stock_profiles), days_ahead=120)
+
+            crypto_quotes = {}
+            cq_cached = _read_json(data_dir / "crypto_quotes_cache.json", {}) or {}
+            if isinstance(cq_cached, dict) and isinstance(cq_cached.get("payload"), dict):
+                crypto_quotes = dict(cq_cached["payload"])
+                crypto_quotes["cached"] = True
+                crypto_quotes["stale"] = intl_stale
+            if prior_crypto_quotes:
+                if not crypto_quotes:
+                    crypto_quotes = dict(prior_crypto_quotes)
+                    crypto_quotes["cached"] = True
+                else:
+                    for subk in ("quotes", "spot", "swap", "spot_proxies"):
+                        p_map = prior_crypto_quotes.get(subk)
+                        if isinstance(p_map, dict) and p_map:
+                            cur_map = dict(crypto_quotes.get(subk) or {})
+                            crypto_quotes[subk] = _merge_fresher_quotes(cur_map, p_map)
+
+            opml_file = root / "dist" / "macro_cockpit_feeds.opml"
+            if not opml_file.is_file():
+                try:
+                    build_opml_export(output_path=opml_file)
+                except Exception:
+                    pass
+
+            market_analysis = {}
+            if build_market_synthesis is not None:
+                try:
+                    market_analysis = build_market_synthesis(
+                        macro_fred=macro_fred,
+                        us_equities=us_equities,
+                        correlations=correlations,
+                        signals=all_signals,
+                        kol_digest=kol_digest,
+                        kol_scorecards=kol_scorecards,
+                        articles=collected_articles,
+                        risk_gate=risk_gate,
+                        stock_profiles=stock_profiles,
+                    )
+                except Exception:
+                    market_analysis = {}
+
+            forum_sentiment = {}
+            forum_pulse = _read_json(data_dir / "forum_pulse_cache.json", {}) or {}
+            has_local_forum = (
+                isinstance(forum_pulse, dict)
+                and isinstance(forum_pulse.get("channels"), dict)
+                and any(bool(v) for v in forum_pulse["channels"].values())
             )
-            sym_pat = re.compile(rf"^ta_{re.escape(str(sym).upper())}_.*\.md$", re.IGNORECASE)
-            ta_matches = [a for a in collected_articles if sym_pat.match(str(a.get("filename") or ""))]
-            if ta_matches:
-                ta_matches.sort(key=lambda a: (str(a.get("mtime") or ""), str(a.get("filename") or "")), reverse=True)
-                prof["deep_report_file"] = str(ta_matches[0]["filename"])
+            if has_local_forum and build_sentiment_divergence is not None:
+                try:
+                    forum_sentiment = build_sentiment_divergence(
+                        forum_pulse,
+                        kol_digest=kol_digest,
+                        kol_scorecards=kol_scorecards,
+                        signals=all_signals,
+                    )
+                except Exception:
+                    forum_sentiment = {}
+            if (
+                not isinstance(forum_sentiment, dict)
+                or (
+                    not (forum_sentiment.get("channels_status") or [])
+                    and not (forum_sentiment.get("hot_discussions") or [])
+                )
+            ) and prior_forum_sentiment:
+                forum_sentiment = dict(prior_forum_sentiment)
 
-        calendar_events = filter_calendar_events(build_calendar_events(stock_profiles), days_ahead=120)
+            asset_source_matrix = {}
+            if build_asset_source_matrix is not None:
+                try:
+                    asset_source_matrix = build_asset_source_matrix(
+                        kol_scorecards=kol_scorecards,
+                        scorecard_cache_path=sc_cache_path,
+                    )
+                except Exception:
+                    asset_source_matrix = {}
+            if _source_matrix_richness(prior_source_matrix) > _source_matrix_richness(asset_source_matrix):
+                asset_source_matrix = dict(prior_source_matrix)
 
-        crypto_quotes: dict[str, Any] = {}
-        cq_cached = _read_json(data_dir / "crypto_quotes_cache.json", {}) or {}
-        if isinstance(cq_cached, dict) and isinstance(cq_cached.get("payload"), dict):
-            crypto_quotes = dict(cq_cached["payload"])
-            crypto_quotes["cached"] = True
-            crypto_quotes["stale"] = intl_stale
-
-        opml_file = root / "dist" / "macro_cockpit_feeds.opml"
-        if not opml_file.is_file():
+            # Optimistic generation CAS check before publish so concurrent Windows updates are never rolled back
             try:
-                build_opml_export(output_path=opml_file)
+                latest_pub_gen = int((load_published_generation(root) or {}).get("generation") or 0)
             except Exception:
-                pass
+                latest_pub_gen = 0
+            if latest_pub_gen > prior_gen:
+                if attempt < 4:
+                    continue
+                raise RuntimeError("cn_merge_publish_cas_exhausted")
 
-        cat_counts = _count_signal_categories(all_signals)
-        next_gen = _bump_producer_generation(root, data_dir)
+            cat_counts = _count_signal_categories(all_signals)
+            next_gen = prior_gen + 1
+            kol_verified_authors_count = sum(
+                1 for c in kol_scorecards if isinstance(c, dict) and int(c.get("verified_calls") or 0) >= 5
+            )
+            guru_articles_count = sum(
+                1 for a in collected_articles if isinstance(a, dict) and a.get("source") == "大佬分享"
+            )
+            periodic_reports_count = sum(
+                1 for a in collected_articles if isinstance(a, dict) and a.get("source") == "周月度深研"
+            )
+            forum_items_count = sum(
+                int(c.get("count") or 0)
+                for c in (forum_sentiment.get("channels_status") or [])
+                if isinstance(c, dict)
+            ) or len(forum_sentiment.get("hot_discussions") or [])
+            source_matrix_count = len((asset_source_matrix or {}).get("categories") or [])
+            cross_links_count = len((market_analysis or {}).get("cross_source_links") or [])
 
-        coverage = {
-            "signals_count": len(all_signals),
-            "signal_candidates_count": len(signal_candidates),
-            "signal_sources_count": int(kazike_stats.get("source_count") or 0),
-            "source_count": int(kazike_stats.get("source_count") or 0),
-            "category_breakdown": cat_counts,
-            "stock_profiles_count": len(stock_profiles),
-            "sec_filings_count": sum(len(p.get("sec_filings") or []) for p in stock_profiles.values()),
-            "articles_count": len(collected_articles),
-            "calendar_events_count": len(calendar_events),
-            "intl_relay_stale": bool(intl_stale),
-            "intl_fetched_at": str(relay.get("fetched_at") or ""),
-            "intl_signals_count": len(intl_signals),
-            "eqn_signals_count": len(eqn_signals),
-        }
+            coverage = {
+                "signals_count": len(all_signals),
+                "signal_candidates_count": len(signal_candidates),
+                "signal_sources_count": int(kazike_stats.get("source_count") or 0),
+                "source_count": int(kazike_stats.get("source_count") or 0),
+                "category_breakdown": cat_counts,
+                "stock_profiles_count": len(stock_profiles),
+                "sec_filings_count": sum(len(p.get("sec_filings") or []) for p in stock_profiles.values()),
+                "articles_count": len(collected_articles),
+                "calendar_events_count": len(calendar_events),
+                "intl_relay_stale": bool(intl_stale),
+                "intl_fetched_at": str(relay.get("fetched_at") or ""),
+                "intl_signals_count": len(intl_signals),
+                "eqn_signals_count": len(eqn_signals),
+                "kol_digest_count": len(kol_digest),
+                "kol_verified_authors_count": kol_verified_authors_count,
+                "guru_articles_count": guru_articles_count,
+                "cross_links_count": cross_links_count,
+                "forum_items_count": forum_items_count,
+                "source_matrix_count": source_matrix_count,
+                "periodic_reports_count": periodic_reports_count,
+            }
 
-        state: dict[str, Any] = {
-            "schema_version": 2,
-            "generation": next_gen,
-            "generated_at_bjt": datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00"),
-            "risk_gate": risk_gate,
-            "positions": positions,
-            "strategy_targets": strategy_targets,
-            "macro_fred": macro_fred,
-            "us_equities": us_equities,
-            "stock_profiles": stock_profiles,
-            "signals": all_signals,
-            "signal_candidates": signal_candidates,
-            "kazike_stats": kazike_stats,
-            "correlations": correlations,
-            "kol_digest": prior_kol,
-            "articles": collected_articles,
-            "push_channels": get_push_channels_status(),
-            "calendar_events": calendar_events,
-            "fx_snapshot": fx_snapshot,
-            "crypto_quotes": crypto_quotes,
-            "coverage": coverage,
-        }
+            state = _sanitize_state_value(
+                {
+                    "schema_version": 2,
+                    "generation": next_gen,
+                    "generated_at_bjt": datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00"),
+                    "risk_gate": risk_gate,
+                    "positions": positions,
+                    "strategy_targets": strategy_targets,
+                    "macro_fred": macro_fred,
+                    "us_equities": us_equities,
+                    "stock_profiles": stock_profiles,
+                    "signals": all_signals,
+                    "signal_candidates": signal_candidates,
+                    "kazike_stats": kazike_stats,
+                    "correlations": correlations,
+                    "kol_digest": kol_digest,
+                    "kol_scorecards": kol_scorecards,
+                    "market_analysis": market_analysis,
+                    "forum_sentiment": forum_sentiment,
+                    "asset_source_matrix": asset_source_matrix,
+                    "articles": collected_articles,
+                    "push_channels": get_push_channels_status(),
+                    "calendar_events": calendar_events,
+                    "fx_snapshot": fx_snapshot,
+                    "crypto_quotes": crypto_quotes,
+                    "coverage": coverage,
+                }
+            )
 
-        manifest = publish_generation(
-            root,
-            state,
-            articles_payload,
-            producer_id="cloud-split-aggregator",
-            generation=next_gen,
-        )
+            try:
+                manifest = publish_generation(
+                    root,
+                    state,
+                    articles_payload,
+                    producer_id="cloud-split-aggregator",
+                    generation=next_gen,
+                )
+                break
+            except ValueError as exc:
+                if str(exc) in ("stale_generation", "generation_conflict"):
+                    if attempt < 4:
+                        continue
+                    raise RuntimeError("cn_merge_publish_cas_exhausted") from exc
+                raise
+        if manifest is None:
+            raise RuntimeError("cn_merge_publish_cas_exhausted")
         return {
             "ok": True,
             "generation": manifest.get("generation"),
@@ -760,91 +1165,122 @@ def run_eqn_fast_sync(
 
     lock_path = data_dir / "cloud_merge.lock"
     with file_lock(lock_path):
-        try:
-            loaded = load_published_generation(root)
-        except FileNotFoundError:
-            cn_res = run_cn_merge_and_publish(root)
-            return {
-                **cn_res,
-                "changed": True,
-                "published": True,
-                "fallback_full_merge": True,
-                "eqn_signals_count": len(eqn_signals),
-                "new_count": int(meta.get("new_count") or len(eqn_signals)),
-            }
-
-        cur_gen = int(loaded.get("generation") or 0)
-        cur_manifest = loaded.get("manifest")
-        cur_state = dict(loaded.get("state") or {})
-
+        manifest: dict[str, Any] | None = None
+        all_signals: list[dict[str, Any]] = []
         articles_payload: list[dict[str, str]] = []
-        seen_fnames: set[str] = set()
-        gen_art_dir = data_dir / "generations" / f"gen_{cur_gen}" / "articles"
-        legacy_art_dir = root / "articles"
-        art_entries = (
-            (cur_manifest.get("articles") if isinstance(cur_manifest, dict) else None)
-            or cur_state.get("articles")
-            or []
-        )
-        for entry in art_entries:
-            if not isinstance(entry, dict):
-                continue
-            fname = safe_article_filename(entry.get("filename"))
-            if not fname or fname in seen_fnames:
-                continue
-            seen_fnames.add(fname)
-            art_file = gen_art_dir / fname
-            if not art_file.is_file():
-                art_file = legacy_art_dir / fname
-            if art_file.is_file():
+        for attempt in range(5):
+            try:
+                loaded = load_published_generation(root)
+            except FileNotFoundError:
+                cn_res = run_cn_merge_and_publish(root)
+                return {
+                    **cn_res,
+                    "changed": True,
+                    "published": True,
+                    "fallback_full_merge": True,
+                    "eqn_signals_count": len(eqn_signals),
+                    "new_count": int(meta.get("new_count") or len(eqn_signals)),
+                }
+
+            cur_gen = int(loaded.get("generation") or 0)
+            cur_manifest = loaded.get("manifest")
+            cur_state = dict(loaded.get("state") or {})
+
+            articles_payload = []
+            seen_fnames: set[str] = set()
+            gen_art_dir = data_dir / "generations" / f"gen_{cur_gen}" / "articles"
+            legacy_art_dir = root / "articles"
+            art_entries = (
+                (cur_manifest.get("articles") if isinstance(cur_manifest, dict) else None)
+                or cur_state.get("articles")
+                or []
+            )
+            for entry in art_entries:
+                if not isinstance(entry, dict):
+                    continue
+                fname = safe_article_filename(entry.get("filename"))
+                if not fname or fname in seen_fnames:
+                    continue
+                seen_fnames.add(fname)
+                art_file = gen_art_dir / fname
+                if not art_file.is_file():
+                    art_file = legacy_art_dir / fname
+                if art_file.is_file():
+                    try:
+                        articles_payload.append({"filename": fname, "content": art_file.read_text(encoding="utf-8")})
+                    except OSError:
+                        pass
+
+            existing_pool = list(cur_state.get("signal_candidates") or cur_state.get("signals") or [])
+            fresh_ids = {str(s["id"]) for s in eqn_signals if isinstance(s, dict) and s.get("id")}
+            kept_existing = [
+                s for s in existing_pool if not (isinstance(s, dict) and str(s.get("id") or "") in fresh_ids)
+            ]
+            merged_raw = _strip_private_items(
+                [_ensure_signal_topics(s) for s in (eqn_signals + kept_existing)]
+            )
+            all_signals, kazike_stats = process_financial_signals(
+                merged_raw,
+                receipts_path=data_dir / "scoring_receipts.json",
+            )
+            signal_candidates = kazike_stats.pop("candidates", [])
+
+            cat_counts = _count_signal_categories(all_signals)
+            next_gen = cur_gen + 1
+
+            if build_market_synthesis is not None and (cur_state.get("macro_fred") or cur_state.get("us_equities")):
                 try:
-                    articles_payload.append({"filename": fname, "content": art_file.read_text(encoding="utf-8")})
-                except OSError:
+                    cur_state["market_analysis"] = build_market_synthesis(
+                        macro_fred=cur_state.get("macro_fred"),
+                        us_equities=cur_state.get("us_equities"),
+                        correlations=cur_state.get("correlations"),
+                        signals=all_signals,
+                        kol_digest=cur_state.get("kol_digest"),
+                        kol_scorecards=cur_state.get("kol_scorecards"),
+                        articles=cur_state.get("articles"),
+                        risk_gate=cur_state.get("risk_gate"),
+                        stock_profiles=cur_state.get("stock_profiles"),
+                    )
+                except Exception:
                     pass
 
-        existing_pool = list(cur_state.get("signal_candidates") or cur_state.get("signals") or [])
-        fresh_ids = {str(s["id"]) for s in eqn_signals if isinstance(s, dict) and s.get("id")}
-        kept_existing = [
-            s for s in existing_pool if not (isinstance(s, dict) and str(s.get("id") or "") in fresh_ids)
-        ]
-        merged_raw = _strip_private_items(
-            [_ensure_signal_topics(s) for s in (eqn_signals + kept_existing)]
-        )
-        all_signals, kazike_stats = process_financial_signals(
-            merged_raw,
-            receipts_path=data_dir / "scoring_receipts.json",
-        )
-        signal_candidates = kazike_stats.pop("candidates", [])
+            coverage = dict(cur_state.get("coverage") or {})
+            coverage.update(
+                {
+                    "signals_count": len(all_signals),
+                    "signal_candidates_count": len(signal_candidates),
+                    "signal_sources_count": int(kazike_stats.get("source_count") or 0),
+                    "source_count": int(kazike_stats.get("source_count") or 0),
+                    "category_breakdown": cat_counts,
+                    "eqn_signals_count": len(eqn_signals),
+                    "cross_links_count": len(((cur_state.get("market_analysis") or {}) if isinstance(cur_state.get("market_analysis"), dict) else {}).get("cross_source_links") or []),
+                }
+            )
 
-        cat_counts = _count_signal_categories(all_signals)
-        next_gen = _bump_producer_generation(root, data_dir)
+            cur_state["generation"] = next_gen
+            cur_state["generated_at_bjt"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
+            cur_state["signals"] = all_signals
+            cur_state["signal_candidates"] = signal_candidates
+            cur_state["kazike_stats"] = kazike_stats
+            cur_state["coverage"] = coverage
 
-        coverage = dict(cur_state.get("coverage") or {})
-        coverage.update(
-            {
-                "signals_count": len(all_signals),
-                "signal_candidates_count": len(signal_candidates),
-                "signal_sources_count": int(kazike_stats.get("source_count") or 0),
-                "source_count": int(kazike_stats.get("source_count") or 0),
-                "category_breakdown": cat_counts,
-                "eqn_signals_count": len(eqn_signals),
-            }
-        )
-
-        cur_state["generation"] = next_gen
-        cur_state["generated_at_bjt"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S+08:00")
-        cur_state["signals"] = all_signals
-        cur_state["signal_candidates"] = signal_candidates
-        cur_state["kazike_stats"] = kazike_stats
-        cur_state["coverage"] = coverage
-
-        manifest = publish_generation(
-            root,
-            cur_state,
-            articles_payload,
-            producer_id="eqn-fast-sync",
-            generation=next_gen,
-        )
+            try:
+                manifest = publish_generation(
+                    root,
+                    cur_state,
+                    articles_payload,
+                    producer_id="eqn-fast-sync",
+                    generation=next_gen,
+                )
+                break
+            except ValueError as exc:
+                if str(exc) in ("stale_generation", "generation_conflict"):
+                    if attempt < 4:
+                        continue
+                    raise RuntimeError("eqn_fast_sync_cas_exhausted") from exc
+                raise
+        if manifest is None:
+            raise RuntimeError("eqn_fast_sync_cas_exhausted")
         return {
             "ok": True,
             "changed": True,

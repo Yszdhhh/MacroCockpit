@@ -16,7 +16,7 @@ from backend.curation import rank_curated_signals
 from backend.import_positions import PreviewExpiredError, PreviewValidationError, commit_import, preview_import
 from backend.journal_store import RevisionConflictError
 from backend.portfolio_store import IdempotencyConflictError, PortfolioStore
-from backend.public_snapshot import load_published_generation, project_public_state
+from backend.public_snapshot import has_private_article_text, load_published_generation, project_public_state
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_MCP_VERSIONS: frozenset[str] = frozenset({"2025-11-25", "2025-06-18", "2025-03-26"})
@@ -45,6 +45,7 @@ _PUBLIC_SIGNAL_FIELDS: tuple[str, ...] = (
     "time_bjt",
     "title",
     "summary",
+    "zh_brief",
     "why_it_matters",
     "tickers",
     "topics",
@@ -218,7 +219,10 @@ def sanitize_public_signal(item: dict[str, Any]) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     for k in _PUBLIC_SIGNAL_FIELDS:
         if k in item:
-            clean[k] = item[k]
+            val = item[k]
+            if k in ("title", "summary", "zh_brief", "why_it_matters") and isinstance(val, str) and has_private_article_text(val):
+                continue
+            clean[k] = val
     b_score = float(item.get("attention_score") or 0.0)
     base_i = int(round(b_score))
     q = max(0.0, min(1.0, (b_score - 55.0) / 25.0))
@@ -241,7 +245,7 @@ def sanitize_public_signal(item: dict[str, Any]) -> dict[str, Any]:
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "market_snapshot",
-        "description": "获取已发布的宏观指标、风控灯号、辅助仓位基准、美股盘面、汇率与加密行情公开快照（只读）。",
+        "description": "获取已发布的宏观指标、风控灯号、辅助仓位基准、美股盘面、汇率、加密行情、市场四维定调与高胜率KOL共识公开快照（只读）。",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -259,6 +263,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                             "crypto_quotes",
                             "correlations",
                             "coverage",
+                            "market_analysis",
+                            "kol_consensus",
+                            "forum_sentiment",
+                            "asset_source_matrix",
                         ],
                     },
                 },
@@ -436,7 +444,7 @@ DESKTOP_PRO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "sync_to_cloud",
-        "description": "脱敏裁剪公开快照与精选长文并通过 SYNC_PUBLISH 令牌推送至云端驾驶舱（仅桌面专业模式）。",
+        "description": "脱敏裁剪公开快照与精选长文并通过 SYNC_PUBLISH 令牌推送至云端驾驶舱；可选通过 PORTFOLIO_RW 增量同步私密持仓（仅桌面专业模式）。",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -444,6 +452,7 @@ DESKTOP_PRO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "refresh_state": {"type": "boolean"},
                 "max_articles": {"type": "integer", "minimum": 0, "maximum": 100},
                 "dry_run": {"type": "boolean"},
+                "sync_portfolio": {"type": "boolean"},
             },
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
@@ -677,8 +686,89 @@ class McpDispatcher:
         if name == "deep_research_run":
             return (self._tool_deep_research_run(args), None)
         if name == "sync_to_cloud":
-            return (self._tool_sync_to_cloud(args), None)
+            return (self._tool_sync_to_cloud(args, role=role), None)
         return ({}, -32601)
+
+    @staticmethod
+    def _summarize_market_analysis(raw_ma: Any) -> dict[str, Any] | None:
+        if not isinstance(raw_ma, dict) or not raw_ma:
+            return None
+        dims = [
+            {
+                "id": d.get("id"),
+                "name": d.get("name"),
+                "status": d.get("status"),
+                "tone": d.get("tone"),
+                "metric": d.get("metric"),
+                "implication": d.get("implication"),
+            }
+            for d in (raw_ma.get("market_dimensions") or [])
+            if isinstance(d, dict)
+        ]
+        links = [
+            {
+                "id": lk.get("id"),
+                "focus": lk.get("focus"),
+                "tickers": lk.get("tickers") or [],
+                "pattern": lk.get("pattern"),
+                "tone": lk.get("tone"),
+                "confidence": lk.get("confidence"),
+                "conclusion": lk.get("conclusion"),
+                "watch_trigger": lk.get("watch_trigger"),
+            }
+            for lk in (raw_ma.get("cross_source_links") or [])[:8]
+            if isinstance(lk, dict)
+        ]
+        return {
+            "as_of": raw_ma.get("as_of") or "",
+            "stance": raw_ma.get("stance") or "中性",
+            "headline_verdict": raw_ma.get("headline_verdict") or "",
+            "market_dimensions": dims,
+            "cross_source_links": links,
+            "divergence_alerts": list(raw_ma.get("divergence_alerts") or [])[:6],
+        }
+
+    @staticmethod
+    def _summarize_kol_consensus(pub: dict[str, Any]) -> dict[str, Any]:
+        scorecards = [c for c in (pub.get("kol_scorecards") or []) if isinstance(c, dict)]
+        digest = [d for d in (pub.get("kol_digest") or []) if isinstance(d, dict)]
+        verified = [c for c in scorecards if int(c.get("verified_calls") or 0) >= 5]
+        high_win = [
+            c for c in verified
+            if c.get("reliability_badge") == "高胜率" or (c.get("win_rate_20d") is not None and float(c["win_rate_20d"]) >= 60.0)
+        ]
+        top_pool = high_win or verified or scorecards
+        top_kols = [
+            {
+                "handle": c.get("handle"),
+                "name": c.get("name"),
+                "role_label": c.get("role_label"),
+                "reliability_score": c.get("reliability_score"),
+                "reliability_badge": c.get("reliability_badge"),
+                "verified_calls": c.get("verified_calls"),
+                "win_rate_5d": c.get("win_rate_5d"),
+                "win_rate_20d": c.get("win_rate_20d"),
+                "avg_edge_20d_pct": c.get("avg_edge_20d_pct"),
+                "best_tickers": c.get("best_tickers") or [],
+                "latest_stance": c.get("latest_stance"),
+                "latest_date": c.get("latest_date"),
+                "latest_headline": c.get("latest_headline"),
+            }
+            for c in top_pool[:8]
+        ]
+        stance_src = verified if verified else digest
+        stance_key = "latest_stance" if verified else "stance"
+        bull_n = sum(1 for x in stance_src if x.get(stance_key) == "偏多")
+        bear_n = sum(1 for x in stance_src if x.get(stance_key) == "偏空")
+        neu_n = max(0, len(stance_src) - bull_n - bear_n)
+        return {
+            "total_scorecards": len(scorecards),
+            "verified_authors_count": len(verified),
+            "high_win_authors_count": len(high_win),
+            "digest_count": len(digest),
+            "stance_breakdown": {"偏多": bull_n, "偏空": bear_n, "中性": neu_n},
+            "top_kols": top_kols,
+        }
 
     def _tool_market_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
         raw_state, gen = self._load_public_state()
@@ -694,6 +784,10 @@ class McpDispatcher:
             "crypto_quotes",
             "correlations",
             "coverage",
+            "market_analysis",
+            "kol_consensus",
+            "forum_sentiment",
+            "asset_source_matrix",
         ]
         macro_group = str(args.get("macro_group") or "all").strip()
         out: dict[str, Any] = {
@@ -702,12 +796,20 @@ class McpDispatcher:
             "generated_at_bjt": pub.get("generated_at_bjt", ""),
         }
         for key in sections:
+            if key == "market_analysis":
+                out[key] = self._summarize_market_analysis(pub.get("market_analysis"))
+                continue
+            if key == "kol_consensus":
+                out[key] = self._summarize_kol_consensus(pub)
+                continue
             val = pub.get(key)
             if key == "macro_fred" and isinstance(val, list) and macro_group != "all":
                 val = [m for m in val if isinstance(m, dict) and m.get("group") == macro_group]
             out[key] = val
         rg = pub.get("risk_gate") or {}
-        summary_txt = f"快照世代 gen={gen} · {rg.get('label', '风险门控')} · 宏观 {len(pub.get('macro_fred') or [])} 项"
+        ma_stance = (pub.get("market_analysis") or {}).get("stance") if isinstance(pub.get("market_analysis"), dict) else ""
+        ma_suffix = f" · 定调 {ma_stance}" if ma_stance else ""
+        summary_txt = f"快照世代 gen={gen} · {rg.get('label', '风险门控')}{ma_suffix} · 宏观 {len(pub.get('macro_fred') or [])} 项"
         return _tool_ok(summary_txt, out)
 
     def _tool_signal_search(self, args: dict[str, Any], *, role: str, actor_id: str) -> dict[str, Any]:
@@ -1145,17 +1247,21 @@ class McpDispatcher:
         stance = verdict.get("stance") or "研判完成"
         return _tool_ok(f"{sym} 多智能体深研完成（模式={mode} · 裁决={stance}）", {"ok": True, **(report if isinstance(report, dict) else {"report": report})})
 
-    def _tool_sync_to_cloud(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _tool_sync_to_cloud(self, args: dict[str, Any], *, role: str = "PORTFOLIO_RW") -> dict[str, Any]:
         refresh_state = bool(args.get("refresh_state", False))
         max_articles = int(args.get("max_articles") if args.get("max_articles") is not None else 30)
         dry_run = bool(args.get("dry_run", False))
+        sync_portfolio = bool(args.get("sync_portfolio", False))
         state_path = self.base_dir / "data" / "cockpit_state.json"
+
+        if sync_portfolio and role != "PORTFOLIO_RW":
+            return _tool_err("同步私密持仓需要 PORTFOLIO_RW 权限", code=403)
 
         try:
             from backend.mobile_push import load_push_env
-            from backend.vps_sync import collect_payload, publish_via_http
+            from backend.vps_sync import collect_payload, publish_via_http, sync_portfolio_via_http
 
-            load_push_env(include_sync_token=True)
+            load_push_env(include_sync_token=True, include_rw_token=sync_portfolio)
             if refresh_state:
                 from backend.signal_aggregator import generate_cockpit_state
 
@@ -1171,9 +1277,20 @@ class McpDispatcher:
             ok, info = publish_via_http(payload)
             if not ok:
                 return _tool_err(f"云端同步失败: {info.get('reason', 'unknown')}", code=502, detail={"info": info, **stats})
+
+            pf_info: dict[str, Any] = {}
+            if sync_portfolio:
+                pf_ok, pf_info = sync_portfolio_via_http(self.store.db_path)
+                if not pf_ok:
+                    return _tool_err(
+                        f"公开快照已同步，但私密持仓同步失败: {pf_info.get('reason', 'unknown')}",
+                        code=502,
+                        detail={"info": info, "portfolio": pf_info, **stats},
+                    )
             return _tool_ok(
-                f"已同步至云端驾驶舱：{stats.get('articles_count', 0)} 篇长文",
-                {"ok": True, "dry_run": False, "info": info, **stats},
+                f"已同步至云端驾驶舱：{stats.get('articles_count', 0)} 篇长文"
+                + (f"（持仓：{pf_info.get('portfolio_action', 'ok')}）" if sync_portfolio else ""),
+                {"ok": True, "dry_run": False, "info": info, "portfolio": pf_info, **stats},
             )
         except Exception as exc:
             return _tool_err(f"云端同步异常: {type(exc).__name__}: {exc}", code=500)

@@ -19,6 +19,8 @@ data/current_generation.json
 data/generations/
 data/intl_relay_bundle.json
 data/cn_bundle.json
+data/portfolio_sync_state.json
+data/*sync_state*.json
 
 # Built artifacts & local backups
 dist/macro_cockpit_offline.html
