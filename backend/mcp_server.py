@@ -9,7 +9,7 @@ import re
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend.guardrails import has_private_article_text
 from backend.runtime import reject_json_constant, resolve_data_dir
@@ -571,11 +571,14 @@ class McpDispatcher:
         base_dir: Path | str,
         public_url: str = "https://news.shuashuabao.xyz",
         desktop_pro: bool = False,
+        include_desktop_tools: bool = False,
+        desktop_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
     ) -> None:
         self.store = store
         self.base_dir = Path(base_dir)
         self.public_url = str(public_url or "https://news.shuashuabao.xyz").rstrip("/")
-        self.desktop_pro = bool(desktop_pro)
+        self.desktop_pro = bool(desktop_pro or include_desktop_tools)
+        self.desktop_handlers = desktop_handlers or {}
 
     def _load_public_state(self) -> tuple[dict[str, Any] | None, int]:
         try:
@@ -681,12 +684,13 @@ class McpDispatcher:
             return (self._tool_import_preview(args, actor_id=actor_id), None)
         if name == "workspace_commit":
             return (self._tool_workspace_commit(args, role=role, actor_id=actor_id), None)
-        if name == "desktop_status":
-            return (self._tool_desktop_status(args), None)
-        if name == "openbb_query":
-            return (self._tool_openbb_query(args), None)
-        if name == "deep_research_run":
-            return (self._tool_deep_research_run(args), None)
+        if name == "deep_research_run" and str(args.get("mode")).strip().lower() == "demolab":
+            return (self._tool_demolab_research(args), None)
+        if name in ("desktop_status", "openbb_query", "deep_research_run"):
+            handler = self.desktop_handlers.get(name)
+            if handler is None:
+                return (_tool_err(f"桌面工具 {name} 未连接，请通过桌面专业端调用", code=501), None)
+            return (handler(args), None)
         if name == "sync_to_cloud":
             return (self._tool_sync_to_cloud(args, role=role), None)
         return ({}, -32601)
@@ -1192,96 +1196,38 @@ class McpDispatcher:
             {"ok": True, **res},
         )
 
-    def _tool_desktop_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        include_agy = bool(args.get("include_agy", True))
-        out: dict[str, Any] = {"ok": True, "desktop_pro": True}
-        try:
-            from desktop.openbb_bridge import probe_openbb_status
-
-            out["openbb"] = probe_openbb_status()
-        except Exception as exc:
-            out["openbb"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-
-        if include_agy:
-            try:
-                from desktop.acp_bridge import probe_agy
-
-                out["agy"] = probe_agy()
-            except Exception as exc:
-                out["agy"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        return _tool_ok("桌面专业端状态探测完成", out)
-
-    def _tool_openbb_query(self, args: dict[str, Any]) -> dict[str, Any]:
-        dataset = str(args["dataset"]).strip()
+    def _tool_demolab_research(self, args: dict[str, Any]) -> dict[str, Any]:
         sym = str(args.get("symbol") or "").strip().upper()
-        allow_sdk = bool(args.get("allow_sdk_import", False))
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt and not sym:
+            return _tool_err("demolab 模式至少需要提供 prompt 或 symbol", code=400)
         try:
-            from desktop.openbb_bridge import query_openbb
+            from backend.deep_research_runner import run_demolab_deep_research
 
-            res = query_openbb(dataset, symbol=sym, allow_sdk_import=allow_sdk)
-        except Exception as exc:
-            return _tool_err(f"OpenBB 查询失败: {type(exc).__name__}: {exc}", code=500)
-        if isinstance(res, dict) and res.get("ok") is False:
-            return _tool_err(str(res.get("error") or "OpenBB 查询返回错误"), code=400, detail=res)
-        payload = res if isinstance(res, dict) else {"data": res}
-        return _tool_ok(f"OpenBB {dataset} 查询成功 ({sym or 'macro'})", {"ok": True, "dataset": dataset, "symbol": sym, **payload})
-
-    def _tool_deep_research_run(self, args: dict[str, Any]) -> dict[str, Any]:
-        mode = str(args.get("mode") or "fast").strip().lower()
-        sym = str(args.get("symbol") or "").strip().upper()
-        if mode == "demolab":
-            prompt = str(args.get("prompt") or "").strip()
-            if not prompt and not sym:
-                return _tool_err("demolab 模式至少需要提供 prompt 或 symbol", code=400)
-            try:
-                from backend.deep_research_runner import run_demolab_deep_research
-
-                state_file = resolve_data_dir(self.base_dir) / "cockpit_state.json"
-                state_snap = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {}
-                res = run_demolab_deep_research(
-                    prompt,
-                    execute=True,
-                    state=state_snap,
-                    articles_dir=self.base_dir / "articles",
-                    ingest=True,
-                    title=str(args.get("title") or ""),
-                    tickers=[sym] if sym else None,
-                    related_period=str(args.get("related_period") or ""),
-                    symbol=sym,
-                )
-            except ValueError as exc:
-                return _tool_err(str(exc), code=400)
-            except Exception as exc:
-                return _tool_err(f"DemoLab 并行深研运行失败: {type(exc).__name__}: {exc}", code=500)
-            if res.get("status") != "completed":
-                return _tool_err(str(res.get("error") or res.get("message") or "DemoLab 并行深研未完成"), code=500, detail=res)
-            art = res.get("ingested_article") or {}
-            return _tool_ok(
-                f"DemoLab 并行深研完成（{res.get('tracks_succeeded', 0)}/{res.get('tracks_total', 3)} 路收回 · 已入库 {art.get('filename', '')}）",
-                {"ok": True, "mode": "demolab", **{k: v for k, v in res.items() if k != "markdown"}},
+            state_file = resolve_data_dir(self.base_dir) / "cockpit_state.json"
+            state_snap = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {}
+            res = run_demolab_deep_research(
+                prompt,
+                execute=True,
+                state=state_snap,
+                articles_dir=self.base_dir / "articles",
+                ingest=True,
+                title=str(args.get("title") or ""),
+                tickers=[sym] if sym else None,
+                related_period=str(args.get("related_period") or ""),
+                symbol=sym,
             )
-
-        if not sym:
-            return _tool_err("fast/llm 模式必须提供 symbol", code=400)
-        market = str(args.get("market") or "auto").strip().lower()
-        inc_pf = args.get("include_portfolio", False)
-        sync_web = bool(args.get("sync_to_web", False))
-        try:
-            from desktop.multi_agent_debate import run_multi_agent_debate
-
-            report = run_multi_agent_debate(
-                sym,
-                market=market,
-                mode=mode,
-                base_dir=self.base_dir,
-                include_portfolio=inc_pf,
-                sync_to_web=sync_web,
-            )
+        except ValueError as exc:
+            return _tool_err(str(exc), code=400)
         except Exception as exc:
-            return _tool_err(f"多智能体深研运行失败: {type(exc).__name__}: {exc}", code=500)
-        verdict = report.get("trader_verdict") or {} if isinstance(report, dict) else {}
-        stance = verdict.get("stance") or "研判完成"
-        return _tool_ok(f"{sym} 多智能体深研完成（模式={mode} · 裁决={stance}）", {"ok": True, **(report if isinstance(report, dict) else {"report": report})})
+            return _tool_err(f"DemoLab 并行深研运行失败: {type(exc).__name__}: {exc}", code=500)
+        if res.get("status") != "completed":
+            return _tool_err(str(res.get("error") or res.get("message") or "DemoLab 并行深研未完成"), code=500, detail=res)
+        art = res.get("ingested_article") or {}
+        return _tool_ok(
+            f"DemoLab 并行深研完成（{res.get('tracks_succeeded', 0)}/{res.get('tracks_total', 3)} 路收回 · 已入库 {art.get('filename', '')}）",
+            {"ok": True, "mode": "demolab", **{k: v for k, v in res.items() if k != "markdown"}},
+        )
 
     def _tool_sync_to_cloud(self, args: dict[str, Any], *, role: str = "PORTFOLIO_RW") -> dict[str, Any]:
         refresh_state = bool(args.get("refresh_state", False))
@@ -1402,9 +1348,18 @@ def create_mcp_dispatcher(
     base_dir: Path | str,
     public_url: str = "https://news.shuashuabao.xyz",
     desktop_pro: bool = False,
+    include_desktop_tools: bool = False,
+    desktop_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> McpDispatcher:
     """Create a configured McpDispatcher instance."""
-    return McpDispatcher(store=store, base_dir=base_dir, public_url=public_url, desktop_pro=desktop_pro)
+    return McpDispatcher(
+        store=store,
+        base_dir=base_dir,
+        public_url=public_url,
+        desktop_pro=desktop_pro,
+        include_desktop_tools=include_desktop_tools,
+        desktop_handlers=desktop_handlers,
+    )
 
 
 def _resolve_bearer_auth(
@@ -1446,6 +1401,8 @@ def handle_mcp_http_request(
     rw_token: str = "",
     sync_token: str = "",
     desktop_pro: bool = False,
+    include_desktop_tools: bool = False,
+    desktop_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
     """Handle one HTTP POST /mcp request cleanly, enforcing Bearer auth, Origin, and protocol headers."""
     json_hdrs = {
@@ -1515,6 +1472,8 @@ def handle_mcp_http_request(
         base_dir=base_dir,
         public_url=public_url,
         desktop_pro=desktop_pro,
+        include_desktop_tools=include_desktop_tools,
+        desktop_handlers=desktop_handlers,
     )
     status, resp_obj = dispatcher.dispatch_jsonrpc(payload, role=role, actor_id=actor_id)
     if status == 202 or resp_obj is None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import io
 import json
 import os
@@ -92,7 +93,11 @@ def run_stdio_loop(
 
         db_path = resolve_data_dir(Path(base_dir)) / "user_journal.db"
         store = PortfolioStore(db_path)
-        dispatcher = McpDispatcher(store=store, base_dir=Path(base_dir), desktop_pro=True)
+        extensions = importlib.import_module("desktop.mcp_extensions")
+        dispatcher = McpDispatcher(
+            store=store, base_dir=Path(base_dir), desktop_pro=True,
+            desktop_handlers=extensions.build_desktop_mcp_handlers(Path(base_dir)),
+        )
         local_role = "PORTFOLIO_RW"
         local_actor = "stdio:desktop_pro"
         _log(stderr, f"started in --desktop-pro PORTFOLIO_RW mode (12 tools, base_dir={Path(base_dir)})")
@@ -197,7 +202,7 @@ def main() -> None:
         help="Serve read-only tools directly from local published snapshot without touching or creating any ledger DB",
     )
     ap.add_argument(
-        "--desktop-pro",
+        "--desktop-pro", "--include-desktop-tools",
         action="store_true",
         help="Enable local Desktop Pro PORTFOLIO_RW mode (12 tools including OpenBB, deep research, and cloud sync)",
     )

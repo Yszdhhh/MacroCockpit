@@ -21,6 +21,13 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.article_store import (
+    KOL_ARTICLES_DIR,
+    STATE_OUTPUT_PATH,
+    get_allowed_article_dirs,
+    parse_markdown_article,
+    sort_and_balance_articles as _sort_and_balance_articles,
+)
 from backend.guardrails import (
     has_private_article_content,
     safe_article_filename,
@@ -40,96 +47,52 @@ from backend.runtime import (
     resolve_kol_dir,
     resolve_user_home,
 )
-try:
-    from backend.correlation_engine import compute_cross_asset_correlations, generate_notion_viz_html
-except ImportError:
-    compute_cross_asset_correlations = None
-    generate_notion_viz_html = None
+from backend.correlation_engine import compute_cross_asset_correlations, generate_notion_viz_html
 from backend.calendar_events import build_calendar_events, filter_calendar_events
 from backend.fred_and_market import (
     QUANT_LATEST_PATH,
     build_macro_fred,
     fetch_us_equities,
 )
-from backend.kazike_engine import lexical_similarity, normalize_url, process_financial_signals
-try:
-    from backend.event_feed import update_event_feed
-except ImportError:
-    update_event_feed = None  # type: ignore[assignment]
+from backend.kazike_engine import process_financial_signals
+from backend.event_feed import update_event_feed
 from backend.mobile_push import get_push_channels_status
-import backend.rss_sources as _rss_mod
+from backend.signal_text import (
+    classify_kol_topic,
+    clean_business_text,
+    dedup_summary,
+    eqn_why_it_matters,
+    extract_subtopics,
+    extract_tickers,
+    infer_signal_direction,
+)
 from backend.rss_sources import (
-    _dedup_summary,
     build_opml_export,
     collect_curated_articles,
     collect_curated_rss_signals,
-    extract_tickers as _rss_extract_tickers,
 )
 from backend.sec_edgar import collect_recent_sec_signals, fetch_sec_filings_map
 from backend.stock_research import build_quick_thesis, build_stock_profiles
+from backend.guru_sources import collect_guru_articles, collect_guru_signals
+from backend.kol_intel_engine import (
+    DEFAULT_SCORECARD_CACHE_PATH,
+    build_kol_actionable_signals,
+    build_kol_digest,
+    build_kol_scorecards,
+    select_quality_kol_articles,
+)
+from backend.market_synthesis import build_market_synthesis
+from backend.market_quotes import fetch_crypto_quotes, fetch_fx_snapshot, fetch_hybrid_perp_quotes
+from backend.forum_sentiment import (
+    build_sentiment_divergence,
+    collect_forum_pulse,
+    collect_public_discussion_trends,
+    trim_forum_sentiment,
+)
+from backend.source_matrix import build_asset_source_matrix
+from backend.periodic_report import generate_periodic_decision_report
+from backend.signal_advisor import update_signal_advisor
 
-try:
-    from backend.guru_sources import collect_guru_articles, collect_guru_signals
-except ImportError:
-    collect_guru_articles = None  # type: ignore[assignment]
-    collect_guru_signals = None  # type: ignore[assignment]
-
-try:
-    from backend.kol_intel_engine import (
-        DEFAULT_SCORECARD_CACHE_PATH,
-        build_kol_actionable_signals,
-        build_kol_digest,
-        build_kol_scorecards,
-        select_quality_kol_articles,
-    )
-except ImportError:
-    DEFAULT_SCORECARD_CACHE_PATH = DATA_DIR / "kol_scorecard_cache.json"  # type: ignore[assignment]
-    build_kol_actionable_signals = None  # type: ignore[assignment]
-    build_kol_digest = None  # type: ignore[assignment]
-    build_kol_scorecards = None  # type: ignore[assignment]
-    select_quality_kol_articles = None  # type: ignore[assignment]
-
-try:
-    from backend.market_synthesis import build_market_synthesis
-except ImportError:
-    build_market_synthesis = None  # type: ignore[assignment]
-
-try:
-    from backend.market_quotes import fetch_crypto_quotes, fetch_fx_snapshot, fetch_hybrid_perp_quotes
-except ImportError:
-    fetch_crypto_quotes = None  # type: ignore[assignment]
-    fetch_fx_snapshot = None  # type: ignore[assignment]
-    fetch_hybrid_perp_quotes = None  # type: ignore[assignment]
-
-try:
-    from backend.forum_sentiment import (
-        build_sentiment_divergence,
-        collect_forum_pulse,
-        collect_public_discussion_trends,
-        trim_forum_sentiment,
-    )
-except ImportError:
-    build_sentiment_divergence = None  # type: ignore[assignment]
-    collect_forum_pulse = None  # type: ignore[assignment]
-    collect_public_discussion_trends = None  # type: ignore[assignment]
-    trim_forum_sentiment = None  # type: ignore[assignment]
-
-try:
-    from backend.source_matrix import build_asset_source_matrix
-except ImportError:
-    build_asset_source_matrix = None  # type: ignore[assignment]
-
-try:
-    from backend.periodic_report import generate_periodic_decision_report
-except ImportError:
-    generate_periodic_decision_report = None  # type: ignore[assignment]
-
-try:
-    from backend.signal_advisor import update_signal_advisor
-except ImportError:
-    update_signal_advisor = None  # type: ignore[assignment]
-
-STATE_OUTPUT_PATH = DATA_DIR / "cockpit_state.json"
 AIHOT_CACHE_PATH = DATA_DIR / "aihot_cache.json"
 
 _USER_HOME = resolve_user_home()
@@ -143,12 +106,6 @@ EQN_CANDIDATE_PATHS = (
     _HERMES_HOME / "scripts" / "news" / "outputs" / "eqn" / "latest_events.json",
 )
 KOL_ROOT = resolve_kol_dir(_HERMES_HOME)
-KOL_ARTICLES_DIR = KOL_ROOT / "articles"
-OBSIDIAN_INBOX_DIR = Path(
-    os.environ.get("MACROCOCKPIT_NOTES_DIR")
-    or (_USER_HOME / "Documents" / "Obsidian Vault" / "01_Inbox")
-)
-
 AIHOT_ACTOR_ID = (os.environ.get("AIHOT_ACTOR_ID") or "macrocockpit-agent-v2").strip()
 AIHOT_UA = f"aihot-skill/2.0.0 (+https://aihot.news/aihot-skill/) aihot-actor/{AIHOT_ACTOR_ID}"
 AIHOT_LATEST_URL = "https://aihot.news/api/v1/agent/latest?limit=20"
@@ -164,11 +121,6 @@ POSITION_SPEC: tuple[tuple[str, str, str], ...] = (
 
 def _scrub_forbidden_text(text: str, *, preserve_newlines: bool = True) -> str:
     return scrub_quant_thesis(text, preserve_newlines=preserve_newlines)
-
-
-def _clean_business_text(text: str) -> str:
-    """Replace internal quant jargon with plain Chinese business wording."""
-    return _scrub_forbidden_text(text, preserve_newlines=False)
 
 
 def _sanitize_state_value(val: Any, key_name: str = "") -> Any:
@@ -195,33 +147,6 @@ _ASHARE_MATCH_RE = re.compile(
 )
 
 
-def _fallback_extract_subtopics(text: str, category: str) -> list[str]:
-    low = str(text or "").lower()
-    topics: list[str] = []
-    rules = (
-        (r"deepseek|深度求索", "DeepSeek"),
-        (r"\bopenai\b|chatgpt|gpt-", "OpenAI"),
-        (r"anthropic|claude", "Anthropic"),
-        (r"nvda|nvidia|英伟达|gpu|算力|芯片|半导体|台积电|tsm|amd|avgo", "算力芯片"),
-        (r"具身智能|宇树|机器人|optimus", "具身智能"),
-        (r"自动驾驶|智驾|fsd|比亚迪", "自动驾驶"),
-        (r"美联储|fed|fomc|powell|鲍威尔|利率|加息|降息", "美联储"),
-        (r"cpi|pce|通胀|非农|payroll", "CPI·通胀"),
-        (r"黄金|gold|原油|wti|brent|大宗", "黄金·大宗"),
-        (r"科创板|中芯|寒武纪|半导体|国产算力", "科创·半导体"),
-        (r"港股|恒指|恒生科技|腾讯|阿里", "港股科技"),
-        (r"财报|业绩|10-k|10-q|营收|利润", "财报业绩"),
-        (r"etf|sec|监管|牌照|稳定币", "ETF·监管"),
-    )
-    for pat, label in rules:
-        if re.search(pat, low, re.IGNORECASE) and label not in topics:
-            topics.append(label)
-    if not topics:
-        defaults = {"ashare": "A股·港股", "ai": "AI前沿", "equities": "美股聚焦", "crypto": "加密动态", "macro": "宏观周期"}
-        topics.append(defaults.get(category, "市场热点"))
-    return topics[:4]
-
-
 def _ensure_signal_topics(sig: dict[str, Any]) -> dict[str, Any]:
     out = dict(sig)
     cat = str(out.get("category") or "macro").lower()
@@ -234,16 +159,8 @@ def _ensure_signal_topics(sig: dict[str, Any]) -> dict[str, Any]:
     if existing_topics:
         out["topics"] = existing_topics[:5]
     else:
-        fn = getattr(_rss_mod, "extract_subtopics", None)
-        if callable(fn):
-            out["topics"] = list(fn(txt, cat))[:5]
-        else:
-            out["topics"] = _fallback_extract_subtopics(txt, cat)
+        out["topics"] = extract_subtopics(txt, cat)
     return out
-
-
-def _extract_tickers(text: str) -> list[str]:
-    return _rss_extract_tickers(text)
 
 
 def _evaluate_cloud_risk_inputs(
@@ -311,12 +228,12 @@ def _build_positions_and_risk_gate(
     if light not in ("GREEN", "YELLOW", "RED"):
         light = "YELLOW"
     cap = float(d_risk.get("long_risk_cap") if d_risk.get("long_risk_cap") is not None else 1.0)
-    label = _clean_business_text(str(d_risk.get("label") or "黄灯 · 谨慎控险"))
+    label = clean_business_text(str(d_risk.get("label") or "黄灯 · 谨慎控险"))
 
     raw_reasons = [str(r) for r in (d_risk.get("reasons") or []) if r]
     if d_risk.get("flush_relief_note"):
         raw_reasons.append(str(d_risk["flush_relief_note"]))
-    reasons = [_clean_business_text(r) for r in raw_reasons if r]
+    reasons = [clean_business_text(r) for r in raw_reasons if r]
     if not reasons:
         reasons = ["按均线趋势与宏观风险门控综合生成"]
 
@@ -352,7 +269,7 @@ def _build_positions_and_risk_gate(
             note = f"{action_txt}；{reason_txt}"
         else:
             note = action_txt or reason_txt or state_str
-        note = _clean_business_text(note)
+        note = clean_business_text(note)
 
         positions.append(
             {
@@ -397,21 +314,6 @@ def _build_positions_and_risk_gate(
     return (risk_gate, positions)
 
 
-def _eqn_why_it_matters(ev: dict[str, Any], category: str, direction: str) -> str:
-    txt = f"{ev.get('headline', '')} {ev.get('overview_zh', '')}".lower()
-    if any(k in txt for k in ("fed", "美联储", "加息", "降息", "利率", "treasury", "pce", "通胀")):
-        return "直接影响美联储利率路径与无风险收益率定价，牵动美股估值及加密流动性预期。"
-    if any(k in txt for k in ("nvda", "英伟达", "sk海力士", "芯片", "openai", "甲骨文", "orcl")):
-        return "涉及 AI 算力供应链或资本开支置信度，直接左右科技权重与芯片板块风险偏好。"
-    if category == "crypto":
-        return "对加密现货情绪及场外风险溢价有直接冲击，建议延续配对对冲、忌盲目追涨杀跌。"
-    if direction == "bearish":
-        return "高优先级风险事件，短期压制市场风险偏好，建议维持审慎仓位。"
-    if direction == "bullish":
-        return "有助于修复局部风险偏好，可继续跟踪后续成交量与均线确认。"
-    return "重要市场结构信号，建议结合盘面波动与风险灯号观察后续传导。"
-
-
 def _collect_eqn_signals(decision_brief: dict[str, Any]) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     seen_nos: set[Any] = set()
@@ -433,18 +335,18 @@ def _collect_eqn_signals(decision_brief: dict[str, Any]) -> list[dict[str, Any]]
 
     signals: list[dict[str, Any]] = []
     for ev in events[:24]:
-        headline = _clean_business_text(str(ev.get("headline") or "").lstrip("* "))
+        headline = clean_business_text(str(ev.get("headline") or "").lstrip("* "))
         if not headline:
             continue
-        overview = _clean_business_text(str(ev.get("overview_zh") or ""))
-        zh_raw = _clean_business_text(str(ev.get("zh") or "").lstrip("* "))
+        overview = clean_business_text(str(ev.get("overview_zh") or ""))
+        zh_raw = clean_business_text(str(ev.get("zh") or "").lstrip("* "))
         raw_sum = overview or ("" if zh_raw == headline else zh_raw)
         if len(raw_sum) > 280:
             raw_sum = raw_sum[:277].rstrip() + "..."
-        summary = _dedup_summary(headline, raw_sum)
+        summary = dedup_summary(headline, raw_sum)
 
         domain = str(ev.get("domain") or "").lower()
-        tickers = _extract_tickers(f"{headline} {ev.get('zh', '')} {ev.get('en', '')}")
+        tickers = extract_tickers(f"{headline} {ev.get('zh', '')} {ev.get('en', '')}")
         if "crypto" in domain or any(t in ("BTC", "ETH") for t in tickers):
             category = "crypto"
         elif domain == "tradfi" and any(t in ("NVDA", "QQQ", "SPY", "ORCL", "CRWD", "ZS", "SKHY", "AMD", "TSM") for t in tickers):
@@ -471,7 +373,9 @@ def _collect_eqn_signals(decision_brief: dict[str, Any]) -> list[dict[str, Any]]
                 "time_bjt": _parse_iso_to_bjt_str(ev.get("time")),
                 "title": headline,
                 "summary": summary,
-                "why_it_matters": _eqn_why_it_matters(ev, category, direction),
+                "why_it_matters": eqn_why_it_matters(
+                    f"{ev.get('headline', '')} {ev.get('overview_zh', '')}", category, direction,
+                ),
                 "tickers": tickers,
                 "url": str(ev.get("url") or ev.get("source_url") or ""),
             }
@@ -489,16 +393,6 @@ def _normalize_aihot_time(mmdd_hhmm: str) -> str:
     if mm == 12 and now_bjt.month == 1:
         yr -= 1
     return f"{yr:04d}-{mm:02d}-{dd:02d} {hhmm}"
-
-
-def _infer_ai_direction(text: str) -> str:
-    bear_hits = len(re.findall(r"回落|下跌|暴跌|征税|限制|阻止|质疑|争议|调查|禁令|封杀|亏损", text))
-    bull_hits = len(re.findall(r"收涨|突破|开源|发布|推出|上线|融资|增长|翻倍|加速|证明", text))
-    if bear_hits > bull_hits:
-        return "bearish"
-    if bull_hits > bear_hits:
-        return "bullish"
-    return "neutral"
 
 
 def _strip_prompt_safety_wrappers(md_text: str) -> str:
@@ -529,7 +423,7 @@ def _parse_aihot_latest_md(md_text: str) -> list[dict[str, Any]]:
         head_m = re.match(r"^\d+\.\s+\[([^\]]+)\]\((https?://[^)]+)\)", blk)
         if not head_m:
             continue
-        title = _clean_business_text(head_m.group(1))
+        title = clean_business_text(head_m.group(1))
         aihot_url = head_m.group(2).strip()
         item_id = aihot_url.rstrip("/").split("/")[-1]
 
@@ -542,9 +436,9 @@ def _parse_aihot_latest_md(md_text: str) -> list[dict[str, Any]]:
             if "发布于" in s and not meta_line:
                 meta_line = s
             elif s.startswith("摘要："):
-                summary = _clean_business_text(s[3:])
+                summary = clean_business_text(s[3:])
             elif s.startswith("推荐理由："):
-                reason = _clean_business_text(s[5:])
+                reason = clean_business_text(s[5:])
             elif s.startswith("原文："):
                 cand = s[3:].strip()
                 if cand.startswith(("http://", "https://")):
@@ -560,13 +454,13 @@ def _parse_aihot_latest_md(md_text: str) -> list[dict[str, Any]]:
                 "id": f"aihot-{item_id}",
                 "source": "AIHOT精选",
                 "category": "ai",
-                "direction": _infer_ai_direction(combined),
+                "direction": infer_signal_direction(combined, aihot=True),
                 "importance": imp,
                 "time_bjt": time_bjt,
                 "title": title,
                 "summary": summary or title,
                 "why_it_matters": reason or "前沿 AI 模型与工程生态动态，影响科技股与应用层估值预期。",
-                "tickers": _extract_tickers(combined),
+                "tickers": extract_tickers(combined),
                 "url": orig_url or aihot_url,
                 "_aihot_url": aihot_url,
             }
@@ -586,7 +480,7 @@ def _parse_aihot_hot_md(md_text: str) -> list[dict[str, Any]]:
         if not head_m:
             continue
         rank = int(head_m.group(1))
-        title = _clean_business_text(head_m.group(2))
+        title = clean_business_text(head_m.group(2))
         aihot_url = head_m.group(3).strip()
         item_id = aihot_url.rstrip("/").split("/")[-1]
 
@@ -595,7 +489,7 @@ def _parse_aihot_hot_md(md_text: str) -> list[dict[str, Any]]:
         for ln in blk.splitlines()[1:]:
             s = ln.strip()
             if s.startswith("信源："):
-                sources_line = _clean_business_text(s)
+                sources_line = clean_business_text(s)
             elif s.startswith("来龙去脉："):
                 cand = s[5:].strip()
                 if cand.startswith(("http://", "https://")):
@@ -608,13 +502,13 @@ def _parse_aihot_hot_md(md_text: str) -> list[dict[str, Any]]:
                 "id": f"aihot-hot-{item_id}",
                 "source": "AIHOT精选",
                 "category": "ai",
-                "direction": _infer_ai_direction(title),
+                "direction": infer_signal_direction(title, aihot=True),
                 "importance": "高" if rank <= 6 else "中",
                 "time_bjt": time_bjt,
                 "title": title,
                 "summary": summary,
                 "why_it_matters": f"全网多信源同步讨论热点（热榜第 {rank} 名），直接映射 AI 资本开支与监管风向。",
-                "tickers": _extract_tickers(title),
+                "tickers": extract_tickers(title),
                 "url": aihot_url or story_url,
                 "_aihot_url": aihot_url,
             }
@@ -780,25 +674,12 @@ def _clean_kol_snippet(snippet: str) -> tuple[str, str]:
         if m:
             headline = m.group(1).strip()
             takeaway = m.group(2).strip() or headline
-            return (_clean_business_text(headline), _clean_business_text(takeaway))
+            return (clean_business_text(headline), clean_business_text(takeaway))
         m2 = re.match(r"【X长文】([^：]+)[：:]\s*(.*)$", s)
         if m2:
-            return (_clean_business_text(m2.group(1)), _clean_business_text(m2.group(2) or m2.group(1)))
+            return (clean_business_text(m2.group(1)), clean_business_text(m2.group(2) or m2.group(1)))
     short = s[:54].rstrip("，。；： ") + ("..." if len(s) > 54 else "")
-    return (_clean_business_text(short), _clean_business_text(s))
-
-
-def _classify_kol_topic(headline: str, takeaway: str, group_label: str) -> str:
-    txt = f"{headline} {takeaway}".lower()
-    if any(k in txt for k in ("ai", "capex", "nvda", "intc", "芯片", "数据中心", "算力", "微软", "谷歌", "半导体", "hardware")):
-        return "AI资本开支与美股科技"
-    if any(k in txt for k in ("fed", "fomc", "liquidity", "treasury", "rate", "cpi", "pce", "美联储", "美债", "利率", "流动性", "降息", "通胀")):
-        return "美联储流动性与美债"
-    if any(k in txt for k in ("sec", "cftc", "tariff", "ban", "trump", "监管", "关税", "州长", "政策", "调查")):
-        return "地缘与监管"
-    if "加密" in group_label or any(k in txt for k in ("btc", "eth", "sol", "crypto", "etf", "defi", "比特币", "以太坊", "山寨", "链上")):
-        return "BTC周期与山寨"
-    return "市场情绪与估值"
+    return (clean_business_text(short), clean_business_text(s))
 
 
 def _collect_kol_digest(decision_brief: dict[str, Any]) -> list[dict[str, Any]]:
@@ -822,7 +703,7 @@ def _collect_kol_digest(decision_brief: dict[str, Any]) -> list[dict[str, Any]]:
             snippet = str(row.get("snippet") or "")
             headline, takeaway = _clean_kol_snippet(snippet)
             article_file, url = _find_kol_article_and_url(handle)
-            topic = _classify_kol_topic(headline, takeaway, group_label)
+            topic = classify_kol_topic(headline, takeaway, group_label, decision_brief=True)
             cards.append(
                 {
                     "handle": handle,
@@ -838,266 +719,6 @@ def _collect_kol_digest(decision_brief: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return cards
-
-
-def get_allowed_article_dirs() -> list[tuple[Path, str]]:
-    return [
-        (COCKPIT_ROOT / "articles", "同步深度长文"),
-        (KOL_ARTICLES_DIR, "KOL深度长文"),
-        (OBSIDIAN_INBOX_DIR, "本地知识库"),
-    ]
-
-
-def read_article_markdown(
-    path: Path, source_label: str, *, max_bytes: int | None = None
-) -> str | None:
-    inbox = source_label == "本地知识库" or path.resolve().is_relative_to(OBSIDIAN_INBOX_DIR.resolve())
-    if inbox:
-        max_bytes = min(max_bytes, 256 * 1024) if max_bytes is not None else 256 * 1024
-    try:
-        with path.open("rb") as handle:
-            raw = handle.read(max_bytes + 1) if max_bytes is not None else handle.read()
-    except OSError:
-        return None
-    if max_bytes is not None and len(raw) > max_bytes:
-        return None
-    text = raw.decode("utf-8-sig", errors="replace").replace("\r\n", "\n")
-    if inbox:
-        frontmatter = re.match(r"\A---[ \t]*\n(.*?)^---[ \t]*$", text, flags=re.MULTILINE | re.DOTALL)
-        if not frontmatter or not re.search(r"^publish:[ \t]*true[ \t]*(?:#.*)?$", frontmatter[1], re.MULTILINE):
-            return None
-        try:
-            import yaml
-        except ImportError:
-            return None
-        try:
-            meta = yaml.safe_load(frontmatter[1])
-        except yaml.YAMLError:
-            return None
-        if not isinstance(meta, dict) or meta.get("publish") is not True:
-            return None
-    return text if not has_private_article_content({"filename": path.name, "content": text}) else None
-
-
-def parse_markdown_article(path: Path, source_label: str) -> dict[str, Any] | None:
-    """Parse a markdown file into the shared article schema."""
-    if not path.is_file() or not safe_article_filename(path.name):
-        return None
-    try:
-        raw = read_article_markdown(path, source_label)
-        if raw is None:
-            return None
-        mtime_str = datetime.fromtimestamp(path.stat().st_mtime, tz=BJT).strftime("%Y-%m-%d %H:%M")
-    except OSError:
-        return None
-
-    title = ""
-    excerpt = ""
-    publisher = ""
-    author_role = ""
-    art_url = ""
-    art_score: int | None = None
-    art_tickers: list[str] = []
-    report_kind = ""
-    body_md = raw.strip()
-
-    # Check YAML frontmatter
-    if body_md.startswith("---"):
-        parts = body_md.split("---", 2)
-        if len(parts) == 3:
-            fm_raw = parts[1]
-            body_md = parts[2].strip()
-            fm_meta: dict[str, Any] = {}
-            try:
-                import yaml
-
-                parsed_fm = yaml.safe_load(fm_raw)
-                if isinstance(parsed_fm, dict):
-                    fm_meta = parsed_fm
-            except Exception:
-                fm_meta = {}
-
-            if fm_meta:
-                title = str(fm_meta.get("title") or "").strip()
-                excerpt = str(fm_meta.get("summary") or "").strip()
-                publisher = str(fm_meta.get("publisher") or "").strip()
-                author_role = str(fm_meta.get("author_role") or "").strip()
-                art_url = str(fm_meta.get("url") or "").strip()
-                report_kind = str(fm_meta.get("report_kind") or "").strip().lower()
-                raw_score = fm_meta.get("score")
-                if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool):
-                    art_score = int(round(float(raw_score)))
-                raw_tickers = fm_meta.get("tickers")
-                if isinstance(raw_tickers, list):
-                    art_tickers = [str(t).strip().upper() for t in raw_tickers if str(t).strip()][:8]
-            else:
-                m_title = re.search(r'^title:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
-                m_sum = re.search(r'^summary:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
-                m_pub = re.search(r'^publisher:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
-                m_role = re.search(r'^author_role:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
-                m_url = re.search(r'^url:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
-                m_rk = re.search(r'^report_kind:\s*["\']?(.+?)["\']?\s*$', fm_raw, re.MULTILINE)
-                m_scr = re.search(r'^score:\s*(\d+(?:\.\d+)?)\s*$', fm_raw, re.MULTILINE)
-                if m_title:
-                    title = m_title.group(1).strip()
-                if m_sum:
-                    excerpt = m_sum.group(1).strip()
-                if m_pub:
-                    publisher = m_pub.group(1).strip()
-                if m_role:
-                    author_role = m_role.group(1).strip()
-                if m_url:
-                    art_url = m_url.group(1).strip()
-                if m_rk:
-                    report_kind = m_rk.group(1).strip().lower()
-                if m_scr:
-                    art_score = int(round(float(m_scr.group(1))))
-
-    if not title:
-        for ln in body_md.splitlines():
-            s = ln.strip()
-            if s.startswith("# "):
-                title = s[2:].strip()
-                break
-    if not title:
-        title = path.stem
-
-    if not excerpt:
-        m_abs = re.search(r"\*\*核心摘要\*\*[：:]\s*(.+)", body_md)
-        if m_abs:
-            excerpt = m_abs.group(1).strip()
-        else:
-            for ln in body_md.splitlines():
-                s = ln.strip()
-                if s and not s.startswith(("#", "-", "*", ">", "---", "```")) and len(s) >= 24:
-                    excerpt = s
-                    break
-    if len(excerpt) > 180:
-        excerpt = excerpt[:177].rstrip() + "..."
-
-    fname_lower = path.name.lower()
-    if fname_lower.startswith(("weekly_", "monthly_", "dr_")) or report_kind in ("weekly", "monthly", "deep_research"):
-        resolved_source = "周月度深研"
-    elif fname_lower.startswith("ta_"):
-        resolved_source = "多智能体深研"
-    elif fname_lower.startswith("guru_"):
-        resolved_source = "大佬分享"
-    elif publisher:
-        resolved_source = "AI与金融研报"
-    else:
-        resolved_source = source_label
-    clean_body = _scrub_forbidden_text(body_md, preserve_newlines=True)
-    out: dict[str, Any] = {
-        "filename": path.name,
-        "title": _clean_business_text(title),
-        "source": resolved_source,
-        "mtime": mtime_str,
-        "excerpt": _clean_business_text(excerpt) or _clean_business_text(title),
-        "body_md": clean_body,
-    }
-    if publisher:
-        out["publisher"] = _clean_business_text(publisher)
-    if author_role:
-        out["author_role"] = _clean_business_text(author_role)
-    if report_kind:
-        out["report_kind"] = report_kind
-    if art_tickers:
-        out["tickers"] = art_tickers
-    if art_url.startswith(("http://", "https://")):
-        out["url"] = art_url
-    if art_score is not None:
-        out["score"] = art_score
-    return out
-
-
-def _dedup_articles(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    deduped: list[dict[str, Any]] = []
-    seen_urls: set[str] = set()
-    seen_titles: list[str] = []
-    seen_ta_syms: set[str] = set()
-    seen_periodic_fnames: set[str] = set()
-    for art in items:
-        fname = str(art.get("filename") or "")
-        if art.get("source") == "周月度深研" or fname.lower().startswith(("weekly_", "monthly_", "dr_")):
-            pf_key = fname.lower()
-            if pf_key in seen_periodic_fnames:
-                continue
-            seen_periodic_fnames.add(pf_key)
-            deduped.append(art)
-            continue
-        m_ta = re.match(r"^ta_([A-Za-z0-9._-]+)_", fname, re.IGNORECASE)
-        if m_ta:
-            sym_key = m_ta.group(1).upper()
-            if sym_key in seen_ta_syms:
-                continue
-            seen_ta_syms.add(sym_key)
-            deduped.append(art)
-            continue
-        norm_u = normalize_url(art.get("url"))
-        title = str(art.get("title") or "").strip()
-        if norm_u and norm_u in seen_urls:
-            continue
-        if title and any(lexical_similarity(title, prev) >= 0.68 for prev in seen_titles):
-            continue
-        if norm_u:
-            seen_urls.add(norm_u)
-        if title:
-            seen_titles.append(title)
-        deduped.append(art)
-    return deduped
-
-
-def _interleave_article_buckets(buckets: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Round-robin interleave non-empty article source buckets so every source remains represented."""
-    queues = [list(b) for b in buckets if b]
-    merged: list[dict[str, Any]] = []
-    while queues:
-        next_queues: list[list[dict[str, Any]]] = []
-        for q in queues:
-            merged.append(q.pop(0))
-            if q:
-                next_queues.append(q)
-        queues = next_queues
-    return merged
-
-
-def _sort_and_balance_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    periodic_arts = sorted(
-        [a for a in articles if a.get("source") == "周月度深研"],
-        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
-        reverse=True,
-    )
-    guru_arts = sorted(
-        [a for a in articles if a.get("source") == "大佬分享"],
-        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
-        reverse=True,
-    )
-    ai_arts = sorted(
-        [a for a in articles if a.get("source") == "AI与金融研报"],
-        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
-        reverse=True,
-    )
-    kol_arts = sorted(
-        [a for a in articles if a.get("source") == "KOL深度长文"],
-        key=lambda x: (int(x.get("score") or 0), str(x.get("mtime") or "")),
-        reverse=True,
-    )
-    ta_arts = sorted(
-        [a for a in articles if a.get("source") == "多智能体深研"],
-        key=lambda x: str(x.get("mtime") or ""),
-        reverse=True,
-    )
-    kb_arts = sorted(
-        [
-            a
-            for a in articles
-            if a.get("source") not in ("周月度深研", "大佬分享", "AI与金融研报", "KOL深度长文", "多智能体深研")
-        ],
-        key=lambda x: str(x.get("mtime") or ""),
-        reverse=True,
-    )
-    interleaved = _interleave_article_buckets([periodic_arts, guru_arts, ai_arts, kol_arts, ta_arts, kb_arts])
-    return _dedup_articles(interleaved)
 
 
 def _collect_articles(kol_scorecards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -1125,13 +746,13 @@ def _collect_articles(kol_scorecards: list[dict[str, Any]] | None = None) -> lis
                 if has_private_article_content(art):
                     continue
                 clean_art = dict(art)
-                clean_art["title"] = _clean_business_text(str(clean_art.get("title") or fname))
-                clean_art["excerpt"] = _clean_business_text(str(clean_art.get("excerpt") or clean_art["title"]))
+                clean_art["title"] = clean_business_text(str(clean_art.get("title") or fname))
+                clean_art["excerpt"] = clean_business_text(str(clean_art.get("excerpt") or clean_art["title"]))
                 clean_art["body_md"] = _scrub_forbidden_text(str(clean_art.get("body_md") or ""), preserve_newlines=True)
                 if clean_art.get("publisher"):
-                    clean_art["publisher"] = _clean_business_text(str(clean_art["publisher"]))
+                    clean_art["publisher"] = clean_business_text(str(clean_art["publisher"]))
                 if clean_art.get("author_role"):
-                    clean_art["author_role"] = _clean_business_text(str(clean_art["author_role"]))
+                    clean_art["author_role"] = clean_business_text(str(clean_art["author_role"]))
                 seen_names.add(fname)
                 articles.append(clean_art)
             continue
@@ -1377,9 +998,7 @@ def generate_cockpit_state(
         for sig in sig_list:
             if isinstance(sig, dict):
                 sig["title"] = strip_emojis(str(sig.get("title") or ""))
-                sig["summary"] = _dedup_summary(sig["title"], str(sig.get("summary") or ""))
-    if compute_cross_asset_correlations is None:
-        raise RuntimeError("State refresh requires pandas and numpy")
+                sig["summary"] = dedup_summary(sig["title"], str(sig.get("summary") or ""))
     correlations = compute_cross_asset_correlations()
     stock_profiles = build_stock_profiles(force_refresh=False, risk_gate=risk_gate)
     calendar_events = filter_calendar_events(

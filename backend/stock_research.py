@@ -19,7 +19,7 @@ except ImportError:
 from backend.guardrails import scrub_forbidden
 from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json, safe_float as _finite
 from backend.fred_and_market import _infer_us_session
-from backend.sec_edgar import SEC_CIK_MAP, fetch_sec_filings_map
+from backend.sec_edgar import SEC_CIK_MAP, SEC_CN_NAMES, fetch_sec_filings_map
 
 CACHE_PATH = DATA_DIR / "stock_profiles_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600
@@ -38,7 +38,7 @@ _HEADERS = {
 CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     (
         "AAPL",
-        "苹果",
+        SEC_CN_NAMES["AAPL"],
         "NASDAQ",
         "科技 · 消费电子",
         "核心平台巨头",
@@ -46,7 +46,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "NVDA",
-        "英伟达",
+        SEC_CN_NAMES["NVDA"],
         "NASDAQ",
         "科技 · AI 算力",
         "AI 芯片与算力",
@@ -54,7 +54,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "MSFT",
-        "微软",
+        SEC_CN_NAMES["MSFT"],
         "NASDAQ",
         "科技 · 云与企业软件",
         "核心平台巨头",
@@ -62,7 +62,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "GOOG",
-        "谷歌",
+        SEC_CN_NAMES["GOOG"],
         "NASDAQ",
         "科技 · 搜索与云计算",
         "核心平台巨头",
@@ -70,7 +70,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "META",
-        "Meta",
+        SEC_CN_NAMES["META"],
         "NASDAQ",
         "科技 · 社交与开源 AI",
         "核心平台巨头",
@@ -78,7 +78,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "AMZN",
-        "亚马逊",
+        SEC_CN_NAMES["AMZN"],
         "NASDAQ",
         "科技 · 电商与云计算",
         "核心平台巨头",
@@ -86,7 +86,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "TSLA",
-        "特斯拉",
+        SEC_CN_NAMES["TSLA"],
         "NASDAQ",
         "可选消费 · 智能电车与机器人",
         "硬科技与高弹性成长",
@@ -94,7 +94,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "AMD",
-        "超威半导体",
+        SEC_CN_NAMES["AMD"],
         "NASDAQ",
         "科技 · AI 芯片与 CPU",
         "AI 芯片与算力",
@@ -102,7 +102,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "AVGO",
-        "博通",
+        SEC_CN_NAMES["AVGO"],
         "NASDAQ",
         "科技 · 定制 AI 芯片与网络",
         "AI 芯片与算力",
@@ -110,7 +110,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "TSM",
-        "台积电",
+        SEC_CN_NAMES["TSM"],
         "NYSE",
         "科技 · 先进制程晶圆代工",
         "半导体制造与存储",
@@ -118,7 +118,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "MU",
-        "美光科技",
+        SEC_CN_NAMES["MU"],
         "NASDAQ",
         "科技 · HBM 与存储芯片",
         "半导体制造与存储",
@@ -126,7 +126,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "INTC",
-        "英特尔",
+        SEC_CN_NAMES["INTC"],
         "NASDAQ",
         "科技 · x86 与芯片代工",
         "半导体制造与存储",
@@ -134,7 +134,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "QCOM",
-        "高通",
+        SEC_CN_NAMES["QCOM"],
         "NASDAQ",
         "科技 · 端侧 AI 芯片",
         "AI 芯片与算力",
@@ -142,7 +142,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "PLTR",
-        "Palantir",
+        SEC_CN_NAMES["PLTR"],
         "NASDAQ",
         "科技 · 企业 AI 决策软件",
         "软件与新经济平台",
@@ -150,7 +150,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "ORCL",
-        "甲骨文",
+        SEC_CN_NAMES["ORCL"],
         "NYSE",
         "科技 · 云基础设施与数据库",
         "软件与新经济平台",
@@ -158,7 +158,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "NFLX",
-        "奈飞",
+        SEC_CN_NAMES["NFLX"],
         "NASDAQ",
         "通信服务 · 全球流媒体",
         "核心平台巨头",
@@ -166,7 +166,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "ARM",
-        "Arm",
+        SEC_CN_NAMES["ARM"],
         "NASDAQ",
         "科技 · 处理器指令集架构",
         "AI 芯片与算力",
@@ -174,7 +174,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "SMCI",
-        "超微电脑",
+        SEC_CN_NAMES["SMCI"],
         "NASDAQ",
         "科技 · AI 液冷服务器",
         "硬科技与高弹性成长",
@@ -182,7 +182,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "COIN",
-        "Coinbase",
+        SEC_CN_NAMES["COIN"],
         "NASDAQ",
         "金融 · 合规加密交易与托管",
         "数字资产关联股",
@@ -190,7 +190,7 @@ CORE_RESEARCH_STOCKS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ),
     (
         "MSTR",
-        "MicroStrategy",
+        SEC_CN_NAMES["MSTR"],
         "NASDAQ",
         "科技 · 比特币财库平台",
         "数字资产关联股",

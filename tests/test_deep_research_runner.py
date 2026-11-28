@@ -304,7 +304,7 @@ def test_http_research_run_jobs_capabilities_rbac_cli_and_mcp(tmp_path: Path, mo
         seen_transports.append(transport)
         return {"ok": False, "transport": transport, "reply": "", "error": "TimeoutError: AGY ACP timeout"}
 
-    monkeypatch.setattr("desktop.acp_bridge.ask_agy", _mock_ask_agy)
+    monkeypatch.setattr("backend.agy_runtime.ask_agy", _mock_ask_agy)
     acp_res = deep_research_runner._default_worker_runner("test acp timeout", timeout=5)
     assert acp_res["ok"] is False and seen_transports == ["acp"]
 
@@ -401,7 +401,7 @@ def test_codex_followup_security_pipe_drain_and_first_gen_publish(tmp_path: Path
 
     fake_cli = tmp_path / "fake_agy.py"
     fake_cli.write_text("import sys; sys.stdout.write('B' * 25000); sys.stdout.flush()\n", encoding="utf-8")
-    monkeypatch.setattr("desktop.acp_bridge.resolve_agy_executable", lambda: fake_cli)
+    monkeypatch.setattr("backend.agy_runtime.resolve_agy_executable", lambda: fake_cli)
     orig_popen = deep_research_runner.subprocess.Popen
     import desktop.acp_bridge as acp_bridge
 

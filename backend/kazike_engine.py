@@ -5,12 +5,12 @@ import hashlib
 import json
 import os
 import re
-import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json
+from backend.signal_text import lexical_similarity, normalize_url
 from backend.zh_brief import attach_zh_briefs_batch, is_primarily_english
 
 
@@ -77,45 +77,6 @@ _INSTITUTIONAL_MACRO_ANCHOR_RE = re.compile(
     r"(?i)\b(?:federal\s+reserve|ny\s+fed|fred|treasury|bls|census|bureau|delinquency\s+rate|household\s+debt)\b|美联储|央行|财政部"
 )
 _TEASER_RE = re.compile(r"(?i)(即将推出|预告|敬请期待|coming\s+soon|waitlist|抢先体验|teaser)")
-
-_TRACKING_PARAMS = frozenset(
-    {
-        "utm_source",
-        "utm_medium",
-        "utm_campaign",
-        "utm_term",
-        "utm_content",
-        "fbclid",
-        "gclid",
-        "s",
-        "t",
-        "ref",
-        "source",
-    }
-)
-
-
-def normalize_url(url: str | None) -> str:
-    """Canonicalize URL for deterministic deduplication."""
-    raw = str(url or "").strip()
-    if not raw or not raw.startswith(("http://", "https://")):
-        return ""
-    try:
-        parsed = urllib.parse.urlsplit(raw)
-        host = parsed.netloc.lower()
-        if host == "twitter.com":
-            host = "x.com"
-        if host.startswith("www."):
-            host = host[4:]
-        qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=False)
-        kept = [(k, v) for k, v in qs if k.lower() not in _TRACKING_PARAMS]
-        kept.sort()
-        path = parsed.path.rstrip("/") or "/"
-        clean_query = urllib.parse.urlencode(kept)
-        return urllib.parse.urlunsplit(("https", host, path, clean_query, ""))
-    except Exception:
-        return raw
-
 
 def parse_time_utc(ts_str: str | None, *, now_utc: datetime | None = None) -> datetime:
     """Parse flexible BJT or ISO timestamps into timezone-aware UTC datetime."""
@@ -465,22 +426,6 @@ def score_five_axes(
             _prune_receipts(rc, now_ts=now_ts)
             atomic_write_json(receipts_path, rc)
     return res
-
-
-def lexical_similarity(text_a: str, text_b: str) -> float:
-    """Character 2-gram Dice similarity supporting mixed Chinese + English finance headlines."""
-    def _bigrams(s: str) -> set[str]:
-        cleaned = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", s.lower())
-        if len(cleaned) < 2:
-            return {cleaned} if cleaned else set()
-        return {cleaned[i : i + 2] for i in range(len(cleaned) - 1)}
-
-    bg_a = _bigrams(text_a)
-    bg_b = _bigrams(text_b)
-    if not bg_a or not bg_b:
-        return 0.0
-    inter = len(bg_a & bg_b)
-    return round((2.0 * inter) / (len(bg_a) + len(bg_b)), 4)
 
 
 def _select_best_representative(group: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:

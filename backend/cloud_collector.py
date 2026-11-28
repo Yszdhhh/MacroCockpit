@@ -22,6 +22,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.article_store import parse_markdown_article, read_article_markdown, sort_and_balance_articles
 from backend.guardrails import (
     has_private_article_content,
     safe_article_filename,
@@ -81,53 +82,26 @@ from backend.signal_aggregator import (
     _collect_equity_signals,
     _ensure_signal_topics,
     _sanitize_state_value,
-    _sort_and_balance_articles,
-    parse_markdown_article,
-    read_article_markdown,
 )
 
-try:
-    from backend.guru_sources import collect_guru_articles, collect_guru_signals
-except ImportError:
-    collect_guru_articles = None  # type: ignore[assignment]
-    collect_guru_signals = None  # type: ignore[assignment]
+from backend.guru_sources import collect_guru_articles, collect_guru_signals
 
-try:
-    from backend.kol_intel_engine import (
-        build_kol_actionable_signals,
-        build_kol_digest,
-        build_kol_scorecards,
-        select_quality_kol_articles,
-    )
-except ImportError:
-    build_kol_actionable_signals = None  # type: ignore[assignment]
-    build_kol_digest = None  # type: ignore[assignment]
-    build_kol_scorecards = None  # type: ignore[assignment]
-    select_quality_kol_articles = None  # type: ignore[assignment]
+from backend.kol_intel_engine import (
+    build_kol_actionable_signals,
+    build_kol_digest,
+    build_kol_scorecards,
+    select_quality_kol_articles,
+)
 
-try:
-    from backend.market_synthesis import build_market_synthesis
-except ImportError:
-    build_market_synthesis = None  # type: ignore[assignment]
+from backend.market_synthesis import build_market_synthesis
 
-try:
-    from backend.forum_sentiment import (
-        build_sentiment_divergence, collect_public_discussion_trends, trim_forum_sentiment,
-    )
-except ImportError:
-    build_sentiment_divergence = None  # type: ignore[assignment]
-    collect_public_discussion_trends = None  # type: ignore[assignment]
-    trim_forum_sentiment = None  # type: ignore[assignment]
+from backend.forum_sentiment import (
+    build_sentiment_divergence, collect_public_discussion_trends, trim_forum_sentiment,
+)
 
-try:
-    from backend.source_matrix import build_asset_source_matrix
-except ImportError:
-    build_asset_source_matrix = None  # type: ignore[assignment]
+from backend.source_matrix import build_asset_source_matrix
 
-try:
-    from backend.signal_advisor import update_signal_advisor
-except ImportError:
-    update_signal_advisor = None  # type: ignore[assignment]
+from backend.signal_advisor import update_signal_advisor
 from backend.stock_research import (
     CACHE_TTL_SECONDS as STOCK_CACHE_TTL_SECONDS,
     CORE_RESEARCH_STOCKS,
@@ -952,7 +926,7 @@ def run_cn_merge_and_publish(
                 collected_articles.append(kart)
                 content_by_name[fname] = body
 
-            collected_articles = _sort_and_balance_articles(collected_articles)[:max_articles]
+            collected_articles = sort_and_balance_articles(collected_articles)[:max_articles]
             articles_payload = [
                 {"filename": a["filename"], "content": content_by_name[a["filename"]]}
                 for a in collected_articles

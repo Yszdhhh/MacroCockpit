@@ -63,9 +63,11 @@ from backend.runtime import (
 )
 from backend.discussion_temperature import discussion_trends, refresh_discussion_history
 from backend.public_snapshot import project_market_pulse
-from backend.rss_sources import _norm_dup_key
+from backend.signal_text import canon_ticker_sym, extract_tickers as _extract_tickers, norm_dup_key, strip_html
 from backend.zh_brief import attach_zh_briefs_batch
 
+
+extract_tickers = partial(_extract_tickers, source="forum")
 
 DEFAULT_FORUM_CACHE_PATH = DATA_DIR / "forum_pulse_cache.json"
 FORUM_CACHE_TTL_SECONDS = 1800  # 30 minutes
@@ -181,39 +183,6 @@ _BEAR_RE = re.compile(
 _FALSE_BEAR_RE = re.compile(r"(?i)\b(?:short\s+squeeze|short\s+term|short-term|shortage|drop\s+in\s+yields)\b")
 _FALSE_BULL_RE = re.compile(r"(?i)\b(?:long\s+term|long-term|long\s+run|bull\s+trap)\b")
 
-_TICKER_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\$NVDA\b|(?<![A-Z0-9$])NVDA(?![A-Z0-9])|(?i:\bNvidia\b|英伟达|黄仁勋|Blackwell|Rubin|CUDA)"), "NVDA"),
-    (re.compile(r"\$AAPL\b|(?<![A-Z0-9$])AAPL(?![A-Z0-9])|(?i:\bApple\b|苹果|iPhone)"), "AAPL"),
-    (re.compile(r"\$MSFT\b|(?<![A-Z0-9$])MSFT(?![A-Z0-9])|(?i:\bMicrosoft\b|微软|Azure)"), "MSFT"),
-    (re.compile(r"\$GOOGL?\b|(?<![A-Z0-9$])GOOGL?(?![A-Z0-9])|(?i:\bAlphabet\b|\bGoogle\b|谷歌|Gemini)"), "GOOG"),
-    (re.compile(r"\$META\b|(?<![A-Z0-9$])META(?![A-Z0-9])|(?i:\bMeta\s+Platforms\b|\bZuckerberg\b|扎克伯格)"), "META"),
-    (re.compile(r"\$AMZN\b|(?<![A-Z0-9$])AMZN(?![A-Z0-9])|(?i:\bAmazon\b|\bAWS\b|亚马逊)"), "AMZN"),
-    (re.compile(r"\$AVGO\b|(?<![A-Z0-9$])AVGO(?![A-Z0-9])|(?i:\bBroadcom\b|博通)"), "AVGO"),
-    (re.compile(r"\$TSLA\b|(?<![A-Z0-9$])TSLA(?![A-Z0-9])|(?i:\bTesla\b|特斯拉|\bFSD\b|\bRobotaxi\b)"), "TSLA"),
-    (re.compile(r"\$AMD\b|(?<![A-Z0-9$])AMD(?![A-Z0-9])|(?i:超威半导体|苏姿丰)"), "AMD"),
-    (re.compile(r"\$TSMC?\b|(?<![A-Z0-9$])TSMC?(?![A-Z0-9])|(?i:台积电|\bCoWoS\b)"), "TSM"),
-    (re.compile(r"\$INTC\b|(?<![A-Z0-9$])INTC(?![A-Z0-9])|(?i:\bIntel\b|英特尔)"), "INTC"),
-    (re.compile(r"\$MU\b|(?<![A-Z0-9$])MU(?![A-Z0-9])|(?i:\bMicron\b|美光|\bHBM[34]?\b)"), "MU"),
-    (re.compile(r"\$ARM\b|(?<![A-Z0-9$])ARM(?![A-Z0-9])|(?i:\bArm\s+Holdings\b)"), "ARM"),
-    (re.compile(r"\$PLTR\b|(?<![A-Z0-9$])PLTR(?![A-Z0-9])|(?i:\bPalantir\b)"), "PLTR"),
-    (re.compile(r"\$BABA\b|(?<![A-Z0-9$])(?:BABA|0?9988\.HK)(?![A-Z0-9])|(?i:\bAlibaba\b|阿里巴巴|阿里)"), "BABA"),
-    (re.compile(r"(?<![A-Z0-9$])(?:0?0700\.HK|TCEHY)(?![A-Z0-9])|(?i:\bTencent\b|腾讯控股|腾讯)"), "0700.HK"),
-    (re.compile(r"(?<![A-Z0-9$])0?3690\.HK(?![A-Z0-9])|(?i:\bMeituan\b|美团)"), "3690.HK"),
-    (re.compile(r"(?<![A-Z0-9$])0?1810\.HK(?![A-Z0-9])|(?i:\bXiaomi\b|小米集团|小米汽车)"), "1810.HK"),
-    (re.compile(r"(?<![A-Z0-9$])(?:0?0981\.HK|688981)(?![A-Z0-9])|(?i:\bSMIC\b|中芯国际)"), "0981.HK"),
-    (re.compile(r"(?<![A-Z0-9$])(?:0?1211\.HK|002594)(?![A-Z0-9])|(?i:\bBYD\b|比亚迪)"), "1211.HK"),
-    (re.compile(r"\$BTC\b|(?<![A-Z0-9$])BTC(?![A-Z0-9])|(?i:\bBitcoin\b|比特币)"), "BTC"),
-    (re.compile(r"\$BNB\b|(?<![A-Z0-9$])BNB(?![A-Z0-9])|(?i:\bBinance\b|币安)"), "BNB"),
-    (re.compile(r"\$ETH\b|(?<![A-Z0-9$])ETH(?![A-Z0-9])|(?i:\bEthereum\b|以太坊)"), "ETH"),
-    (re.compile(r"\$SOL\b|(?<![A-Z0-9$])SOL(?![A-Z0-9])|(?i:\bSolana\b)"), "SOL"),
-    (re.compile(r"(?<![A-Z0-9$])(?:ZHIPU|ZHIPUUSDT|2513\.HK|02513)(?![A-Z0-9])|(?i:智谱|\bChatGLM\b|\bAutoGLM\b)"), "ZHIPU"),
-    (re.compile(r"\$SPY\b|\$SPX\b|(?<![A-Z0-9$])(?:SPY|SPX|SP500)(?![A-Z0-9])|(?i:S&P\s*500|标普)"), "SP500"),
-    (re.compile(r"\$QQQ\b|\$NDX\b|(?<![A-Z0-9$])(?:QQQ|NDX)(?![A-Z0-9])|(?i:\bNasdaq\b|纳斯达克|纳指)"), "QQQ"),
-    (re.compile(r"\$GLD\b|\$XAU\b|(?<![A-Z0-9$])(?:GLD|XAU|XAUUSD|PAXG)(?![A-Z0-9])|(?i:黄金|金价|伦敦金|\bgold\b)"), "GOLD"),
-    (re.compile(r"\$WTI\b|\$USO\b|(?<![A-Z0-9$])WTI(?![A-Z0-9])|(?i:\bBrent\b|\bcrude\s+oil\b|原油|油价)"), "WTI"),
-    (re.compile(r"\$DXY\b|(?<![A-Z0-9$])DXY(?![A-Z0-9])|(?i:\bdollar\s+index\b|美元指数|美元流动性)"), "DOLLAR"),
-)
-
 _AI_US_TICKERS = frozenset(
     {"NVDA", "TSM", "AAPL", "MSFT", "GOOG", "META", "AMZN", "AVGO", "AMD", "INTC", "QCOM", "MU", "ARM", "PLTR", "ORCL", "SMCI", "QQQ", "NFLX", "TSLA", "ASML"}
 )
@@ -268,35 +237,11 @@ def sanitize_output(obj: Any) -> Any:
     )
 
 
-def _strip_html(raw: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", raw or "")
-    text = html.unescape(text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
 def _truncate(text: str, max_len: int) -> str:
     s = re.sub(r"\s+", " ", str(text or "")).strip()
     if len(s) <= max_len:
         return s
     return s[: max(1, max_len - 1)].rstrip() + "…"
-
-
-def _canon_hk_code(digits: str) -> str:
-    d = str(digits or "").strip()
-    if len(d) == 5 and d.startswith("0"):
-        d = d[1:]
-    return f"{d}.HK"
-
-
-def _canon_ticker_sym(sym: str) -> str:
-    s = str(sym or "").strip().upper()
-    m_hk = re.fullmatch(r"(\d{4,5})\.HK", s)
-    if m_hk:
-        return _canon_hk_code(m_hk.group(1))
-    m_hk_pref = re.fullmatch(r"HK(\d{4,5})", s)
-    if m_hk_pref:
-        return _canon_hk_code(m_hk_pref.group(1))
-    return s
 
 
 def _is_ahk_ticker(sym: str) -> bool:
@@ -306,37 +251,6 @@ def _is_ahk_ticker(sym: str) -> bool:
         or s.endswith((".SZ", ".SS", ".SH", ".BJ", ".HK"))
         or s in _ASHARE_HK_TICKERS
     )
-
-
-def extract_tickers(text: str) -> list[str]:
-    """Extract canonical US/A-share/HK/crypto/macro tickers from mixed text."""
-    if not text:
-        return []
-    alias_norm = {"GOOGL": "GOOG", "TSMC": "TSM", "SPY": "SP500", "SPX": "SP500", "GLD": "GOLD", "XAU": "GOLD", "DXY": "DOLLAR", "USO": "WTI"}
-    out: list[str] = []
-    for m in re.findall(r"\$([A-Z]{2,5})\b", text):
-        sym = alias_norm.get(m, m)
-        if sym not in out:
-            out.append(sym)
-    for m in re.findall(r"(?<![A-Za-z0-9])((?:SH|SZ|BJ)\d{6})(?![A-Za-z0-9])", text):
-        if m not in out:
-            out.append(m)
-    for m in re.findall(r"(?<![A-Za-z0-9])(\d{6}\.(?:SZ|SS|SH|BJ))(?![A-Za-z0-9])", text, re.IGNORECASE):
-        sym = m.upper()
-        if sym not in out:
-            out.append(sym)
-    for m in re.findall(r"(?<![A-Za-z0-9])(\d{4,5})\.HK(?![A-Za-z0-9])", text, re.IGNORECASE):
-        sym = _canon_hk_code(m)
-        if sym not in out:
-            out.append(sym)
-    for m in re.findall(r"(?<![A-Za-z0-9])HK(\d{4,5})(?![A-Za-z0-9])", text, re.IGNORECASE):
-        sym = _canon_hk_code(m)
-        if sym not in out:
-            out.append(sym)
-    for rx, sym in _TICKER_RULES:
-        if rx.search(text) and sym not in out:
-            out.append(sym)
-    return out[:6]
 
 
 def _score_text_sentiment(text: str) -> tuple[int, str]:
@@ -548,8 +462,8 @@ def _fetch_xueqiu_channel(*, user_home: Path, timeout: int = 6) -> dict[str, Any
             post = raw_payload
         if not post:
             continue
-        title = _strip_html(str(post.get("title") or ""))
-        body = _strip_html(str(post.get("text") or post.get("description") or ""))
+        title = strip_html(str(post.get("title") or ""))
+        body = strip_html(str(post.get("text") or post.get("description") or ""))
         display_title = title or _truncate(body, 68)
         if not display_title:
             continue
@@ -670,7 +584,7 @@ def _fetch_cn_communities_channel(*, timeout: int = 6) -> dict[str, Any]:
                 if not title:
                     continue
                 extra = raw.get("extra") if isinstance(raw.get("extra"), dict) else {}
-                hover = _strip_html(str(extra.get("hover") or ""))
+                hover = strip_html(str(extra.get("hover") or ""))
                 has_fin = bool(_CN_FINANCE_KEYWORDS_RE.search(title))
                 has_noise = bool(_ENTERTAINMENT_NOISE_RE.search(title))
                 if is_finance_native:
@@ -1126,7 +1040,7 @@ def _ddg_html_search_xhs(queries: list[str] | tuple[str, ...], *, timeout: int =
                 pairs.append((a.get_text(" ", strip=True), str(a.get("href") or "")))
         else:
             for m in re.finditer(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', body, re.DOTALL):
-                pairs.append((_strip_html(m.group(2)), m.group(1)))
+                pairs.append((strip_html(m.group(2)), m.group(1)))
 
         for raw_title, raw_href in pairs:
             target = _extract_ddg_target_url(raw_href)
@@ -2086,7 +2000,7 @@ def _extract_desk_entries(
     seen_texts: set[str] = set()
 
     def _merge_tickers(raw_list: Any, text: str) -> list[str]:
-        base = [_canon_ticker_sym(str(t)) for t in (raw_list or []) if t]
+        base = [canon_ticker_sym(str(t)) for t in (raw_list or []) if t]
         extracted = extract_tickers(text)
         return list(dict.fromkeys(base + extracted))
 
@@ -2103,7 +2017,7 @@ def _extract_desk_entries(
             entry["topics"] = topics
         u_key = _norm_desk_url(str(entry.get("url") or ""))
         dedup_src = raw_dedup_text or str(entry.get("summary") or "")
-        t_key = _norm_dup_key(dedup_src)
+        t_key = norm_dup_key(dedup_src)
         if u_key and u_key in seen_urls:
             return
         if t_key and t_key in seen_texts:
@@ -2498,7 +2412,7 @@ def build_sentiment_divergence(
         seen_d: set[str] = set()
         for pass_idx in (0, 1):
             for e in d_sorted:
-                key = _norm_desk_url(str(e.get("url") or "")) or _norm_dup_key(str(e.get("summary") or ""))
+                key = _norm_desk_url(str(e.get("url") or "")) or norm_dup_key(str(e.get("summary") or ""))
                 if not key or key in seen_d:
                     continue
                 if pass_idx == 0 and key in global_seen_d:
@@ -2518,7 +2432,7 @@ def build_sentiment_divergence(
             for s in s_sorted:
                 title = _truncate(strip_emojis(str(s.get("title") or "")), 76)
                 url = _safe_http_url(str(s.get("url") or ""))
-                s_key = _norm_desk_url(url) or _norm_dup_key(title)
+                s_key = _norm_desk_url(url) or norm_dup_key(title)
                 if not title or not s_key or s_key in seen_s:
                     continue
                 if pass_idx == 0 and s_key in global_seen_s:
@@ -2598,7 +2512,7 @@ def build_sentiment_divergence(
 
     def _to_hot_row(item: dict[str, Any]) -> dict[str, Any] | None:
         title = _truncate(strip_emojis(str(item.get("title") or "")), 76)
-        norm = _norm_dup_key(title)
+        norm = norm_dup_key(title)
         if not title or norm in seen_hot:
             return None
         seen_hot.add(norm)

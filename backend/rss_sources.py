@@ -1,7 +1,6 @@
 """Curated official AI, global macro/equity RSS feeds, CN finance wires, curated articles & OPML exporter."""
 from __future__ import annotations
 
-import email.utils
 import hashlib
 import html
 import json
@@ -11,7 +10,6 @@ import socket
 import sys
 import threading
 import time
-import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,6 +34,22 @@ from backend.guardrails import (
     strip_emojis as strip_emojis,
 )
 from backend.runtime import BJT, COCKPIT_ROOT, DATA_DIR, UTC, atomic_write_json, file_lock
+
+from backend.signal_text import (
+    WIRE_DATELINE_RE,
+    clean_feed_text,
+    decode_http_text,
+    dedup_summary as _dedup_summary,
+    eqn_why_it_matters,
+    extract_subtopics,
+    extract_tickers,
+    html_to_clean_markdown,
+    infer_signal_direction,
+    norm_dup_key,
+    parse_rss_datetime,
+    strip_xml_ns,
+    yaml_quote,
+)
 
 RSS_CACHE_PATH = DATA_DIR / "rss_cache.json"
 RSS_CACHE_TTL = 900  # 15 minutes
@@ -365,54 +379,153 @@ CURATED_ARTICLE_FEEDS: tuple[dict[str, str], ...] = (
     },
 )
 
-_TICKER_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\bAAPL\b|Apple|苹果|iPhone|iPad|MacBook", "AAPL"),
-    (r"\bNVDA\b|Nvidia|英伟达|黄仁勋|Blackwell|Rubin|CUDA", "NVDA"),
-    (r"\bMSFT\b|Microsoft|微软|Azure|OpenAI|GPT-", "MSFT"),
-    (r"\bGOOG\b|\bGOOGL\b|Google|Alphabet|DeepMind|Gemini|谷歌", "GOOG"),
-    (r"\bMETA\b|Llama|扎克伯格|Zuckerberg|Facebook|Instagram", "META"),
-    (r"\bAMZN\b|Amazon|\bAWS\b|亚马逊|贝索斯", "AMZN"),
-    (r"\bTSLA\b|Tesla|特斯拉|马斯克|\bFSD\b", "TSLA"),
-    (r"\bAMD\b|超威半导体|苏姿丰", "AMD"),
-    (r"\bAVGO\b|Broadcom|博通", "AVGO"),
-    (r"\bTSM\b|TSMC|台积电|CoWoS", "TSM"),
-    (r"\bMU\b|Micron|美光|\bHBM\b", "MU"),
-    (r"\bINTC\b|Intel|英特尔", "INTC"),
-    (r"\bQCOM\b|Qualcomm|高通", "QCOM"),
-    (r"\bPLTR\b|Palantir", "PLTR"),
-    (r"\bORCL\b|Oracle|甲骨文", "ORCL"),
-    (r"\bNFLX\b|Netflix|奈飞", "NFLX"),
-    (r"\bARM\b|Arm Holdings", "ARM"),
-    (r"\bSMCI\b|Super Micro|超微电脑", "SMCI"),
-    (r"\bCOIN\b|Coinbase", "COIN"),
-    (r"\bMSTR\b|MicroStrategy", "MSTR"),
-    (r"(?<![A-Z0-9$])(?:0?0700\.HK|TCEHY)(?![A-Z0-9])|腾讯控股|腾讯", "0700.HK"),
-    (r"(?<![A-Z0-9$])(?:0?9988\.HK|\bBABA\b)(?![A-Z0-9])|阿里巴巴|阿里", "BABA"),
-    (r"(?<![A-Z0-9$])0?3690\.HK(?![A-Z0-9])|美团", "3690.HK"),
-    (r"(?<![A-Z0-9$])0?1810\.HK(?![A-Z0-9])|小米集团|小米汽车", "1810.HK"),
-    (r"(?<![A-Z0-9$])(?:0?0981\.HK|688981)(?![A-Z0-9])|中芯国际", "0981.HK"),
-    (r"(?<![A-Z0-9$])(?:0?1211\.HK|002594)(?![A-Z0-9])|比亚迪", "1211.HK"),
-    (r"(?<![A-Z0-9$])(?:ZHIPU|0?2513\.HK|02513)(?![A-Z0-9])|智谱", "ZHIPU"),
-    (r"\bSPY\b|标普500|S&P\s*500", "SPY"),
-    (r"\bQQQ\b|纳指|纳斯达克|Nasdaq", "QQQ"),
-    (r"\bBTC\b|Bitcoin|比特币", "BTC"),
-    (r"\bETH\b|Ethereum|以太坊", "ETH"),
-    (r"\bFed\b|Federal Reserve|FOMC|Treasury|美联储|鲍威尔|美债|通胀|\bCPI\b|\bPCE\b|非农", "US10Y"),
+GURU_ARTICLE_FEEDS: tuple[dict[str, str], ...] = (
+    {
+        "id": "awealthofcs",
+        "publisher": "Ben Carlson · 常识财富",
+        "author": "Ben Carlson",
+        "author_role": "资产配置与行为金融",
+        "url": "https://awealthofcommonsense.com/feed/",
+        "html_url": "https://awealthofcommonsense.com/",
+        "category": "equities",
+        "tier": "T1_5",
+        "max_age_days": "30",
+        "background": "Ritholtz 财富管理机构董事总经理 Ben Carlson 专栏，专注美股估值周期、长期资产配置与投资者行为偏差分析。",
+    },
+    {
+        "id": "pragcap",
+        "publisher": "Cullen Roche · 宏观货币",
+        "author": "Cullen Roche",
+        "author_role": "宏观货币与资产配置",
+        "url": "https://www.pragcap.com/feed/",
+        "html_url": "https://www.pragcap.com/",
+        "category": "macro",
+        "tier": "T1_5",
+        "max_age_days": "30",
+        "background": "Discipline Funds 创始人 Cullen Roche 主笔，擅长从货币银行机制、国债供给与美联储资产负债表拆解宏观流动性。",
+    },
+    {
+        "id": "kylascanlon",
+        "publisher": "Kyla Scanlon · 宏观叙事",
+        "author": "Kyla Scanlon",
+        "author_role": "宏观叙事与市场情绪",
+        "url": "https://kylascanlon.substack.com/feed",
+        "html_url": "https://kylascanlon.substack.com/",
+        "category": "macro",
+        "tier": "T1_5",
+        "max_age_days": "45",
+        "background": "知名财经作者 Kyla Scanlon 专栏，聚焦美国通胀体感、劳动力市场与零售/机构情绪叙事转向。",
+    },
+    {
+        "id": "cryptohayes",
+        "publisher": "Arthur Hayes · 加密宏观",
+        "author": "Arthur Hayes",
+        "author_role": "加密宏观与美元流动性",
+        "url": "https://cryptohayes.substack.com/feed",
+        "html_url": "https://cryptohayes.substack.com/",
+        "category": "crypto",
+        "tier": "T1",
+        "max_age_days": "60",
+        "background": "BitMEX 联合创始人 Arthur Hayes 长文专栏，核心围绕美元财政赤字、美债流动性投放与比特币周期定价。",
+    },
+    {
+        "id": "semianalysis",
+        "publisher": "SemiAnalysis · 半导体深研",
+        "author": "Dylan Patel / SemiAnalysis",
+        "author_role": "AI算力与半导体供应链",
+        "url": "https://www.semianalysis.com/feed",
+        "html_url": "https://www.semianalysis.com/",
+        "category": "ai",
+        "tier": "T1",
+        "max_age_days": "45",
+        "background": "全球顶级半导体与 AI 数据中心产业研究机构，深度追踪英伟达、台积电、HBM 存储与云厂商算力资本开支。",
+    },
+    {
+        "id": "fabricated",
+        "publisher": "Fabricated Knowledge · 芯片投研",
+        "author": "Doug O'Laughlin",
+        "author_role": "半导体与晶圆制造投研",
+        "url": "https://www.fabricatedknowledge.com/feed",
+        "html_url": "https://www.fabricatedknowledge.com/",
+        "category": "ai",
+        "tier": "T1_5",
+        "max_age_days": "60",
+        "background": "半导体买方背景研究员 Doug O'Laughlin 专栏，专注晶圆代工、先进封装、光刻设备与芯片周期供需。",
+    },
+    {
+        "id": "stratechery",
+        "publisher": "Ben Thompson · Stratechery",
+        "author": "Ben Thompson",
+        "author_role": "科技战略与平台商业",
+        "url": "https://stratechery.com/feed/",
+        "html_url": "https://stratechery.com/",
+        "category": "equities",
+        "tier": "T1",
+        "max_age_days": "30",
+        "background": "硅谷最具影响力的科技战略分析师 Ben Thompson 主笔，拆解美股七巨头商业模式、AI 分发壁垒与反垄断格局。",
+    },
+    {
+        "id": "dwarkesh",
+        "publisher": "Dwarkesh Patel · 深度访谈",
+        "author": "Dwarkesh Patel",
+        "author_role": "AI前沿与深度访谈",
+        "url": "https://www.dwarkeshpatel.com/feed",
+        "html_url": "https://www.dwarkeshpatel.com/",
+        "category": "ai",
+        "tier": "T1_5",
+        "max_age_days": "90",
+        "background": "顶级技术播客与长文作者 Dwarkesh Patel 专栏，长期对话一线大模型实验室掌舵人，追踪 Scaling Law 与算力边界。",
+    },
+    {
+        "id": "notboring",
+        "publisher": "Packy McCormick · Not Boring",
+        "author": "Packy McCormick",
+        "author_role": "科技趋势与产业商业",
+        "url": "https://www.notboring.co/feed",
+        "html_url": "https://www.notboring.co/",
+        "category": "equities",
+        "tier": "T1_5",
+        "max_age_days": "45",
+        "background": "Not Boring 主理人 Packy McCormick 深度商业长文，覆盖前沿软件、国防科技、能源基建与美股成长叙事。",
+    },
+    {
+        "id": "doomberg",
+        "publisher": "Doomberg · 能源与大宗",
+        "author": "Doomberg",
+        "author_role": "全球能源与大宗商品",
+        "url": "https://doomberg.substack.com/feed",
+        "html_url": "https://doomberg.substack.com/",
+        "category": "macro",
+        "tier": "T1_5",
+        "max_age_days": "45",
+        "background": "高人气能源与大宗商品评论团队 Doomberg，聚焦原油、天然气、核电与 AI 数据中心电力瓶颈。",
+    },
+    {
+        "id": "vitalik",
+        "publisher": "Vitalik Buterin · 以太坊研究",
+        "author": "Vitalik Buterin",
+        "author_role": "以太坊协议与链上架构",
+        "url": "https://vitalik.eth.limo/feed.xml",
+        "html_url": "https://vitalik.eth.limo/",
+        "category": "crypto",
+        "tier": "T1",
+        "max_age_days": "120",
+        "background": "以太坊联合创始人 Vitalik Buterin 官方研究博客，发布底层扩容、ZK 证明、链上治理与加密安全一线路线图。",
+    },
+    {
+        "id": "paulgraham",
+        "publisher": "Paul Graham · 商业随笔",
+        "author": "Paul Graham",
+        "author_role": "科技创业与商业随笔",
+        "url": "http://www.aaronsw.com/2002/feeds/pgessays.rss",
+        "html_url": "https://paulgraham.com/articles.html",
+        "category": "ai",
+        "tier": "T1_5",
+        "max_age_days": "180",
+        "background": "Y Combinator 联合创始人 Paul Graham 经典随笔，揭示硅谷技术代际切换、创业组织与长期复利逻辑。",
+    },
 )
 
-_BULL_WORDS = re.compile(
-    r"(?i)(?:\b(?:surge|rally|beat|growth|launch|breakthrough|approve|record high|upgrade|inflow)\b|"
-    r"上涨|大涨|飙升|突破|超预期|降息|批准|增持|利好|复苏|上调|回购)"
-)
-_BEAR_WORDS = re.compile(
-    r"(?i)(?:\b(?:drop|plunge|miss|cut|delay|lawsuit|probe|warn|risk|decline|slump|hack|ban|layoff)\b|"
-    r"下跌|暴跌|大跌|跳水|减持|调查|起诉|制裁|关税|警告|亏损|裁员|风险|承压|下调|脱锚)"
-)
-
-
-_WIRE_DATELINE_RE = re.compile(
-    r"^(?:财联社|华尔街见闻|科创板日报|证券时报|新京报)\s*\d{1,2}月\d{1,2}日(?:电|讯)[，,：:\s]*"
-)
 _EQN_ROUTINE_LISTING_RE = re.compile(
     r"(?i)(?:will\s+list\b|market\s+support\s+for|新增.*交易支持|交易支持公告|"
     r"新增.*(?:交易对|币对)|上线.*(?:永续合约|现货)|暂停.*充提|恢复.*充提|支持.*网络升级)"
@@ -420,179 +533,8 @@ _EQN_ROUTINE_LISTING_RE = re.compile(
 
 
 _scrub_forbidden = scrub_forbidden
+_norm_dup_key = norm_dup_key
 
-
-def _norm_dup_key(text: str) -> str:
-    s = unicodedata.normalize("NFKC", str(text or "")).replace("\u2212", "-").lower()
-    s = re.sub(r"(?<!\d)\.(?!\d)", "", s)
-    return re.sub(r"[^\u4e00-\u9fffa-z0-9+\-%‰$¥€£.]+", "", s)
-
-
-def _dedup_summary(title: str, summary: str) -> str:
-    """Strip duplicate bracketed titles and wire datelines; preserve diffs in signs, numbers, or CJK text."""
-    t = strip_emojis(str(title or "").strip())
-    s = strip_emojis(str(summary or "").strip())
-    if not s:
-        return ""
-    m = re.match(r"^【([^】]{2,140})】\s*(.*)$", s)
-    if m:
-        bracket_txt = m.group(1).strip()
-        rest = m.group(2).strip()
-        nt = _norm_dup_key(t)
-        nb = _norm_dup_key(bracket_txt)
-        if nb and nt and nb == nt:
-            s = rest
-    s = _WIRE_DATELINE_RE.sub("", s).strip()
-    if not s:
-        return ""
-    nt = _norm_dup_key(t)
-    ns = _norm_dup_key(s)
-    if not nt:
-        return s
-    if ns == nt or (s.endswith(("...", "…")) and len(ns) >= 10 and nt.startswith(ns)):
-        return ""
-    return s
-
-
-def _clean_text(raw: Any, *, max_len: int = 240) -> str:
-    txt = str(raw or "")
-    txt = re.sub(r"<[^>]+>", " ", txt)
-    txt = html.unescape(txt)
-    txt = _scrub_forbidden(txt)
-    txt = strip_emojis(txt)
-    txt = re.sub(r"\s+", " ", txt).strip()
-    if max_len > 0 and len(txt) > max_len:
-        txt = txt[: max_len - 3].rstrip() + "..."
-    return txt
-
-
-def html_to_clean_markdown(raw_html: str, *, max_chars: int = 16000) -> str:
-    """Convert feed/article HTML into clean, safe Markdown without XSS or forbidden jargon."""
-    s = str(raw_html or "").strip()
-    if not s:
-        return ""
-    s = re.sub(r"<(script|style|noscript|svg|iframe|object|embed)\b[^>]*>.*?</\1>", " ", s, flags=re.IGNORECASE | re.DOTALL)
-
-    def _replace_anchor(match: re.Match[str]) -> str:
-        href = html.unescape(match.group(1)).strip()
-        label = re.sub(r"<[^>]+>", " ", match.group(2))
-        label = re.sub(r"\s+", " ", html.unescape(label)).strip()
-        if not label:
-            label = href
-        if href.startswith(("http://", "https://")):
-            safe_url = href.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
-            safe_lbl = label.replace("[", "\\[").replace("]", "\\]")
-            return f"[{safe_lbl}]({safe_url})"
-        return label
-
-    s = re.sub(
-        r"<a\b[^>]*\bhref\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
-        _replace_anchor,
-        s,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    for lvl in ("1", "2", "3", "4"):
-        hashes = "#" * int(lvl)
-        s = re.sub(
-            rf"<h{lvl}\b[^>]*>(.*?)</h{lvl}>",
-            lambda m, h=hashes: f"\n\n{h} {re.sub(r'<[^>]+>', ' ', m.group(1)).strip()}\n\n",
-            s,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-
-    s = re.sub(
-        r"<(?:strong|b)\b[^>]*>(.*?)</(?:strong|b)>",
-        lambda m: f"**{re.sub(r'<[^>]+>', ' ', m.group(1)).strip()}**",
-        s,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    s = re.sub(
-        r"<blockquote\b[^>]*>(.*?)</blockquote>",
-        lambda m: "\n\n> " + re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip() + "\n\n",
-        s,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    s = re.sub(
-        r"<li\b[^>]*>(.*?)</li>",
-        lambda m: "\n- " + re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip(),
-        s,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
-    s = re.sub(r"<hr\s*/?>", "\n\n---\n\n", s, flags=re.IGNORECASE)
-    s = re.sub(r"</(?:p|div|section|article|ul|ol|tr|table)>", "\n\n", s, flags=re.IGNORECASE)
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = html.unescape(s)
-    s = scrub_forbidden(s, preserve_newlines=True)
-    s = strip_emojis(s)
-
-    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in s.splitlines()]
-    cleaned = "\n".join(lines)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    if max_chars > 0 and len(cleaned) > max_chars:
-        cleaned = cleaned[: max_chars - 3].rstrip() + "..."
-    return cleaned
-
-
-def _parse_rss_datetime(raw: str | None) -> datetime | None:
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        dt = email.utils.parsedate_to_datetime(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt.astimezone(UTC)
-    except Exception:
-        pass
-    try:
-        iso = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt.astimezone(UTC)
-    except Exception:
-        return None
-
-
-def _canon_hk_code_rss(digits: str) -> str:
-    d = str(digits or "").strip()
-    if len(d) == 5 and d.startswith("0"):
-        d = d[1:]
-    return f"{d}.HK"
-
-
-def extract_tickers(text: str) -> list[str]:
-    """Extract canonical US/A-HK/crypto/macro tickers from mixed English & Chinese financial copy."""
-    if not text:
-        return []
-    out: list[str] = []
-    for m in re.findall(r"\$([A-Z]{2,5})\b", text):
-        if m not in out:
-            out.append(m)
-    for m in re.findall(r"(?<![A-Za-z0-9])((?:SH|SZ|BJ)\d{6})(?![A-Za-z0-9])", text):
-        if m not in out:
-            out.append(m)
-    for m in re.findall(r"(?<![A-Za-z0-9])(\d{6}\.(?:SZ|SS|SH|BJ))(?![A-Za-z0-9])", text, re.IGNORECASE):
-        sym = m.upper()
-        if sym not in out:
-            out.append(sym)
-    for m in re.findall(r"(?<![A-Za-z0-9])(\d{4,5})\.HK(?![A-Za-z0-9])", text, re.IGNORECASE):
-        sym = _canon_hk_code_rss(m)
-        if sym not in out:
-            out.append(sym)
-    for m in re.findall(r"(?<![A-Za-z0-9])HK(\d{4,5})(?![A-Za-z0-9])", text, re.IGNORECASE):
-        sym = _canon_hk_code_rss(m)
-        if sym not in out:
-            out.append(sym)
-    for pat, sym in _TICKER_PATTERNS:
-        if re.search(pat, text, re.IGNORECASE) and sym not in out:
-            out.append(sym)
-    return out[:6]
-
-
-_extract_tickers = extract_tickers
 
 _ASHARE_KEYWORDS_RE = re.compile(
     r"A股|沪指|深成指|创业板|科创板|科创50|沪深300|中证500|上证|深证|北交所|恒指|恒生|恒生科技|恒科|HSTECH|港股|港股通|"
@@ -600,65 +542,6 @@ _ASHARE_KEYWORDS_RE = re.compile(
     r"(?<![A-Za-z0-9])\d{4,5}\.HK(?![A-Za-z0-9])|(?<![A-Za-z0-9])HK\d{4,5}(?![A-Za-z0-9])|(?<![A-Za-z0-9])\d{6}\.(?:SZ|SS|SH|BJ)(?![A-Za-z0-9])|"
     r"比亚迪|华为|鸿蒙|昇腾|宁德时代|茅台|中芯|寒武纪|腾讯|阿里|美团|小米"
 )
-
-_SUBTOPIC_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
-    ("DeepSeek", ("ai", "ashare"), r"\bDeepSeek\b|深度求索"),
-    ("OpenAI", ("ai", "equities"), r"\bOpenAI\b|\bChatGPT\b|\bGPT-?[45o]\b|\bo[134]-?mini\b|\bSora\b"),
-    ("Anthropic", ("ai", "equities"), r"\bAnthropic\b|\bClaude\b"),
-    ("国产大模型", ("ai", "ashare"), r"通义|千问|\bQwen\b|MiniMax|\bGLM\b|智谱|\bKimi\b|月之暗面|豆包|文心|混元"),
-    (
-        "算力芯片",
-        ("ai", "equities", "ashare"),
-        r"\bNVDA\b|Nvidia|英伟达|Blackwell|Rubin|\bGPU\b|\bHBM\b|算力|芯片|半导体|晶圆|光刻|\bTSMC\b|台积电|\bAMD\b|\bAVGO\b|博通|\bCoWoS\b|美光",
-    ),
-    ("具身智能", ("ai", "ashare"), r"具身智能|人形机器人|宇树|Optimus|Robotics|机器狗"),
-    ("自动驾驶", ("ai", "equities", "ashare"), r"自动驾驶|智驾|\bFSD\b|Robotaxi|端到端驾驶|高阶智驾"),
-    ("科创·半导体", ("ashare",), r"科创板|半导体|中芯|寒武纪|国产芯片|存储芯片|芯片国产"),
-    ("华为·汽车", ("ashare",), r"华为|鸿蒙|昇腾|比亚迪|新能源车|问界|小米汽车|理想|蔚来|小鹏|宁德时代"),
-    ("港股科技", ("ashare",), r"恒指|恒生|港股|港交所|南向|腾讯|阿里|美团|快手|百度"),
-    ("A股政策·两融", ("ashare",), r"A股|沪指|深成指|创业板|上证|深证|证监会|北向|两融|融资保证金|茅台"),
-    ("财报业绩", ("equities", "ashare"), r"财报|业绩|营收|\bEPS\b|Guidance|指引|10-K|10-Q|8-K|20-F|6-K|超预期|不及预期"),
-    ("七巨头·云厂", ("equities", "ai"), r"\bAAPL\b|Apple|苹果|\bMSFT\b|微软|\bAMZN\b|亚马逊|\bGOOG\b|谷歌|\bMETA\b|\bTSLA\b|特斯拉|\bAWS\b|Azure"),
-    ("美联储", ("macro",), r"美联储|\bFed\b|\bFOMC\b|鲍威尔|Powell|降息|加息|点阵图|缩表|利率决议"),
-    ("CPI·通胀", ("macro",), r"\bCPI\b|\bPCE\b|\bPPI\b|通胀|非农|\bNFP\b|失业率|\bGDP\b|就业"),
-    ("黄金·大宗", ("macro",), r"黄金|金价|\bXAU\b|\bGold\b|原油|\bWTI\b|\bBrent\b|白银|铜价|大宗商品"),
-    ("美债·汇率", ("macro",), r"美债|10年期|国债收益率|美元指数|\bDXY\b|人民币|离岸|汇率|关税"),
-    ("ETF·监管", ("crypto",), r"\bETF\b|\bSEC\b|牌照|立法|稳定币|USDC|USDT|合规"),
-    ("BTC·链上生态", ("crypto",), r"比特币|\bBTC\b|以太坊|\bETH\b|\bSOL\b|Solana|Coinbase|Binance|OKX|U溢价|资金费率"),
-)
-
-
-def extract_subtopics(text: str, category: str = "") -> list[str]:
-    """Extract structured subtopic tags aligned to the signal's primary sector."""
-    src = str(text or "")
-    if not src.strip():
-        return []
-    cat = str(category or "").strip().lower()
-    primary: list[str] = []
-    secondary: list[str] = []
-    for label, cats, pat in _SUBTOPIC_RULES:
-        if re.search(pat, src, re.IGNORECASE):
-            if cat and cat in cats:
-                if label not in primary:
-                    primary.append(label)
-            elif label not in secondary:
-                secondary.append(label)
-    combined = primary + [x for x in secondary if x not in primary]
-    return combined[:4]
-
-
-def _infer_direction(text: str) -> str:
-    bull = len(_BULL_WORDS.findall(text))
-    bear = len(_BEAR_WORDS.findall(text))
-    if bull > bear:
-        return "bullish"
-    if bear > bull:
-        return "bearish"
-    return "neutral"
-
-
-def _strip_ns(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1].lower() if "}" in tag else tag.lower()
 
 
 def _parse_feed_entries(
@@ -680,14 +563,14 @@ def _parse_feed_entries(
         return []
 
     entries_out: list[dict[str, Any]] = []
-    nodes = [elem for elem in root.iter() if _strip_ns(elem.tag) in ("item", "entry")]
+    nodes = [elem for elem in root.iter() if strip_xml_ns(elem.tag) in ("item", "entry")]
     for entry in nodes:
         title = ""
         link = ""
         pub_raw = ""
         bodies: dict[str, str] = {}
         for child in entry:
-            name = _strip_ns(child.tag)
+            name = strip_xml_ns(child.tag)
             if name == "title" and not title:
                 title = child.text or "".join(child.itertext())
             elif name in ("encoded", "content", "description", "summary"):
@@ -701,7 +584,7 @@ def _parse_feed_entries(
             elif name in ("pubdate", "published", "updated") and not pub_raw:
                 pub_raw = (child.text or "").strip()
 
-        dt = _parse_rss_datetime(pub_raw) or now
+        dt = parse_rss_datetime(pub_raw) or now
         if dt < cutoff:
             continue
 
@@ -742,10 +625,10 @@ def parse_feed_xml(
     for ent in raw_entries:
         if len(items_out) >= max_items:
             break
-        clean_title = _clean_text(ent["title"], max_len=140)
+        clean_title = clean_feed_text(ent["title"], max_len=140)
         if not clean_title:
             continue
-        raw_summary = _clean_text(ent["short_raw"], max_len=240)
+        raw_summary = clean_feed_text(ent["short_raw"], max_len=240)
         clean_summary = _dedup_summary(clean_title, raw_summary)
         time_bjt = ent["dt_utc"].astimezone(BJT).strftime("%Y-%m-%d %H:%M")
 
@@ -758,7 +641,7 @@ def parse_feed_xml(
                 "source": source_name,
                 "category": category,
                 "source_tier": tier,
-                "direction": _infer_direction(combined_text),
+                "direction": infer_signal_direction(combined_text),
                 "importance": "高" if tier == "T1" else "中",
                 "time_bjt": time_bjt,
                 "title": clean_title,
@@ -782,7 +665,7 @@ def _fetch_one_feed(spec: dict[str, str], timeout: int = 7) -> list[dict[str, An
         resp = requests.get(spec["url"], headers=headers, timeout=timeout)
         if resp.status_code != 200 or not resp.content:
             return []
-        xml_text = resp.content.decode("utf-8", errors="replace")
+        xml_text = decode_http_text(resp)
         return parse_feed_xml(xml_text, spec, max_items=5)
     except Exception:
         return []
@@ -795,18 +678,18 @@ def _cls_sign(params: dict[str, Any]) -> str:
 
 
 def _split_cn_headline_and_summary(title: str, body: str) -> tuple[str, str]:
-    t = _clean_text(title, max_len=140)
-    b = _clean_text(body, max_len=260)
+    t = clean_feed_text(title, max_len=140)
+    b = clean_feed_text(body, max_len=260)
     if not t and b:
         m = re.match(r"^【([^】]{4,80})】\s*(.*)$", b)
         if m:
             t = m.group(1).strip()
             b = m.group(2).strip()
         else:
-            b_nodate = _WIRE_DATELINE_RE.sub("", b).strip()
+            b_nodate = WIRE_DATELINE_RE.sub("", b).strip()
             first_sent = re.split(r"[。！？\n]", b_nodate or b, maxsplit=1)[0].strip()
             t = first_sent[:72] if first_sent else b[:72]
-    stripped_t = _WIRE_DATELINE_RE.sub("", t).strip()
+    stripped_t = WIRE_DATELINE_RE.sub("", t).strip()
     if len(stripped_t) >= 8:
         t = stripped_t
     return (t, _dedup_summary(t, b))
@@ -883,7 +766,7 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
                 dt = datetime.now(UTC)
             time_bjt = dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
 
-            raw_combined = f"{title} {_clean_text(raw_content, max_len=260)}".strip()
+            raw_combined = f"{title} {clean_feed_text(raw_content, max_len=260)}".strip()
             tickers = extract_tickers(raw_combined)
             item_cat = _infer_cn_category(raw_combined, default_cat)
             level = str(row.get("level") or "").upper()
@@ -897,7 +780,7 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
                     "source": "财联社电报",
                     "category": item_cat,
                     "source_tier": "T1_5",
-                    "direction": _infer_direction(raw_combined),
+                    "direction": infer_signal_direction(raw_combined),
                     "importance": "高" if (level in ("A", "B") or len(tickers) >= 1 or item_cat == "ashare") else "中",
                     "time_bjt": time_bjt,
                     "title": title,
@@ -939,7 +822,7 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
             title, summary = _split_cn_headline_and_summary(raw_title, raw_body)
             if not title:
                 continue
-            combined = f"{title} {_clean_text(raw_body, max_len=260)}".strip()
+            combined = f"{title} {clean_feed_text(raw_body, max_len=260)}".strip()
             tickers = extract_tickers(combined)
             is_ashare_hit = bool(_ASHARE_KEYWORDS_RE.search(combined))
             if ch != "a-stock-channel" and score < 2 and not tickers and not is_ashare_hit:
@@ -970,7 +853,7 @@ def collect_cn_finance_wires(timeout: int = 7) -> list[dict[str, Any]]:
                     "source": "华尔街见闻",
                     "category": item_cat,
                     "source_tier": "T1_5",
-                    "direction": _infer_direction(combined),
+                    "direction": infer_signal_direction(combined),
                     "importance": "高" if score >= 3 else "中",
                     "time_bjt": time_bjt,
                     "title": title,
@@ -1021,37 +904,24 @@ def _extract_eqn_overview(item: dict[str, Any]) -> str:
                         txt = ""
                     if txt:
                         parts.append(txt)
-                joined = _clean_text(" ".join(parts), max_len=260)
+                joined = clean_feed_text(" ".join(parts), max_len=260)
                 if joined:
                     return joined
     summ = ai.get("summary")
     if isinstance(summ, str) and summ.strip():
-        return _clean_text(summ, max_len=260)
+        return clean_feed_text(summ, max_len=260)
     if isinstance(summ, dict):
         raw_s = str(summ.get("zh") or summ.get("en") or "").strip()
         if raw_s:
-            return _clean_text(raw_s, max_len=260)
+            return clean_feed_text(raw_s, max_len=260)
     return ""
 
 
 def _parse_eqn_time_bjt(raw_ts: Any) -> str:
-    dt = _parse_rss_datetime(str(raw_ts or "").strip())
+    dt = parse_rss_datetime(str(raw_ts or "").strip())
     if dt is None:
         dt = datetime.now(UTC)
     return dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
-
-
-def _eqn_why_it_matters(combined: str, category: str) -> str:
-    low = combined.lower()
-    if any(k in low for k in ("fed", "fomc", "cpi", "pce", "treasury", "tariff", "美联储", "鲍威尔", "降息", "加息", "利率", "通胀", "美债", "国债", "关税", "非农")):
-        return "直接牵动美联储利率路径与跨资产风险定价，影响美股估值与加密流动性。"
-    if category == "ai" or any(k in low for k in ("nvda", "nvidia", "openai", "anthropic", "deepseek", "llm", "gpu", "hbm", "英伟达", "芯片", "算力", "大模型", "半导体")):
-        return "涉及 AI 算力供应链或头部科技催化，直接影响科技权重股与算力链情绪。"
-    if category == "crypto":
-        return "方程式加密一线突发快讯，易引发短线波动与流动性溢价变化。"
-    if category == "equities":
-        return "方程式海外传统金融突发快讯，直接映射美股权重与板块盘面预期。"
-    return "方程式全球宏观突发快讯，建议结合盘面波动与风险灯号跟踪后续发酵。"
 
 
 def _normalize_equation_item(item: dict[str, Any], channel: str) -> dict[str, Any] | None:
@@ -1064,7 +934,7 @@ def _normalize_equation_item(item: dict[str, Any], channel: str) -> dict[str, An
     raw_zh = str(item.get("zh") or "").strip()
     raw_en = str(item.get("en") or "").strip()
     is_breaking = raw_zh.startswith("*") or raw_en.startswith("*")
-    title = _clean_text((raw_zh or raw_en).lstrip("* ").strip(), max_len=140)
+    title = clean_feed_text((raw_zh or raw_en).lstrip("* ").strip(), max_len=140)
     if not title:
         return None
     if _EQN_ROUTINE_LISTING_RE.search(f"{title} {raw_en}"):
@@ -1072,7 +942,7 @@ def _normalize_equation_item(item: dict[str, Any], channel: str) -> dict[str, An
 
     overview = _extract_eqn_overview(item)
     en_clean = raw_en.lstrip("* ").strip()
-    raw_summary = _clean_text(overview or (en_clean if not raw_zh else ""), max_len=260)
+    raw_summary = clean_feed_text(overview or (en_clean if not raw_zh else ""), max_len=260)
     summary = _dedup_summary(title, raw_summary)
 
     coins = [str(c).strip().upper() for c in (item.get("coins") or []) if str(c).strip()]
@@ -1094,7 +964,7 @@ def _normalize_equation_item(item: dict[str, Any], channel: str) -> dict[str, An
     else:
         category = _infer_cn_category(combined, "macro")
 
-    direction = _infer_direction(combined)
+    direction = infer_signal_direction(combined)
     importance = "高" if (is_breaking or bool(overview) or len(tickers) >= 1) else "中"
 
     raw_url = str(item.get("url") or "").strip()
@@ -1113,7 +983,7 @@ def _normalize_equation_item(item: dict[str, Any], channel: str) -> dict[str, An
         "time_bjt": _parse_eqn_time_bjt(item.get("time")),
         "title": title,
         "summary": summary,
-        "why_it_matters": _eqn_why_it_matters(combined, category),
+        "why_it_matters": eqn_why_it_matters(combined, category),
         "tickers": tickers,
         "topics": extract_subtopics(combined, category),
         "url": url,
@@ -1440,7 +1310,7 @@ def _fetch_article_candidates_from_feed(spec: dict[str, str], timeout: int = 8) 
         resp = requests.get(spec["url"], headers=_HEADERS, timeout=timeout)
         if resp.status_code != 200 or not resp.content:
             return []
-        xml_text = resp.content.decode("utf-8", errors="replace")
+        xml_text = decode_http_text(resp)
     except Exception:
         return []
 
@@ -1448,15 +1318,15 @@ def _fetch_article_candidates_from_feed(spec: dict[str, str], timeout: int = 8) 
     raw_entries = _parse_feed_entries(xml_text, max_age_days=max_age_days)
     candidates: list[dict[str, Any]] = []
     for ent in raw_entries[:6]:
-        title = _clean_text(ent["title"], max_len=150)
+        title = clean_feed_text(ent["title"], max_len=150)
         if not title:
             continue
         body_md = html_to_clean_markdown(ent["long_raw"], max_chars=16000)
         if len(body_md) < 80:
             continue
-        summary = _clean_text(ent["short_raw"], max_len=200)
+        summary = clean_feed_text(ent["short_raw"], max_len=200)
         if not summary or len(summary) < 20:
-            summary = _clean_text(body_md.splitlines()[0], max_len=200)
+            summary = clean_feed_text(body_md.splitlines()[0], max_len=200)
         url = ent["link"]
         time_bjt = ent["dt_utc"].astimezone(BJT).strftime("%Y-%m-%d %H:%M")
         candidates.append(
@@ -1466,7 +1336,7 @@ def _fetch_article_candidates_from_feed(spec: dict[str, str], timeout: int = 8) 
                 "publisher": spec["publisher"],
                 "category": spec["category"],
                 "source_tier": spec["tier"],
-                "direction": _infer_direction(f"{title} {summary}"),
+                "direction": infer_signal_direction(f"{title} {summary}"),
                 "time_bjt": time_bjt,
                 "title": title,
                 "summary": summary,
@@ -1641,19 +1511,6 @@ def _extract_main_html_fragment(raw_html: str) -> str:
     return "\n".join(blocks)
 
 
-def _decode_response_text(resp: Any) -> str:
-    raw_bytes = getattr(resp, "content", b"") or b""
-    if not raw_bytes:
-        return str(getattr(resp, "text", "") or "")
-    enc = str(getattr(resp, "encoding", "") or "").strip()
-    if enc and enc.lower() not in ("iso-8859-1", "latin-1", "latin1"):
-        try:
-            return raw_bytes.decode(enc, errors="replace")
-        except LookupError:
-            pass
-    return raw_bytes.decode("utf-8", errors="replace")
-
-
 def fetch_url_fulltext_markdown(
     url: str,
     *,
@@ -1698,7 +1555,7 @@ def fetch_url_fulltext_markdown(
             if resp.status_code in (301, 302, 303, 307, 308):
                 return ("", "failed")
             if resp.status_code == 200 and resp.content:
-                fx = json.loads(_decode_response_text(resp))
+                fx = json.loads(decode_http_text(resp))
                 tw = (fx or {}).get("tweet") or {}
                 art = tw.get("article") or {}
                 parts: list[str] = []
@@ -1767,9 +1624,9 @@ def fetch_url_fulltext_markdown(
                 _save_cached_fulltext(cache_key, text="", status="skipped_paywall", cache_path=cache_path)
             return ("", "skipped_paywall")
         if resp.status_code == 200 and resp.content and len(resp.content) <= 2_500_000:
-            raw_html = _decode_response_text(resp)
+            raw_html = decode_http_text(resp)
             m_title = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
-            page_title = _clean_text(m_title.group(1), max_len=200) if m_title else ""
+            page_title = clean_feed_text(m_title.group(1), max_len=200) if m_title else ""
             if _looks_like_bot_challenge(page_title) or _looks_like_bot_challenge(raw_html[:3000]):
                 hit_bot_challenge = True
             else:
@@ -1803,7 +1660,7 @@ def fetch_url_fulltext_markdown(
                 if resp_j.status_code in (301, 302, 303, 307, 308):
                     return ("", "failed")
                 if resp_j.status_code == 200 and resp_j.content and len(resp_j.content) <= 2_500_000:
-                    jina_raw = _decode_response_text(resp_j).strip()
+                    jina_raw = decode_http_text(resp_j).strip()
                     marker = "Markdown Content:"
                     if marker in jina_raw[:1500]:
                         jina_raw = jina_raw.split(marker, 1)[1].strip()
@@ -1852,7 +1709,7 @@ def _fetch_cls_article_detail(
         )
         if resp.status_code != 200 or not resp.content:
             return ""
-        payload = json.loads(_decode_response_text(resp))
+        payload = json.loads(decode_http_text(resp))
         if int(payload.get("errno") or 0) != 0:
             return ""
         data = payload.get("data") or {}
@@ -1883,7 +1740,7 @@ def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
         )
         if resp.status_code != 200 or not resp.content:
             return []
-        data = (json.loads(_decode_response_text(resp)).get("data")) or {}
+        data = (json.loads(decode_http_text(resp)).get("data")) or {}
     except Exception:
         return []
 
@@ -1900,7 +1757,7 @@ def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
             continue
         seen_ids.add(art_id)
 
-        title = _clean_text(row.get("title") or "", max_len=140)
+        title = clean_feed_text(row.get("title") or "", max_len=140)
         brief = html_to_clean_markdown(str(row.get("brief") or ""), max_chars=4000)
         if not title or len(brief) < 40:
             continue
@@ -1911,8 +1768,8 @@ def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
         except Exception:
             dt = datetime.now(UTC)
         time_bjt = dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
-        sub_src = _clean_text(row.get("source") or "财联社深度", max_len=40) or "财联社深度"
-        summary = _clean_text(brief.replace("\n", " "), max_len=200)
+        sub_src = clean_feed_text(row.get("source") or "财联社深度", max_len=40) or "财联社深度"
+        summary = clean_feed_text(brief.replace("\n", " "), max_len=200)
         prepped.append(
             {
                 "art_id": art_id,
@@ -1978,7 +1835,7 @@ def _fetch_cls_depth_candidates(timeout: int = 8) -> list[dict[str, Any]]:
                 "publisher": "财联社深度",
                 "category": _infer_cn_category(combined_for_meta, "equities"),
                 "source_tier": "T1_5",
-                "direction": _infer_direction(combined_for_meta),
+                "direction": infer_signal_direction(combined_for_meta),
                 "time_bjt": time_bjt,
                 "title": title,
                 "summary": summary,
@@ -2024,7 +1881,7 @@ def _fetch_wscn_article_detail(
         )
         if resp.status_code != 200 or not resp.content:
             return None
-        d = (json.loads(_decode_response_text(resp)).get("data")) or {}
+        d = (json.loads(decode_http_text(resp)).get("data")) or {}
         if not isinstance(d, dict):
             return None
         if d.get("is_paid") or d.get("is_priced"):
@@ -2037,9 +1894,9 @@ def _fetch_wscn_article_detail(
         author_obj = d.get("author") if isinstance(d.get("author"), dict) else {}
         detail = {
             "id": clean_id,
-            "title": _clean_text(d.get("title") or "", max_len=140),
-            "summary": _clean_text(d.get("content_short") or "", max_len=200),
-            "author": _clean_text((author_obj or {}).get("display_name") or "", max_len=40),
+            "title": clean_feed_text(d.get("title") or "", max_len=140),
+            "summary": clean_feed_text(d.get("content_short") or "", max_len=200),
+            "author": clean_feed_text((author_obj or {}).get("display_name") or "", max_len=40),
             "display_time": d.get("display_time"),
             "uri": str(d.get("uri") or "").strip(),
             "content_md": content_md,
@@ -2069,7 +1926,7 @@ def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
         )
         if resp.status_code != 200 or not resp.content:
             return []
-        data = (json.loads(_decode_response_text(resp)).get("data")) or {}
+        data = (json.loads(decode_http_text(resp)).get("data")) or {}
     except Exception:
         return []
 
@@ -2103,7 +1960,7 @@ def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
         det = details.get(aid)
         if not det:
             continue
-        title = det.get("title") or _clean_text(row.get("title") or "", max_len=140)
+        title = det.get("title") or clean_feed_text(row.get("title") or "", max_len=140)
         content_md = str(det.get("content_md") or "").strip()
         if not title or len(content_md) < 300:
             continue
@@ -2116,7 +1973,7 @@ def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
             dt = datetime.now(UTC)
         time_bjt = dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
         first_para = next((ln for ln in content_md.splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
-        summary = det.get("summary") or _clean_text(first_para, max_len=200) or title
+        summary = det.get("summary") or clean_feed_text(first_para, max_len=200) or title
         author = det.get("author") or "华尔街见闻"
         pageviews = row.get("pageviews")
         pv_str = f" · 热度 {int(pageviews)}" if isinstance(pageviews, (int, float)) and pageviews > 0 else ""
@@ -2136,7 +1993,7 @@ def _fetch_wscn_hot_articles(timeout: int = 8) -> list[dict[str, Any]]:
                 "publisher": "华尔街见闻热门",
                 "category": _infer_cn_category(combined, "macro"),
                 "source_tier": "T1_5",
-                "direction": _infer_direction(combined),
+                "direction": infer_signal_direction(combined),
                 "time_bjt": time_bjt,
                 "title": title,
                 "summary": summary,
@@ -2164,7 +2021,7 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
         try:
             r = requests.get(ep, headers=aihot_headers, timeout=timeout)
             if r.status_code == 200 and r.content:
-                data = json.loads(_decode_response_text(r))
+                data = json.loads(decode_http_text(r))
                 return data if isinstance(data, dict) else {}
         except Exception:
             pass
@@ -2205,17 +2062,17 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
         seen_orig.add(orig)
 
         paired = sel_by_id.get(aid) or sel_by_url.get(orig) or {}
-        src_name = _clean_text(
+        src_name = clean_feed_text(
             ((raw.get("source") or {}).get("name")) or ((paired.get("source") or {}).get("name")) or "AIHOT",
             max_len=60,
         )
-        title = _clean_text(raw.get("title") or paired.get("title") or "", max_len=140)
+        title = clean_feed_text(raw.get("title") or paired.get("title") or "", max_len=140)
         if not title:
             continue
         summary_raw = str(raw.get("summary") or paired.get("summary") or "").strip()
         reason_raw = str(raw.get("reason") or paired.get("reason") or "").strip()
         ts_raw = raw.get("latestAt") or raw.get("publishedAt") or paired.get("publishedAt") or ""
-        dt = _parse_rss_datetime(str(ts_raw)) or datetime.now(UTC)
+        dt = parse_rss_datetime(str(ts_raw)) or datetime.now(UTC)
         merged_specs.append(
             {
                 "id": aid or hashlib.sha1(orig.encode("utf-8")).hexdigest()[:10],
@@ -2223,8 +2080,8 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
                 "title": title,
                 "orig_url": orig,
                 "src_name": src_name,
-                "aihot_summary": _clean_text(summary_raw, max_len=240),
-                "aihot_reason": _clean_text(reason_raw, max_len=200),
+                "aihot_summary": clean_feed_text(summary_raw, max_len=240),
+                "aihot_reason": clean_feed_text(reason_raw, max_len=200),
                 "time_bjt": dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M"),
             }
         )
@@ -2266,7 +2123,7 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
         body_md = scrub_forbidden("\n".join(meta_lines) + f"\n\n---\n\n{full_md}\n", preserve_newlines=True) + "\n"
 
         first_line = next((ln for ln in full_md.splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
-        summary = sp["aihot_summary"] or _clean_text(first_line, max_len=200) or sp["title"]
+        summary = sp["aihot_summary"] or clean_feed_text(first_line, max_len=200) or sp["title"]
         combined = f"{sp['title']} {summary} {full_md[:1200]}"
         candidates.append(
             {
@@ -2275,7 +2132,7 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
                 "publisher": "AIHOT热榜",
                 "category": "ai",
                 "source_tier": "T1_5",
-                "direction": _infer_direction(combined),
+                "direction": infer_signal_direction(combined),
                 "time_bjt": sp["time_bjt"],
                 "title": sp["title"],
                 "summary": summary,
@@ -2325,12 +2182,6 @@ def _select_balanced_articles(
     return picked
 
 
-def _yaml_quote(value: str) -> str:
-    clean = re.sub(r"[\r\n]+", " ", str(value or "")).strip()
-    clean = clean.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{clean}"'
-
-
 def _write_curated_article_files(articles: list[dict[str, Any]], articles_dir: Path = ARTICLES_DIR) -> None:
     articles_dir.mkdir(parents=True, exist_ok=True)
     for old_file in articles_dir.glob("feed_*.md"):
@@ -2354,10 +2205,10 @@ def _write_curated_article_files(articles: list[dict[str, Any]], articles_dir: P
 
         content = (
             "---\n"
-            f"title: {_yaml_quote(title)}\n"
-            f"summary: {_yaml_quote(summary)}\n"
-            f"publisher: {_yaml_quote(publisher)}\n"
-            f"url: {_yaml_quote(url)}\n"
+            f"title: {yaml_quote(title)}\n"
+            f"summary: {yaml_quote(summary)}\n"
+            f"publisher: {yaml_quote(publisher)}\n"
+            f"url: {yaml_quote(url)}\n"
             f"score: {score}\n"
             "---\n\n"
             f"{body_md}\n"
@@ -2505,10 +2356,6 @@ def build_opml_export(output_path: Path | str | None = None) -> str:
                 "htmlUrl": sp.get("html_url") or u,
             }
         )
-    try:
-        from backend.guru_sources import GURU_ARTICLE_FEEDS
-    except ImportError:
-        GURU_ARTICLE_FEEDS = ()
     for sp in GURU_ARTICLE_FEEDS:
         u = str(sp.get("url") or "").strip()
         if not u or u in seen_urls:

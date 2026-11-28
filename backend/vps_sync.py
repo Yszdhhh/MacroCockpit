@@ -21,7 +21,7 @@ from backend.guardrails import has_private_article_content, private_article_file
 from backend.runtime import BJT as _BJT, DATA_DIR, file_lock, resolve_data_dir
 from backend.mobile_push import load_push_env
 from backend.public_snapshot import project_public_state
-from backend.signal_aggregator import get_allowed_article_dirs, parse_markdown_article, read_article_markdown
+from backend.article_store import get_allowed_article_dirs, parse_markdown_article, read_article_markdown
 
 STATE_PATH = DATA_DIR / "cockpit_state.json"
 DEFAULT_JOURNAL_DB_PATH = DATA_DIR / "user_journal.db"

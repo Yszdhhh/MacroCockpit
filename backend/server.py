@@ -26,6 +26,13 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.article_store import (
+    STATE_OUTPUT_PATH,
+    get_allowed_article_dirs,
+    ingest_deep_research_markdown,
+    parse_markdown_article,
+    read_article_markdown,
+)
 from backend.guardrails import safe_article_filename
 from backend.runtime import (
     BJT,
@@ -57,37 +64,6 @@ from backend.public_snapshot import (
     project_public_state,
     publish_generation,
 )
-
-try:
-    from backend.signal_aggregator import (
-        STATE_OUTPUT_PATH,
-        get_allowed_article_dirs,
-        parse_markdown_article,
-    )
-except ImportError:
-    STATE_OUTPUT_PATH = DATA_DIR / "cockpit_state.json"
-
-    def get_allowed_article_dirs() -> list[tuple[Path, str]]:
-        return [(COCKPIT_ROOT / "articles", "同步深度长文")]
-
-    def parse_markdown_article(path: Path, source_label: str) -> dict[str, Any] | None:
-        if not path.exists() or path.suffix.lower() != ".md" or "异常告警" in path.name:
-            return None
-        body_md = path.read_text(encoding="utf-8", errors="replace").strip()
-        title = path.stem
-        for ln in body_md.splitlines():
-            s = ln.strip()
-            if s.startswith("# "):
-                title = s[2:].strip()
-                break
-        return {
-            "filename": path.name,
-            "title": title,
-            "source": source_label,
-            "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime)),
-            "excerpt": title,
-            "body_md": body_md,
-        }
 
 WEB_DIR = COCKPIT_ROOT / "web"
 OFFLINE_HTML_PATH = DIST_DIR / "macro_cockpit_offline.html"
@@ -465,7 +441,10 @@ class CockpitHTTPServer(ThreadingHTTPServer):
             seen_payload: set[str] = set()
             new_file = self.articles_dir / fname
             if fname and new_file.is_file():
-                arts_payload.append({"filename": fname, "content": new_file.read_text(encoding="utf-8")})
+                content = read_article_markdown(new_file, "周月度深研")
+                if content is None:
+                    raise ValueError("无法读取或公开这篇文章")
+                arts_payload.append({"filename": fname, "content": content})
                 seen_payload.add(fname)
             art_entries = (
                 (pub_manifest.get("articles") if isinstance(pub_manifest, dict) else None)
@@ -1860,11 +1839,6 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 if not body_md:
                     self._send_json(400, {"error": "body_md 不能为空"})
                     return
-                try:
-                    from backend.periodic_report import ingest_deep_research_markdown
-                except ImportError:
-                    self._send_json(503, {"error": "research ingest dependencies unavailable"})
-                    return
                 raw_tickers = b.get("tickers")
                 if isinstance(raw_tickers, str) and not raw_tickers.strip():
                     raw_tickers = None
@@ -2062,14 +2036,15 @@ def create_server(
     srv.journal_store = srv.portfolio_store.journal
     srv._login_fails = {}
     srv._login_lock = threading.Lock()
-    from backend.deep_research_runner import DeepResearchJobManager
+    if resolved_role == "standalone":
+        from backend.deep_research_runner import DeepResearchJobManager
 
-    srv.dr_manager = DeepResearchJobManager(
-        data_dir=sp.parent,
-        articles_dir=srv.articles_dir,
-        state_getter=lambda: _load_or_build_state(srv.state_path, role=srv.role, base_dir=srv.base_dir),
-        on_complete_article=lambda art: srv.publish_ingested_article(art, producer_id="demolab-dr")[1],
-    )
+        srv.dr_manager = DeepResearchJobManager(
+            data_dir=sp.parent,
+            articles_dir=srv.articles_dir,
+            state_getter=lambda: _load_or_build_state(srv.state_path, role=srv.role, base_dir=srv.base_dir),
+            on_complete_article=lambda art: srv.publish_ingested_article(art, producer_id="demolab-dr")[1],
+        )
     with srv.journal_store._lock, srv.journal_store._connect("immediate") as db:
         db.execute("INSERT OR IGNORE INTO auth_runtime_kv(k,v) VALUES('cookie_key',?)", (secrets.token_hex(32),))
         srv.cookie_key = bytes.fromhex(db.execute("SELECT v FROM auth_runtime_kv WHERE k='cookie_key'").fetchone()[0])

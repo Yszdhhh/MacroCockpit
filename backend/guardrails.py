@@ -94,6 +94,10 @@ def scrub_forbidden(
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
+def scrub_markdown(text: Any) -> str:
+    return scrub_forbidden(text, preserve_newlines=True)
+
+
 def scrub_quant_thesis(text: Any, *, preserve_newlines: bool = True) -> str:
     """Scrub quant-strategy thesis wording (signal_aggregator) before delegating to canonical scrub_forbidden."""
     if not text:
@@ -287,6 +291,19 @@ def neutralize_private_triggers(text: str) -> str:
     for rx, rep in _PRIVATE_TRIGGER_NEUTRALIZERS:
         s = rx.sub(rep, s)
     return s
+
+
+def parse_yaml_mapping(raw: str) -> dict[str, Any]:
+    """Return safe frontmatter metadata, or an empty mapping if it cannot be verified."""
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    try:
+        parsed = yaml.safe_load(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def safe_article_filename(value: Any) -> str | None:

@@ -8,8 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 try:
     import pandas as pd
 except ImportError:
@@ -251,6 +249,11 @@ def compute_cross_asset_correlations(
     allow_remote: bool = True,
 ) -> dict[str, Any]:
     """Compute real 30D & 90D Pearson correlation matrices using pure NumPy + fred_cache/Parquet."""
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("State refresh requires pandas and numpy") from exc
+
     cache_bundle = _read_fred_cache_bundle(fred_cache_path)
     raw_map: dict[str, list[tuple[str, float]]] = {
         "BTC": _load_btc_daily_series(cache_bundle, cache_path=fred_cache_path, allow_remote=allow_remote),

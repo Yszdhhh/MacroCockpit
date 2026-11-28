@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import hmac
-import inspect
 import json
 import mimetypes
 import os
@@ -25,6 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
 from backend.runtime import COCKPIT_ROOT, resolve_data_dir
 from backend.portfolio_store import PortfolioStore
 from desktop.acp_bridge import ask_agy, probe_agy
+from desktop.mcp_extensions import build_desktop_mcp_handlers
 from desktop.multi_agent_debate import get_debate, list_debates, run_multi_agent_debate
 from desktop.openbb_bridge import (
     build_openbb_apps_manifest,
@@ -396,15 +396,13 @@ class DesktopProHandler(BaseHTTPRequestHandler):
             try:
                 from backend import mcp_server
 
-                sig = inspect.signature(mcp_server.create_mcp_dispatcher)
-                kwargs: dict[str, Any] = {
-                    "store": self.server.store,  # type: ignore[attr-defined]
-                    "base_dir": self.server.base_dir,  # type: ignore[attr-defined]
-                    "public_url": os.environ.get("MACROCOCKPIT_PUBLIC_URL", "https://news.shuashuabao.xyz"),
-                }
-                if "desktop_pro" in sig.parameters:
-                    kwargs["desktop_pro"] = True
-                dispatcher = mcp_server.create_mcp_dispatcher(**kwargs)
+                dispatcher = mcp_server.create_mcp_dispatcher(
+                    store=self.server.store,  # type: ignore[attr-defined]
+                    base_dir=self.server.base_dir,  # type: ignore[attr-defined]
+                    public_url=os.environ.get("MACROCOCKPIT_PUBLIC_URL", "https://news.shuashuabao.xyz"),
+                    desktop_pro=True,
+                    desktop_handlers=build_desktop_mcp_handlers(self.server.base_dir),  # type: ignore[attr-defined]
+                )
                 status, resp_obj = dispatcher.dispatch_jsonrpc(payload, role="PORTFOLIO_RW", actor_id="desktop:pro")
                 if status == 202 or resp_obj is None:
                     self._send_bytes(202, b"", "application/json; charset=utf-8", {"MCP-Protocol-Version": getattr(mcp_server, "MCP_PROTOCOL_VERSION", "2025-11-25")})

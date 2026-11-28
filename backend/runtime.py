@@ -149,6 +149,7 @@ DATA_DIR: Path = resolve_data_dir(COCKPIT_ROOT)
 DIST_DIR: Path = resolve_dist_dir(COCKPIT_ROOT)
 USER_HOME: Path = resolve_user_home(COCKPIT_ROOT)
 HERMES_HOME: Path = resolve_hermes_home(USER_HOME)
+DEFAULT_GEMINI_API_EXE = USER_HOME / ".local" / "bin" / "gemini-api.EXE"
 
 
 def now_utc() -> datetime:
