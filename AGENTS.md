@@ -26,7 +26,7 @@
   - GitHub Actions 每 20 分钟运行一次（或海外 VPS `/opt/macro-intel-intl`），执行 `python -m backend.cloud_collector --role intl-push`，采集海外受限的 12 路源并 Gzip 推送至 `POST /api/v2/ingest-intl`（默认目标 `https://news.shuashuabao.xyz/api/v2/ingest-intl`）。
 - **Windows 主机向 VPS 同步**（[`backend/vps_sync.py`](backend/vps_sync.py)、`AppData\Local\hermes\scripts\vps_intel_sync_wrapper.py`）：
   - 定时包装器调用 `python -m backend.vps_sync --refresh-state --sync-portfolio`，加载环境时永远跳过 `MACROCOCKPIT_ACCESS_PASSWORD` 与 `MACROCOCKPIT_READ_TOKEN`。
-  - 公开部分优先经 HTTP `POST /api/v2/publish` 推送经 `project_public_state(include_candidates=True)` 脱敏后的公共快照及最多 `--max-articles 40` 篇文章（仅当返回 HTTP 404 时兼容回退 `/api/sync`）；仅在 HTTP 连接失败（排除 `SSLError` / `ProxyError`）且未传入 `--no-ssh-fallback` 时才回退 `ssh tencent-vps` 远端执行 `publish_generation()`。
+  - 公开部分经 HTTP `POST /api/v2/publish` 推送经 `project_public_state(include_candidates=True)` 脱敏后的公共快照及最多 `--max-articles 40` 篇文章；仅在 HTTP 连接失败（排除 `SSLError` / `ProxyError`）且未传入 `--no-ssh-fallback` 时才回退 `ssh tencent-vps` 远端执行 `publish_generation()`。
   - 私密持仓部分（仅当显式开启 `--sync-portfolio` 时）经专用 `PORTFOLIO_RW` 令牌（`MACROCOCKPIT_RW_TOKEN`）调用 `GET /api/v2/workspace`、`GET /api/v2/preferences` 与 `POST /api/v2/changes`，将本机 `data/user_journal.db` 的账户、现货、合约、盯盘规则与自选防倒退同步至线上受登录密码保护的 `user_journal.db`；公开快照、`/api/v2/publish`、`READ_ONLY` 令牌与离线快照仍严禁包含任何私人持仓。
 
 ---

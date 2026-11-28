@@ -70,16 +70,16 @@
 
 | 凭据 / 角色 | 传递方式 | 允许范围 | 显式禁止 |
 | --- | --- | --- | --- |
-| **浏览器会话 (`Cookie`)** | 密码登录后下发 `macro_auth`（写操作须带 Same-Origin + `X-Macro-Request: 1`） | 全站 4 入口读/写、私人复盘/随笔、组合变更、导入预览提交、推送触发 | `/api/sync`、`/api/v2/publish` |
-| **`PORTFOLIO_RW`** (`MACROCOCKPIT_RW_TOKEN`) | `Authorization: Bearer <token>` | 所有 V2 组合读写接口 + MCP 全部 8 个工具 | `/api/sync`、`/api/v2/publish`、URL `?token=` |
-| **`READ_ONLY`** (`MACROCOCKPIT_READ_TOKEN`) | `Authorization: Bearer <token>`（仅 V1 GET 兼容 `?token=`） | `/api/state`（无 `journal`）、`/api/v2/signals`（脱敏且禁探持仓）、`/api/stock`、`/api/article`、`/api/digest.md`、`/feed.xml`、`/feeds.opml` + MCP 5 个只读工具 | `/api/sync`（必回 `403`）、`/api/v2/workspace`（`403`）、`portfolio_risk(detail)`（`403`）、`signal_search(watch)` 或 `held+instrument_id`（`403`） |
-| **`SYNC_PUBLISH`** (`MACROCOCKPIT_SYNC_TOKEN`) | `Authorization: Bearer <token>` | **仅限** `POST /api/sync` 与 `POST /api/v2/publish` | 一切 `/mcp`（`403`）、一切读接口与私人工作区 |
+| **浏览器会话 (`Cookie`)** | 密码登录后下发 `macro_auth`（写操作须带 Same-Origin + `X-Macro-Request: 1`） | 全站 4 入口读/写、私人复盘/随笔、组合变更、导入预览提交、推送触发 | `/api/v2/publish` |
+| **`PORTFOLIO_RW`** (`MACROCOCKPIT_RW_TOKEN`) | `Authorization: Bearer <token>` | 所有 V2 组合读写接口、`/api/state`（含 `journal`）+ MCP 全部 8 个工具 | `/api/v2/publish`、URL `?token=` |
+| **`READ_ONLY`** (`MACROCOCKPIT_READ_TOKEN`) | `Authorization: Bearer <token>`（仅 V1 GET 兼容 `?token=`） | `/api/state`（无 `journal`）、`/api/v2/signals`（脱敏且禁探持仓）、`/api/stock`、`/api/article`、`/api/digest.md`、`/feed.xml`、`/feeds.opml` + MCP 5 个只读工具 | `/api/v2/publish`（必回 `403`）、`/api/v2/workspace`（`403`）、`portfolio_risk(detail)`（`403`）、`signal_search(watch)` 或 `held+instrument_id`（`403`） |
+| **`SYNC_PUBLISH`** (`MACROCOCKPIT_SYNC_TOKEN`) | `Authorization: Bearer <token>` | **仅限** `POST /api/v2/publish` 与 `POST /api/v2/ingest-intl` | 一切 `/mcp`（`403`）、一切读接口与私人工作区 |
 
 ### 4.2 REST 接口清单
 
 1. **公开 / 只读白名单 GET**：
    - `GET /health`、`GET /api/health`（仅读清单元数据，无快照返 `503`）
-   - `GET /api/state`（强制 `project_public_state` 裁剪；仅 Cookie 会话附加 `journal`）
+   - `GET /api/state`（强制 `project_public_state` 裁剪；`Cookie` / `local_open` / `PORTFOLIO_RW` 附加 `journal`，`READ_ONLY` 严禁包含）
    - `GET /api/v2/signals?scope=all&category=all|equities|ashare|ai|crypto|macro&subtopic=...&direction=...&sort=importance|time&from=...&to=...&limit=85&cursor=...`（支持分页及按重要度/发布时间严格倒序；`READ_ONLY` 自动剥离 `holding_radar` 与私人打分原因，并拒绝 `watch`/`rules`/`held+instrument_id`）
    - `GET /api/stock?symbol=AAPL`（`consumer` 模式下仅读已发布 `stock_profiles`）
    - `GET /api/digest.md?topic=all|finance|ai|crypto`、`GET /api/article?file=<name.md>`、`GET /feed.xml`、`GET /feeds.opml`、`GET /api/muse-spec.md`、`GET /api/caffeine-brief.md`
@@ -90,7 +90,7 @@
    - `POST /api/v2/import/preview` 与 `POST /api/v2/import/commit`：文本/CSV 持仓解析预览（10 分钟有效）与原子提交。
    - `POST /api/push`：支持 `mode`（`daily`/`headwind`/`drift`）、`include_amounts`（默认 `false` 脱敏）、`channels`，联合真实 `workspace` 构建移动推送卡片。
 3. **发布同步接口（严格仅限 `SYNC_PUBLISH` Bearer）**：
-   - `POST /api/sync`、`POST /api/v2/publish`：接受 JSON 或 `gzip` 压缩载荷（`<= 16 MiB`，超限回 `413`，非 JSON 回 `415`），原子发布世代并校验 `generation`/`sha256` 冲突（`409`）。
+   - `POST /api/v2/publish`、`POST /api/v2/ingest-intl`：接受 JSON 或 `gzip` 压缩载荷（`<= 16 MiB`，超限回 `413`，非 JSON 回 `415`），原子发布世代并校验 `generation`/`sha256` 冲突（`409`）。
 
 ### 4.3 MCP `2025-11-25` 端点与 8 个正交工具
 

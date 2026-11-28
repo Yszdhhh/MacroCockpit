@@ -113,24 +113,22 @@ def collect_payload(
     return payload, stats
 
 
-def _resolve_publish_endpoints(explicit_url: str | None = None) -> tuple[str, str | None]:
+def _resolve_publish_endpoint(explicit_url: str | None = None) -> str:
     configured = (explicit_url or os.environ.get("MACROCOCKPIT_SYNC_URL") or "").strip()
     if configured:
         cleaned = configured.rstrip("/")
-        if cleaned.endswith("/api/sync"):
-            return cleaned[: -len("/api/sync")] + "/api/v2/publish", cleaned
         if cleaned.endswith("/api/v2/publish"):
-            return cleaned, cleaned[: -len("/api/v2/publish")] + "/api/sync"
-        return cleaned, None
+            return cleaned
+        return f"{cleaned}/api/v2/publish" if not cleaned.endswith("/publish") else cleaned
 
     base = (os.environ.get("MACROCOCKPIT_PUBLIC_URL") or "https://news.shuashuabao.xyz").strip().rstrip("/")
-    return f"{base}/api/v2/publish", f"{base}/api/sync"
+    return f"{base}/api/v2/publish"
 
 
 def _resolve_portfolio_base_url(explicit_url: str | None = None) -> str:
     configured = (explicit_url or os.environ.get("MACROCOCKPIT_PORTFOLIO_URL") or "").strip().rstrip("/")
     if configured:
-        for suffix in ("/api/v2/publish", "/api/sync", "/api/v2/workspace", "/api/v2/changes"):
+        for suffix in ("/api/v2/publish", "/api/v2/workspace", "/api/v2/changes"):
             if configured.endswith(suffix):
                 return configured[: -len(suffix)]
         return configured
@@ -998,21 +996,17 @@ def publish_via_http(
     sync_token: str | None = None,
     timeout: tuple[int, int] = (20, 120),
 ) -> tuple[bool, dict[str, Any]]:
-    """Publish sanitized public snapshot via POST /api/v2/publish, falling back to /api/sync ONLY on HTTP 404."""
+    """Publish sanitized public snapshot via POST /api/v2/publish."""
     token = (sync_token if sync_token is not None else (os.environ.get("MACROCOCKPIT_SYNC_TOKEN") or "")).strip()
     if not token:
         return False, {"reason": "missing_sync_token"}
 
     sanitized_payload = _public_payload(payload)
-    primary_url, legacy_url = _resolve_publish_endpoints(url)
+    primary_url = _resolve_publish_endpoint(url)
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
         resp = requests.post(primary_url, json=sanitized_payload, headers=headers, timeout=timeout)
-        if resp.status_code == 404 and legacy_url:
-            resp_legacy = requests.post(legacy_url, json=sanitized_payload, headers=headers, timeout=timeout)
-            resp_legacy.raise_for_status()
-            return True, {"action": "http_sync_legacy", "endpoint": legacy_url, "status_code": resp_legacy.status_code}
         resp.raise_for_status()
         return True, {"action": "http_publish", "endpoint": primary_url, "status_code": resp.status_code}
     except requests.HTTPError as exc:

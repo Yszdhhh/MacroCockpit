@@ -241,6 +241,8 @@ def test_ssot_authorities_in_python_and_ui_tokens() -> None:
     assert ":root" not in desktop_css and "--paper-read:" not in desktop_css
     assert len(re.findall(r"^@media\b", web_css, flags=re.MULTILINE)) <= 5
     assert 'value="100000"' not in web_html
+    retired_hits = [m for m, p in modules.items() if "/api/sync" in p.read_text(encoding="utf-8")]
+    assert retired_hits == [], f"Retired /api/sync still referenced in: {retired_hits}"
 
 
 def test_public_ui_zero_forbidden_terms() -> None:

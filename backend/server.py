@@ -1581,7 +1581,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
                 self._send_bytes(status, resp_body, ctype, resp_hdrs)
                 return
 
-            if path in ("/api/sync", "/api/v2/publish"):
+            if path == "/api/v2/publish":
                 self._handle_sync_publish()
                 return
 

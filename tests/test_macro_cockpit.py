@@ -882,7 +882,7 @@ def test_server_auth_gate_muse_digest_rss_and_sync_isolation(tmp_path: Path) -> 
             authed.open(csrf_req, timeout=5)
         assert exc_csrf.value.code == 403
 
-        # Create private review with X-Macro-Request: 1, then /api/sync must preserve user_journal.db
+        # Create private review with X-Macro-Request: 1, then /api/v2/publish must preserve user_journal.db
         rv_req = urllib.request.Request(
             f"{base}/api/journal/review",
             data=json.dumps({"symbol": "ETH", "direction": "做多", "status": "持有中", "size_pct": 5.0}).encode("utf-8"),
@@ -892,21 +892,40 @@ def test_server_auth_gate_muse_digest_rss_and_sync_isolation(tmp_path: Path) -> 
         with authed.open(rv_req, timeout=5) as resp:
             assert json.loads(resp.read().decode("utf-8"))["symbol"] == "ETH"
 
-        # RO & RW tokens MUST be forbidden (403) from /api/sync and /api/v2/publish
+        # RO & RW tokens MUST be forbidden (403) from /api/v2/publish, and retired /api/sync returns 404
         for non_sync_tok in ("tok-test-456", "tok-rw-789"):
-            for pub_ep in ("/api/sync", "/api/v2/publish"):
-                forbid_sync = urllib.request.Request(
-                    f"{base}{pub_ep}",
-                    data=json.dumps({"state": initial_state, "articles": []}).encode("utf-8"),
-                    headers={"Authorization": f"Bearer {non_sync_tok}", "Content-Type": "application/json"},
-                    method="POST",
-                )
-                with pytest.raises(urllib.error.HTTPError) as exc_non_sync:
-                    urllib.request.urlopen(forbid_sync, timeout=5)
-                assert exc_non_sync.value.code == 403
+            forbid_sync = urllib.request.Request(
+                f"{base}/api/v2/publish",
+                data=json.dumps({"state": initial_state, "articles": []}).encode("utf-8"),
+                headers={"Authorization": f"Bearer {non_sync_tok}", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as exc_non_sync:
+                urllib.request.urlopen(forbid_sync, timeout=5)
+            assert exc_non_sync.value.code == 403
+
+        retired_sync = urllib.request.Request(
+            f"{base}/api/sync",
+            data=json.dumps({"state": initial_state, "articles": []}).encode("utf-8"),
+            headers={"Authorization": "Bearer tok-sync-999", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_retired:
+            urllib.request.urlopen(retired_sync, timeout=5)
+        assert exc_retired.value.code == 403
+
+        retired_sync_cookie = urllib.request.Request(
+            f"{base}/api/sync",
+            data=json.dumps({"state": initial_state, "articles": []}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Macro-Request": "1"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_retired_cookie:
+            authed.open(retired_sync_cookie, timeout=5)
+        assert exc_retired_cookie.value.code == 404
 
         bad_sync = urllib.request.Request(
-            f"{base}/api/sync",
+            f"{base}/api/v2/publish",
             data=json.dumps({"state": initial_state, "articles": [{"filename": "../evil.md", "content": "x"}]}).encode("utf-8"),
             headers={"Authorization": "Bearer tok-sync-999", "Content-Type": "application/json"},
             method="POST",
@@ -916,7 +935,7 @@ def test_server_auth_gate_muse_digest_rss_and_sync_isolation(tmp_path: Path) -> 
         assert exc_sync.value.code == 403
 
         good_sync = urllib.request.Request(
-            f"{base}/api/sync",
+            f"{base}/api/v2/publish",
             data=json.dumps({
                 "state": {**initial_state, "generated_at_bjt": "2026-11-22 14:25:00+08:00"},
                 "articles": [{"filename": "sync_doc.md", "content": "# 同步长文标题\n\n正文验证"}],

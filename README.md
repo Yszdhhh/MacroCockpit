@@ -45,7 +45,7 @@ MacroCockpit 2.0 是一个面向跨市场（美股、A股·港股、AI 前沿、
    - **统一去重与原子发布**：主节点合并海内外分片后统一运行 `backend/kazike_engine.py`（URL 规范化 + 14 天跨源事件聚类 + 中英跨语种数值锚点去重 + 五轴盲评 + 五板块保底截断），通过 `publish_generation()` 原子切换快照世代。
 
 2. **四角色隔离与隐私边界**
-   - `SYNC_PUBLISH`（`MACROCOCKPIT_SYNC_TOKEN`）：仅允许 `POST /api/sync`、`POST /api/v2/publish`、`POST /api/v2/ingest-intl`。
+   - `SYNC_PUBLISH`（`MACROCOCKPIT_SYNC_TOKEN`）：仅允许 `POST /api/v2/publish`、`POST /api/v2/ingest-intl`。
    - `READ_ONLY`（`MACROCOCKPIT_READ_TOKEN`）：只读公共快讯、宏观、个股投研与脱敏风控汇总（`portfolio_risk(summary)` 仅返回 10% 区间，禁用私人持仓明细与写入）。
    - `PORTFOLIO_RW` / 登录 Cookie（`MACROCOCKPIT_RW_TOKEN` / `MACROCOCKPIT_ACCESS_PASSWORD`）：读写本地 `SQLite (WAL)` 现货/合约账本与复盘随笔，永远不随公共仓库或离线快照外泄。
 

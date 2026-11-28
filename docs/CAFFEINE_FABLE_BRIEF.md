@@ -8,7 +8,7 @@
 
 | 层级 | 承载方 | 职责与边界 |
 | :--- | :--- | :--- |
-| **采集与发布端** | 本机 Windows 定时任务（20 分钟） | 抓取 FRED 宏观（含净流动性与 CPI 同比）、美股盘面与 20 只核心投研画像、SEC EDGAR 官方披露、实时外汇与加密报价（`fx_snapshot`、`crypto_quotes`）、AIHOT/EQN/国内外财经电报（含 A 股·港股看盘）与 X/KOL 观点，完成反标题党过滤、五板块均衡、子主题标注后，凭 `SYNC_PUBLISH` 令牌推送 `POST /api/sync`（或 `/api/v2/publish`）。 |
+| **采集与发布端** | 本机 Windows 定时任务（20 分钟） | 抓取 FRED 宏观（含净流动性与 CPI 同比）、美股盘面与 20 只核心投研画像、SEC EDGAR 官方披露、实时外汇与加密报价（`fx_snapshot`、`crypto_quotes`）、AIHOT/EQN/国内外财经电报（含 A 股·港股看盘）与 X/KOL 观点，完成反标题党过滤、五板块均衡、子主题标注后，凭 `SYNC_PUBLISH` 令牌推送 `POST /api/v2/publish`。 |
 | **消费托管与鉴权层** | `tencent-vps` (`--role consumer`, `127.0.0.1:18280`) | 提供 Cookie + `X-Macro-Request: 1` CSRF 保护的 4 入口 Web 驾驶舱、`PORTFOLIO_RW` 组合/规则/导入 V2 接口、`READ_ONLY` 白名单只读 API，以及 `POST /mcp`（8 正交工具）。绝不触发爬虫抓取，离线打包 `build_static_bundle()` 严格只裁剪公开数据，绝不注入私人 `journal`。 |
 | **纯 UI 审查与 CSS 精修** | Caffeine V3 (`caffeine.ai/chat`) | 基于 `DESIGN.md` 与现成 `web/index.html`、`web/styles.css` 进行报刊纸感、排版节奏、移动端溢出与交互可达性审查，产出**增量 CSS 精修补丁**或可选只读伴侣视图，**不改动后端 V2/MCP 契约，不接触数据库写入或推送密钥**。 |
 

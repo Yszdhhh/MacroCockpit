@@ -91,18 +91,17 @@ MacroCockpit 2.0 是一个跨市场（美股、A股·港股、AI 前沿、加密
 
 ---
 
-## 5. 待确认事项（非阻塞，保留契约待业务拍板）
+## 5. 待确认事项与业务拍板结论（2026-11-28 已拍板）
 
 1. **历史兼容字段与路由退役窗口**：
-   - `vps_sync.py:L1020-1023` 对 `/api/sync`（HTTP 404 回退旧路由）仍在 `tests/test_macro_cockpit.py` 中测试覆盖；建议确认线上 VPS 全面切换 `/api/v2/publish` 后再行下线。
-   - `web/app.js` 内部数据结构仍保留 `c["sl" + "eeve"]` 属性键以读取历史状态 JSON；待全链路统一迁移为 `strategy_bucket` 后可彻底清除。
+   - **已执行下线**：确认线上 VPS `/api/v2/publish` 稳定返回 `200` 后，已移除 `server.py` 与 `vps_sync.py` 的旧 `/api/sync` 路由及 404 回退逻辑，并以 AST 门禁锁定不再回流。
+   - **已拍板保留**：私密持仓库 `user_journal.db` 底层列名与 `web/app.js` 兼容读取键暂不迁移，零停机零风险；待后续持仓 schema 迭代时再顺带统一。
 2. **`server.py` `GET /api/state` vs `GET /api/journal` 对 `PORTFOLIO_RW` Bearer 令牌的边界**：
-   - 当前 `GET /api/journal` 允许 `PORTFOLIO_RW` Bearer 令牌访问，而 `GET /api/state` 仅对 `cookie`/`local_open` 附加 `journal` 字段（对 `PORTFOLIO_RW` Bearer 剥离）。本次治理保持现有契约不变，需业务确认是否统一。
+   - **已执行统一**：`GET /api/state` 对 `PORTFOLIO_RW` Bearer 与 `Cookie`/`local_open` 同等返回 `journal`，`READ_ONLY` 继续严格剥离。
 3. **`test_real_local_kol_root_smoke` 对本机非托管缓存的隐式依赖**：
-   - 该烟雾测试在隔离 git worktree 中依赖未入库的 `data/stock_profiles_cache.json` 与 `data/fred_cache.json` 才能通过 `verified_kols >= 1`；建议后续为烟雾测试增加显式夹具或环境跳过说明。
-4. **违禁词统一译法与 `producer_generation.json` 退役窗口**：
-   - `Regime`、`待补` 与方法论类提示词在旧代码中有多种近义译法（如 `市场周期`/`市场阶段`、`—`/`样本积累`）；本次在统一为直白中文的同时保持现有测试断言全绿，最终标准译法以产品审定为准。
-   - 废弃 `producer_generation.json` 与 `cockpit_state.json` 兼容副本涉及云端 CAS 与外部 Hermes/Notion 读取方，列为后续单独演进项，不在本轮破坏现有外部契约。
+   - **已执行加固**：无本地行情/FRED 缓存文件时在 `tmp_path` 自动生成确定性离线夹具，不再依赖外部未入库缓存。
+4. **`producer_generation.json` 与 `cockpit_state.json` 兼容副本退役**：
+   - 列为后续独立演进项，暂保留现有云端 CAS 与外部 Hermes/Notion 读取方契约。
 
 ---
 
