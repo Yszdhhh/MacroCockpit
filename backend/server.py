@@ -932,7 +932,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/state":
                 raw_st = self._state()
                 out = project_public_state(raw_st, include_candidates=False)
-                if auth.get("kind") in ("cookie", "local_open"):
+                if auth.get("role") == ROLE_PORTFOLIO_RW:
                     out["journal"] = self.server.journal_store.get_snapshot(out)
                 else:
                     out.pop("journal", None)

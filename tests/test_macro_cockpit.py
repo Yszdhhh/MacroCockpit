@@ -932,6 +932,18 @@ def test_server_auth_gate_muse_digest_rss_and_sync_isolation(tmp_path: Path) -> 
             assert st["generated_at_bjt"] == "2026-11-22 14:25:00+08:00"
             assert any(r["symbol"] == "ETH" for r in st["journal"]["trade_reviews"])
 
+        # PORTFOLIO_RW Bearer token aligns with cookie role on GET /api/state (includes journal)
+        rw_state_req = urllib.request.Request(f"{base}/api/state", headers={"Authorization": "Bearer tok-rw-789"})
+        with urllib.request.urlopen(rw_state_req, timeout=5) as resp:
+            st_rw = json.loads(resp.read().decode("utf-8"))
+            assert any(r["symbol"] == "ETH" for r in st_rw["journal"]["trade_reviews"])
+
+        # READ_ONLY Bearer token must still have journal stripped on GET /api/state
+        ro_state_after_req = urllib.request.Request(f"{base}/api/state", headers={"Authorization": "Bearer tok-test-456"})
+        with urllib.request.urlopen(ro_state_after_req, timeout=5) as resp:
+            st_ro = json.loads(resp.read().decode("utf-8"))
+            assert "journal" not in st_ro
+
         with authed.open(f"{base}/api/article?file=sync_doc.md", timeout=5) as resp:
             art = json.loads(resp.read().decode("utf-8"))
             assert "同步长文标题" in art["body_md"]
