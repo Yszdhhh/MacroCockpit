@@ -6,15 +6,13 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from backend.fred_and_market import DATA_DIR, atomic_write_json
+from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json
 from backend.zh_brief import attach_zh_briefs_batch, is_primarily_english
 
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
 
 HOT_RULE_VERSION = "heat-v1-48h-halflife24h"
 JUDGE_VERSION = "judge-v3"

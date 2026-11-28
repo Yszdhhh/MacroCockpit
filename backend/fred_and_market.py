@@ -7,9 +7,19 @@ import json
 import math
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json,
+    is_finite as _is_finite,
+    resolve_hermes_home,
+)
 
 try:
     import pandas as pd
@@ -24,18 +34,9 @@ try:
 except ImportError:
     yaml = None  # type: ignore[assignment]
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-DATA_DIR = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (COCKPIT_ROOT / "data"))
 FRED_CACHE_PATH = DATA_DIR / "fred_cache.json"
 
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
-
-
-_HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (_safe_home(COCKPIT_ROOT) / "AppData" / "Local" / "hermes"))
+_HERMES_HOME = resolve_hermes_home()
 PARQUET_MACRO_DIR = Path(
     os.environ.get("MACROCOCKPIT_PARQUET_MACRO_DIR") or (DATA_DIR / "parquet_macro")
 )
@@ -104,29 +105,12 @@ US_SECTORS: list[tuple[str, str]] = [
     ("XLU", "公用事业"),
 ]
 
-BJT = timezone(timedelta(hours=8))
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     )
 }
-
-
-def atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-    os.replace(tmp, path)
-
-
-def _is_finite(val: Any) -> bool:
-    if val is None or isinstance(val, bool):
-        return False
-    try:
-        return math.isfinite(float(val))
-    except (TypeError, ValueError):
-        return False
 
 
 def _load_fred_api_key() -> str | None:
@@ -296,7 +280,7 @@ def _fetch_gold_tail() -> list[tuple[str, float]]:
                     by_day: dict[str, float] = {}
                     for ts, val in zip(ts_list, closes):
                         if _is_finite(val) and float(val) > 0:
-                            day = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+                            day = datetime.fromtimestamp(int(ts), tz=UTC).strftime("%Y-%m-%d")
                             by_day[day] = round(float(val), 2)
                     if len(by_day) >= 5:
                         return sorted(by_day.items(), key=lambda x: x[0])

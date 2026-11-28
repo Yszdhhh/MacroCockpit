@@ -13,7 +13,6 @@ import threading
 import time
 import uuid
 from concurrent.futures import ALL_COMPLETED, Future, ThreadPoolExecutor, wait
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,19 +20,22 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
+from backend.guardrails import has_private_article_text as _has_sensitive_dr_text
+from backend.runtime import (
+    COCKPIT_ROOT,
+    DATA_DIR,
+    atomic_write_json,
+    now_bjt_iso as _now_bjt_iso,
+    resolve_user_home,
+)
 from backend.periodic_report import (
     DEFAULT_ARTICLES_DIR,
     DEFAULT_GEMINI_API_EXE,
     _scrub_forbidden,
     ingest_deep_research_markdown,
 )
-from backend.public_snapshot import (
-    has_private_article_text,
-    project_public_state,
-)
+from backend.public_snapshot import project_public_state
 
-BJT = timezone(timedelta(hours=8))
 JOBS_FILENAME = "deep_research_jobs.json"
 MAX_JOBS_HISTORY = 20
 DEMOLAB_SKILL_PATH = COCKPIT_ROOT / ".agents" / "skills" / "deep-research" / "SKILL.md"
@@ -47,16 +49,6 @@ _STAGE_LABELS: dict[str, str] = {
     "failed": "失败",
 }
 
-_EXTRA_PRIVATE_DR_RE = re.compile(
-    r"(?:我的|本人|个人|实际|我在[\u4e00-\u9fffA-Za-z0-9]{0,16}的)\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)"
-    r"|(?:我|本人|个人|咱们)\s*(?:目前|当前|现在|手里|手头|账户里?)?\s*(?:持有|买了|买入|建仓|加仓|重仓|满仓|做多|做空|套牢)\s*[^\n。；;]{0,28}?(?:\d[\d,.]*\s*(?:万|千|亿)?\s*(?:美元|美金|人民币|港元|港币|元|股|手|张|枚|份|USDT|USD|CNY|RMB|HKD)|股票|仓位|多单|空单)"
-    r"|\bI\s+(?:currently\s+)?(?:hold|own|bought|shorted)\s+\$?\d[\d,.]*\b"
-    r"|(?:账户\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)|持仓金额|持仓市值|仓位金额|账户金额|保证金金额)\s*(?:为|是|有|约|达|[:：=])?\s*\d"
-    r"|(?<![A-Z0-9_-])(?:sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{16,}|gh[pousr]_[A-Z0-9]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"
-    r"|(?<![A-Z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
-    re.IGNORECASE,
-)
-
 _WIN_PATH_RE = re.compile(
     r'(?:"[A-Za-z]:[/\\][^"\r\n]+"|\'[A-Za-z]:[/\\][^\'\r\n]+\'|[A-Za-z]:[/\\][^\r\n"\'`,;)\]]+)'
 )
@@ -68,24 +60,6 @@ _ENV_ASSIGN_RE = re.compile(r'\b[A-Za-z_][A-Za-z0-9_]{2,}\s*=\s*(?:"[^"\r\n]*"|\
 
 class BusyError(RuntimeError):
     """Raised when a Deep Research run is already in progress."""
-
-
-def _now_bjt_iso() -> str:
-    return datetime.now(BJT).isoformat(timespec="seconds")
-
-
-def _safe_home() -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return COCKPIT_ROOT
-
-
-def _has_sensitive_dr_text(text: Any) -> bool:
-    s = str(text or "")
-    if not s:
-        return False
-    return has_private_article_text(s) or bool(_EXTRA_PRIVATE_DR_RE.search(s))
 
 
 def _sanitize_diag_text(text: Any, *, max_len: int = 120) -> str:
@@ -116,7 +90,7 @@ def _resolve_staff_hub_script() -> tuple[str | None, Path | None]:
     node_exe = shutil.which("node")
     env_hub = (os.environ.get("MACROCOCKPIT_STAFF_HUB") or "").strip()
     candidates = [Path(env_hub)] if env_hub else []
-    candidates.append(_safe_home() / ".claude" / "staff-hub" / "companion" / "agy-companion.mjs")
+    candidates.append(resolve_user_home() / ".claude" / "staff-hub" / "companion" / "agy-companion.mjs")
     script = next((p for p in candidates if p.is_file()), None)
     return node_exe, script
 

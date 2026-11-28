@@ -7,14 +7,20 @@ import json
 import math
 import os
 import re
-import urllib.parse
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from backend.fred_and_market import DATA_DIR, atomic_write_json
+from backend.guardrails import has_private_article_text, scrub_forbidden as _scrub_text
+from backend.runtime import (
+    BJT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json,
+    parse_iso_dt as _parse_iso_dt,
+    reject_json_constant,
+)
 from backend.kazike_engine import (
-    BROWSE_FLOOR,
     TIER_LABELS,
     TIER_PRIORITY,
     _ROUNDUP_RE,
@@ -22,12 +28,9 @@ from backend.kazike_engine import (
     _extract_numeric_anchors,
     _isolation_conflict,
     normalize_url,
-    parse_time_utc,
 )
 from backend.zh_brief import _deterministic_zh_brief, is_primarily_english
 
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
 
 LEDGER_VERSION = 1
 LEDGER_FILENAME = "event_ledger.json"
@@ -181,39 +184,6 @@ _MONTH_MAP = {
     "aug": "08", "august": "08", "sep": "09", "sept": "09", "september": "09",
     "oct": "10", "october": "10", "nov": "11", "november": "11", "dec": "12", "december": "12",
 }
-
-_FORBIDDEN_WORDS = (
-    "Sleeve", "E21", "E32", "E33", "Tier-1", "Regime", "arbitration",
-    "测算口径", "公式解释", "公式说明", "逻辑解释", "联动说明", "方法论说明", "待补", "待刷新", "N/A",
-)
-
-
-def _scrub_text(text: str) -> str:
-    out = str(text or "")
-    for term in _FORBIDDEN_WORDS:
-        out = re.sub(re.escape(term), "", out, flags=re.IGNORECASE)
-    return re.sub(r"\s{2,}", " ", out).strip()
-
-
-def _parse_iso_dt(raw: Any) -> datetime | None:
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        norm = s[:-1] + "+00:00" if s.endswith("Z") else s
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}", norm):
-            norm = norm.replace(" ", "T") + ":00+08:00"
-        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", norm):
-            norm = norm.replace(" ", "T") + "+08:00"
-        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", norm):
-            norm = norm + "T00:00:00+08:00"
-        dt = datetime.fromisoformat(norm)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=BJT)
-        return dt.astimezone(BJT)
-    except ValueError:
-        return None
-
 
 def _fmt_bjt(dt: datetime | None) -> str:
     if dt is None:
@@ -946,10 +916,6 @@ def _is_valid_ledger_event_schema(ev: Any) -> bool:
     return True
 
 
-def _reject_nonfinite_json(_const: str) -> Any:
-    raise ValueError("non-finite JSON")
-
-
 def _try_load_ledger(path: Path) -> tuple[dict[str, Any], str]:
     """Load ledger and report explicit status: 'ok', 'missing', or 'error'."""
     try:
@@ -957,7 +923,7 @@ def _try_load_ledger(path: Path) -> tuple[dict[str, Any], str]:
             return {"version": LEDGER_VERSION, "events": {}}, "missing"
         if path.stat().st_size > 32 * 1024 * 1024:
             return {"version": LEDGER_VERSION, "events": {}}, "error"
-        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_nonfinite_json)
+        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_json_constant)
         if (
             isinstance(raw, dict)
             and type(raw.get("version")) is int
@@ -1362,8 +1328,6 @@ def _safe_int(val: Any, default: int = 0) -> int:
 
 def project_event_card(card: Any) -> dict[str, Any] | None:
     """Strictly allowlist public-safe fields for an event card; drop private data."""
-    from backend.public_snapshot import has_private_article_text
-
     if not isinstance(card, dict):
         return None
     eid = str(card.get("event_id") or card.get("id") or "").strip()

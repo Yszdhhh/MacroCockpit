@@ -9,12 +9,13 @@ import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable
 
-BJT = timezone(timedelta(hours=8))
+from backend.runtime import BJT
+
 LOOKBACK_DAYS = 120
 PERIODS = (7, 30, 90)
 TREND_METHOD = "paired-coverage-v3"

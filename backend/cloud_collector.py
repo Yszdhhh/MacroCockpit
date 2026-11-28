@@ -9,7 +9,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,20 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.guardrails import (
+    has_private_article_content,
+    safe_article_filename,
+    scrub_forbidden as _scrub_forbidden,
+)
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    atomic_write_json,
+    file_lock,
+    now_bjt_iso as _now_bjt_iso,
+    read_json_safe as _read_json,
+    resolve_data_dir,
+)
 from backend.calendar_events import build_calendar_events, filter_calendar_events
 from backend.correlation_engine import (
     _save_series_to_fred_cache,
@@ -29,11 +43,9 @@ from backend.correlation_engine import (
     fetch_btc_binance_daily,
 )
 from backend.fred_and_market import (
-    COCKPIT_ROOT,
     FRED_SERIES_MAP,
     _fetch_gold_tail,
     _load_fred_api_key,
-    atomic_write_json,
     build_macro_fred,
     fetch_fred_observations,
     fetch_us_equities,
@@ -43,11 +55,8 @@ from backend.event_feed import update_event_feed
 from backend.market_quotes import fetch_crypto_quotes, fetch_fx_snapshot
 from backend.mobile_push import get_push_channels_status, load_push_env
 from backend.public_snapshot import (
-    file_lock,
-    has_private_article_content,
     load_published_generation,
     publish_generation,
-    safe_article_filename,
 )
 from backend.rss_sources import (
     CURATED_ARTICLE_FEEDS,
@@ -57,7 +66,6 @@ from backend.rss_sources import (
     _fetch_cls_depth_candidates,
     _fetch_one_feed,
     _fetch_wscn_hot_articles,
-    _scrub_forbidden,
     _select_balanced_articles,
     _write_curated_article_files,
     build_opml_export,
@@ -72,7 +80,6 @@ from backend.signal_aggregator import (
     _collect_aihot_signals,
     _collect_equity_signals,
     _ensure_signal_topics,
-    _read_json,
     _sanitize_state_value,
     _sort_and_balance_articles,
     parse_markdown_article,
@@ -133,8 +140,6 @@ from backend.stock_research import (
     fetch_gtimg_batch,
 )
 
-BJT = timezone(timedelta(hours=8))
-
 # Verified live against tencent-vps: these 8 signal feeds + 1 article feed fail/timeout from CN datacenter.
 INTL_ONLY_RSS_IDS: frozenset[str] = frozenset(
     {
@@ -155,10 +160,6 @@ _BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 _MAX_INTL_STALE_SECONDS = 7200
-
-
-def _now_bjt_iso() -> str:
-    return datetime.now(BJT).isoformat(timespec="seconds")
 
 
 def _strip_private_items(items: list[Any]) -> list[dict[str, Any]]:
@@ -258,7 +259,7 @@ def collect_intl_bundle(
 ) -> dict[str, Any]:
     """Collect sources blocked or rate-limited in mainland China without touching private ledgers."""
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     intl_rss_specs = [sp for sp in CURATED_RSS_FEEDS if sp["id"] in INTL_ONLY_RSS_IDS]
     intl_art_specs = [sp for sp in CURATED_ARTICLE_FEEDS if sp["id"] in INTL_ONLY_ARTICLE_IDS]
 
@@ -371,7 +372,7 @@ def ingest_intl_bundle(base_dir: Path | str, payload: dict[str, Any]) -> dict[st
     if not isinstance(payload, dict):
         raise ValueError("intl_payload_must_be_object")
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     raw_signals = _strip_private_items(list(payload.get("raw_signals") or []))
@@ -581,7 +582,7 @@ def run_cn_merge_and_publish(
 ) -> dict[str, Any]:
     """Run domestic CN direct collection, merge intl relay bundle, dedup globally, and atomically publish generation."""
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     articles_dir = root / "articles"
     data_dir.mkdir(parents=True, exist_ok=True)
     articles_dir.mkdir(parents=True, exist_ok=True)
@@ -877,7 +878,7 @@ def run_cn_merge_and_publish(
                     "url": str(it.get("url") or ""),
                     "score": int(it.get("attention_score") or 0),
                     "time_bjt": str(it.get("time_bjt") or ""),
-                    "body_md": _scrub_forbidden(str(it.get("body_md") or "")),
+                    "body_md": _scrub_forbidden(str(it.get("body_md") or ""), preserve_newlines=True),
                 }
                 for it in balanced_arts
             ]
@@ -1201,7 +1202,7 @@ def run_eqn_fast_sync(
 ) -> dict[str, Any]:
     """Fast incremental EquationNews REST+ETag sync: skip publish on 304, merge & publish on 200 changes."""
     root = Path(base_dir)
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     eqn_signals, meta = collect_equation_news_with_meta(

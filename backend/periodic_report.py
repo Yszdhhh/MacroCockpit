@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,69 +17,40 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR
-from backend.kol_intel_engine import (
-    FORBIDDEN_TERMS,
-    MIN_VERIFIED_SAMPLE,
-    extract_tickers,
-    scrub_forbidden,
-)
-from backend.public_snapshot import (
-    _atomic_write_text,
+from backend.guardrails import (
     has_private_article_content,
     safe_article_filename,
+    scrub_forbidden,
+)
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    DATA_DIR,
+    atomic_write_text as _atomic_write_text,
+    resolve_bjt_datetime as _resolve_bjt_datetime,
+    resolve_user_home,
+)
+from backend.kol_intel_engine import (
+    MIN_VERIFIED_SAMPLE,
+    extract_tickers,
 )
 
-BJT = timezone(timedelta(hours=8))
 DEFAULT_ARTICLES_DIR = COCKPIT_ROOT / "articles"
 DEFAULT_STATE_PATH = DATA_DIR / "cockpit_state.json"
-DEFAULT_GEMINI_API_EXE = Path.home() / ".local" / "bin" / "gemini-api.EXE"
+DEFAULT_GEMINI_API_EXE = resolve_user_home() / ".local" / "bin" / "gemini-api.EXE"
 PERIODIC_SOURCE_LABEL = "周月度深研"
 GEMINI_DR_AGENT = "deep-research-preview-04-2026"
-
-_EXTRA_SCRUB_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bTier-?S\b", re.IGNORECASE), "高优"),
-    (re.compile(r"\bTier-?A\b", re.IGNORECASE), "重点"),
-    (re.compile(r"E21|E32|E33", re.IGNORECASE), "波动结构"),
-    (re.compile(r"Tier-?1", re.IGNORECASE), "核心"),
-    (re.compile(r"Sleeves?", re.IGNORECASE), "仓位"),
-    (re.compile(r"Regimes?", re.IGNORECASE), "市场阶段"),
-    (re.compile(r"arbitration", re.IGNORECASE), "风险平衡"),
-    (re.compile(r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明"), "参考摘要"),
-    (re.compile(r"待补充|待补|待刷新"), "—"),
-    (re.compile(r"N/A", re.IGNORECASE), "—"),
-)
 
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|$)", re.MULTILINE | re.DOTALL)
 
 
 def _scrub_forbidden(text: Any) -> str:
-    """Scrub all forbidden jargon and placeholders while preserving markdown line breaks."""
-    raw = str(text or "").replace("\r\n", "\n")
-    s = scrub_forbidden(raw)
-    for rx, rep in _EXTRA_SCRUB_PATTERNS:
-        s = rx.sub(rep, s)
-    lines = [re.sub(r"[ \t]{2,}", " ", ln).rstrip() for ln in s.splitlines()]
-    return "\n".join(lines).strip()
+    return scrub_forbidden(text, preserve_newlines=True)
 
 
 def _yaml_quote(value: str) -> str:
     escaped = str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").strip()
     return f'"{escaped}"'
-
-
-def _resolve_bjt_datetime(as_of: datetime | date | str | None = None) -> datetime:
-    if as_of is None:
-        return datetime.now(BJT)
-    if isinstance(as_of, datetime):
-        return as_of.astimezone(BJT) if as_of.tzinfo is not None else as_of.replace(tzinfo=BJT)
-    if isinstance(as_of, date):
-        return datetime(as_of.year, as_of.month, as_of.day, 9, 0, tzinfo=BJT)
-    raw = str(as_of).strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    parsed = datetime.fromisoformat(raw)
-    return parsed.astimezone(BJT) if parsed.tzinfo is not None else parsed.replace(tzinfo=BJT)
 
 
 def _fred_lookup(state: dict[str, Any]) -> dict[str, dict[str, Any]]:

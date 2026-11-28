@@ -11,12 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from backend.guardrails import has_private_article_text
+from backend.runtime import reject_json_constant, resolve_data_dir
 from backend.calendar_events import filter_calendar_events
 from backend.curation import rank_curated_signals
 from backend.import_positions import PreviewExpiredError, PreviewValidationError, commit_import, preview_import
 from backend.journal_store import RevisionConflictError
 from backend.portfolio_store import IdempotencyConflictError, PortfolioStore
-from backend.public_snapshot import has_private_article_text, load_published_generation, project_public_state
+from backend.public_snapshot import load_published_generation, project_public_state
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_MCP_VERSIONS: frozenset[str] = frozenset({"2025-11-25", "2025-06-18", "2025-03-26"})
@@ -545,10 +547,7 @@ def _tool_err(text: str, *, code: int = 400, detail: dict[str, Any] | None = Non
 
 
 def _load_rpc_json(raw: str) -> Any:
-    def reject_constant(value: str) -> None:
-        raise ValueError(f"Invalid JSON constant: {value}")
-
-    return json.loads(raw, parse_constant=reject_constant)
+    return json.loads(raw, parse_constant=reject_json_constant)
 
 
 def _rpc_result(req_id: Any, result: Any) -> dict[str, Any]:
@@ -1237,7 +1236,7 @@ class McpDispatcher:
             try:
                 from backend.deep_research_runner import run_demolab_deep_research
 
-                state_file = self.base_dir / "data" / "cockpit_state.json"
+                state_file = resolve_data_dir(self.base_dir) / "cockpit_state.json"
                 state_snap = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {}
                 res = run_demolab_deep_research(
                     prompt,
@@ -1289,7 +1288,7 @@ class McpDispatcher:
         max_articles = int(args.get("max_articles") if args.get("max_articles") is not None else 30)
         dry_run = bool(args.get("dry_run", False))
         sync_portfolio = bool(args.get("sync_portfolio", False))
-        state_path = self.base_dir / "data" / "cockpit_state.json"
+        state_path = resolve_data_dir(self.base_dir) / "cockpit_state.json"
 
         if sync_portfolio and role != "PORTFOLIO_RW":
             return _tool_err("同步私密持仓需要 PORTFOLIO_RW 权限", code=403)

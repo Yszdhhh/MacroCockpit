@@ -4,12 +4,12 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from backend.runtime import BJT, UTC
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     ZoneInfo = None  # type: ignore[assignment]
-
-UTC = timezone.utc
 
 # Verified against federalreserve.gov/monetarypolicy/fomccalendars.htm
 FOMC_2026_2027: tuple[tuple[str, str, str], ...] = (
@@ -124,7 +124,7 @@ def _make_exact_event(
         "event_utc": dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "date_local": dt_local.strftime("%Y-%m-%d"),
         "time_local": dt_local.strftime("%Y-%m-%d %H:%M"),
-        "time_bjt": dt_utc.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M"),
+        "time_bjt": dt_utc.astimezone(BJT).strftime("%Y-%m-%d %H:%M"),
         "days_until": days_until,
         "hours_until": hours_until,
         "tickers": list(tickers),

@@ -10,37 +10,31 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-if str(COCKPIT_ROOT) not in sys.path:
-    sys.path.insert(0, str(COCKPIT_ROOT))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
+from backend.runtime import BJT, COCKPIT_ROOT, DATA_DIR, finite_float as _safe_float, resolve_hermes_home
 _NOTION_LOCAL_CFG = COCKPIT_ROOT / "config" / "notion_ids.json"
 NOTION_IDS_PATH = _NOTION_LOCAL_CFG if _NOTION_LOCAL_CFG.is_file() else (COCKPIT_ROOT / "config" / "notion_ids.example.json")
-STATE_PATH = COCKPIT_ROOT / "data" / "cockpit_state.json"
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
+STATE_PATH = DATA_DIR / "cockpit_state.json"
 
 
-_HERMES_ROOT = Path(os.environ.get("HERMES_HOME") or (_safe_home(COCKPIT_ROOT) / "AppData" / "Local" / "hermes"))
+_HERMES_ROOT = resolve_hermes_home()
 HERMES_ENV_PATH = _HERMES_ROOT / ".env"
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
-BJT = timezone(timedelta(hours=8))
 
 USER_OWNED_FIELDS: frozenset[str] = frozenset(
     {"跟踪状态", "验证状态", "阅读状态", "实际仓位%", "复盘归因"}
@@ -113,16 +107,6 @@ def _select_prop(name: str | None) -> dict[str, Any]:
 
 def _multi_select_prop(names: list[str]) -> dict[str, Any]:
     return {"multi_select": [{"name": n} for n in names if str(n).strip()]}
-
-
-def _safe_float(value: Any, default: float | None = None) -> float | None:
-    if value is None or value == "":
-        return default
-    try:
-        num = float(value)
-        return num if math.isfinite(num) else default
-    except (TypeError, ValueError):
-        return default
 
 
 def _number_prop(value: Any) -> dict[str, Any]:

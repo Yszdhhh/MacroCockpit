@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any, TextIO
 
 _BACKEND_DIR = Path(__file__).resolve().parent
-_COCKPIT_ROOT = _BACKEND_DIR.parent
-if str(_COCKPIT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_COCKPIT_ROOT))
+_REPO_ROOT = _BACKEND_DIR.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
+from backend.runtime import COCKPIT_ROOT, resolve_data_dir
 from backend.mcp_server import MCP_PROTOCOL_VERSION, McpDispatcher, _load_rpc_json, _rpc_error
 from backend.mobile_push import load_push_env
 
@@ -69,7 +70,7 @@ def run_stdio_loop(
     *,
     offline_public: bool = False,
     desktop_pro: bool = False,
-    base_dir: Path | str = _COCKPIT_ROOT,
+    base_dir: Path | str = COCKPIT_ROOT,
     mcp_url: str = "",
     mcp_token: str = "",
     timeout: int = 30,
@@ -89,7 +90,7 @@ def run_stdio_loop(
     elif desktop_pro:
         from backend.portfolio_store import PortfolioStore
 
-        db_path = Path(base_dir) / "data" / "user_journal.db"
+        db_path = resolve_data_dir(Path(base_dir)) / "user_journal.db"
         store = PortfolioStore(db_path)
         dispatcher = McpDispatcher(store=store, base_dir=Path(base_dir), desktop_pro=True)
         local_role = "PORTFOLIO_RW"
@@ -200,7 +201,7 @@ def main() -> None:
         action="store_true",
         help="Enable local Desktop Pro PORTFOLIO_RW mode (12 tools including OpenBB, deep research, and cloud sync)",
     )
-    ap.add_argument("--base-dir", type=Path, default=_COCKPIT_ROOT, help="Base directory containing data/")
+    ap.add_argument("--base-dir", type=Path, default=COCKPIT_ROOT, help="Base directory containing data/")
     ap.add_argument("--data-dir", type=Path, help="Optional data directory override")
     ap.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds for remote proxy mode")
     args = ap.parse_args()

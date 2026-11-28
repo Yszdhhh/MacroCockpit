@@ -7,16 +7,20 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from backend.curation import _check_safe_regex, rank_curated_events, rank_curated_signals, validate_curation_rule
+from backend.guardrails import (
+    FORBIDDEN_AUDIT_KEYS as _FORBIDDEN_AUDIT_KEYS,
+    check_safe_regex as _validate_safe_regex,  # noqa: F401 - compatibility import
+)
+from backend.runtime import BJT as _BJT, now_bjt_iso as _now_iso
+from backend.curation import rank_curated_events, rank_curated_signals, validate_curation_rule
 from backend.journal_store import JournalStore, RevisionConflictError
 from backend.market_quotes import KNOWN_SWAP_MULTIPLIERS, fetch_crypto_quotes, fetch_fx_snapshot
 from backend.valuation import (
-    CORE_SLEEVE_IDS,
     _derivative_quote_currency,
     decimal_str,
     evaluate_portfolio,
@@ -25,8 +29,6 @@ from backend.valuation import (
     to_decimal,
 )
 
-_BJT = timezone(timedelta(hours=8))
-
 DEFAULT_ACCOUNT_ID = "acct_default"
 VALID_ROLES = frozenset({"READ_ONLY", "PORTFOLIO_RW", "SYNC_PUBLISH"})
 VALID_ENTITIES = frozenset(
@@ -34,37 +36,6 @@ VALID_ENTITIES = frozenset(
 )
 VALID_CURATION_KINDS = frozenset({"instrument", "sector", "keyword", "regex", "topic", "source"})
 VALID_CURATION_ACTIONS = frozenset({"watch", "block", "mute", "adjust"})
-_FORBIDDEN_AUDIT_KEYS = frozenset(
-    {
-        "token",
-        "access_token",
-        "read_token",
-        "rw_token",
-        "sync_token",
-        "secret",
-        "password",
-        "authorization",
-        "cookie",
-        "amount",
-        "qty",
-        "price",
-        "entry_price",
-        "mark_price",
-        "margin",
-        "margin_usd",
-        "margin_amount",
-        "upl",
-        "equity",
-        "net_equity",
-        "notional",
-        "debt",
-        "confirmed_debt_usd",
-        "raw_text",
-        "body",
-        "text",
-        "csv",
-    }
-)
 _MAX_RULES = 100
 
 
@@ -78,10 +49,6 @@ class ConstraintViolationError(ValueError):
 
 class PreviewExpiredError(ValueError):
     """An import preview expired before the write transaction could commit it."""
-
-
-def _now_iso() -> str:
-    return datetime.now(_BJT).isoformat(timespec="seconds")
 
 
 def _canonical_json(obj: Any) -> str:
@@ -123,10 +90,6 @@ def _verify_stored_token(token: str, salt: str, stored_hash: str) -> bool:
         hmac.compare_digest(c.encode("ascii"), stored_hash.encode("ascii"))
         for c in (cand1, cand2, cand3)
     )
-
-
-def _validate_safe_regex(pattern: str) -> None:
-    _check_safe_regex(pattern)
 
 
 def _sanitize_audit_detail(detail: dict[str, Any] | None) -> dict[str, Any]:

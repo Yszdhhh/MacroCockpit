@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import http.cookiejar
 import json
@@ -16,7 +15,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -44,14 +44,28 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.guardrails import (
+    FORBIDDEN_TERMS as FORBIDDEN_TERMS,
+    has_private_article_text,
+    sanitize_http_url_syntax as _safe_http_url,
+    sanitize_public_value,
+    scrub_forbidden as _scrub_forbidden,
+    strip_emojis,
+)
+from backend.runtime import (
+    BJT,
+    DATA_DIR,
+    atomic_write_json,
+    clamp as _clamp,
+    now_bjt_minute_str as _now_bjt_str,
+    resolve_hermes_home,
+    resolve_user_home,
+)
 from backend.discussion_temperature import discussion_trends, refresh_discussion_history
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
-from backend.public_snapshot import has_private_article_text, project_market_pulse
-from backend.rss_sources import _norm_dup_key, strip_emojis
+from backend.public_snapshot import project_market_pulse
+from backend.rss_sources import _norm_dup_key
 from backend.zh_brief import attach_zh_briefs_batch
 
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
 
 DEFAULT_FORUM_CACHE_PATH = DATA_DIR / "forum_pulse_cache.json"
 FORUM_CACHE_TTL_SECONDS = 1800  # 30 minutes
@@ -60,37 +74,6 @@ MAX_OUTPUT_BYTES = 40 * 1024  # 40 KB strict contract
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
-
-FORBIDDEN_TERMS: tuple[str, ...] = (
-    "Sleeve",
-    "E21",
-    "E32",
-    "E33",
-    "Tier-1",
-    "Regime",
-    "arbitration",
-    "测算口径",
-    "公式解释",
-    "公式说明",
-    "逻辑解释",
-    "联动说明",
-    "方法论说明",
-    "待补",
-    "待刷新",
-    "N/A",
-)
-
-_FORBIDDEN_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?<![A-Za-z0-9])E(?:21|32|33)(?![A-Za-z0-9])", re.IGNORECASE), "波动结构"),
-    (re.compile(r"(?<![A-Za-z0-9])Tier-?[1SA](?![A-Za-z0-9])", re.IGNORECASE), "核心"),
-    (re.compile(r"(?<![A-Za-z0-9])Sleeves?(?![A-Za-z0-9])", re.IGNORECASE), "仓位"),
-    (re.compile(r"(?<![A-Za-z0-9])Regimes?(?![A-Za-z0-9])", re.IGNORECASE), "市场阶段"),
-    (re.compile(r"(?<![A-Za-z0-9])arbitration(?![A-Za-z0-9])", re.IGNORECASE), "风险平衡"),
-    (re.compile(r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明"), "参考摘要"),
-    (re.compile(r"待补充|待补|待刷新"), "—"),
-    (re.compile(r"(?<![A-Za-z0-9])N/A(?![A-Za-z0-9])", re.IGNORECASE), "—"),
-    (re.compile(r"N/A", re.IGNORECASE), "—"),
 )
 
 CORE_TOPICS: tuple[str, ...] = (
@@ -265,69 +248,24 @@ _TOPIC_MACRO_FED_RE = re.compile(
 
 
 def _resolve_user_home() -> Path:
-    """Resolve user home across macOS/Linux/Windows, guarding against Windows SYSTEM profile."""
-    env_home = os.environ.get("MACROCOCKPIT_USER_HOME", "").strip()
-    if env_home:
-        return Path(env_home).expanduser()
-    try:
-        home = Path.home()
-    except RuntimeError:
-        home = COCKPIT_ROOT
-    if os.name == "nt" and "systemprofile" in str(home).lower():
-        users_root = Path("C:/Users")
-        if users_root.is_dir():
-            for cand in sorted(users_root.iterdir()):
-                if (
-                    cand.is_dir()
-                    and cand.name.lower() not in ("public", "default", "default user", "all users")
-                    and (cand / "AppData" / "Local").is_dir()
-                ):
-                    return cand
-    return home
+    return resolve_user_home(path_cls=Path, os_mod=os)
 
 
 def _resolve_hermes_home(user_home: Path | None = None) -> Path:
-    """Resolve Hermes home directory across platforms."""
-    env_hermes = os.environ.get("HERMES_HOME", "").strip()
-    if env_hermes:
-        return Path(env_hermes).expanduser()
-    home = user_home or _resolve_user_home()
-    win_hermes = home / "AppData" / "Local" / "hermes"
-    if win_hermes.exists() or os.name == "nt":
-        return win_hermes
-    return home / ".hermes"
+    return resolve_hermes_home(user_home, path_cls=Path, os_mod=os)
 
 
-def scrub_forbidden(text: str) -> str:
-    """Replace forbidden terms with plain Chinese business wording and strip stray emojis."""
-    s = strip_emojis(str(text or ""))
-    for rx, rep in _FORBIDDEN_REPLACEMENTS:
-        s = rx.sub(rep, s)
-    return re.sub(r"[ \t]{2,}", " ", s).strip()
+scrub_forbidden = partial(_scrub_forbidden, strip_emoji=True, preserve_newlines=True)
 
 
 def sanitize_output(obj: Any) -> Any:
-    """Recursively scrub forbidden terms across nested structures without corrupting URLs."""
-    if isinstance(obj, str):
-        return scrub_forbidden(obj)
-    if isinstance(obj, list):
-        return [sanitize_output(x) for x in obj]
-    if isinstance(obj, tuple):
-        return [sanitize_output(x) for x in obj]
-    if isinstance(obj, dict):
-        out: dict[str, Any] = {}
-        for k, v in obj.items():
-            clean_k = scrub_forbidden(str(k))
-            if clean_k == "url" and isinstance(v, str):
-                out[clean_k] = _safe_http_url(v)
-            else:
-                out[clean_k] = sanitize_output(v)
-        return out
-    return obj
-
-
-def _now_bjt_str() -> str:
-    return datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
+    return sanitize_public_value(
+        obj,
+        skip_keys=frozenset({"url"}),
+        scrub_keys=True,
+        strip_emoji=True,
+        validate_url_key=True,
+    )
 
 
 def _strip_html(raw: str) -> str:
@@ -341,23 +279,6 @@ def _truncate(text: str, max_len: int) -> str:
     if len(s) <= max_len:
         return s
     return s[: max(1, max_len - 1)].rstrip() + "…"
-
-
-def _clamp(val: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, val))
-
-
-def _safe_http_url(url: str) -> str:
-    s = str(url or "").strip()
-    if not s.startswith(("https://", "http://")):
-        return ""
-    try:
-        parsed = urllib.parse.urlsplit(s)
-    except ValueError:
-        return ""
-    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
-        return ""
-    return s
 
 
 def _canon_hk_code(digits: str) -> str:

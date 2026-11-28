@@ -12,8 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from backend.fred_and_market import DATA_DIR, atomic_write_json
-from backend.public_snapshot import file_lock, has_private_article_text
+from backend.guardrails import has_private_article_text, scrub_forbidden
+from backend.runtime import DATA_DIR, atomic_write_json, file_lock
+
 
 ZH_BRIEF_CACHE_PATH = DATA_DIR / "zh_brief_cache.json"
 _MAX_CACHE_ITEMS = 2500
@@ -26,11 +27,6 @@ _LIVE_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _ZH_PREFIX_CLEAN_RE = re.compile(r"^(?:实时更新|现场更新|直播更新|即时更新|最新消息|突发)\s*[：:]\s*")
-
-_FORBIDDEN_SCRUB_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9])(?:Sleeve|Tier-1|Regime|arbitration|E21|E32|E33)(?![A-Za-z0-9])"
-    r"|测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明|待补|待刷新|N/A"
-)
 
 _EN_ENTITY_ZH: tuple[tuple[str, str], ...] = (
     ("federal reserve", "美联储"),
@@ -148,7 +144,7 @@ def _clean_brief_text(text: str, *, max_len: int = 92) -> str:
     if not s:
         return ""
     s = _ZH_PREFIX_CLEAN_RE.sub("", s).strip()
-    s = _FORBIDDEN_SCRUB_RE.sub("", s)
+    s = scrub_forbidden(s)
     s = (
         s.replace("纳斯达克 100 指数", "纳斯达克100")
         .replace("纳斯达克 100", "纳斯达克100")
@@ -161,7 +157,7 @@ def _clean_brief_text(text: str, *, max_len: int = 92) -> str:
         return ""
     if len(s) > max_len:
         s = s[: max_len - 1].rstrip(" ，,;；、") + "…"
-        s = _FORBIDDEN_SCRUB_RE.sub("", s).strip(" ，,;；:：\"'“”")
+        s = scrub_forbidden(s).strip(" ，,;；:：\"'“”")
         if not s or s == "…":
             return ""
     elif s[-1] not in "。！？…":

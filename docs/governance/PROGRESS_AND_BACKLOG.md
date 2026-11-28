@@ -11,8 +11,8 @@
 | 批次 | 主题 | 状态 | 独立 Commit | 关键交付与验证 |
 | :--- | :--- | :--- | :--- | :--- |
 | **Stage 1** | 隔离 Worktree、12 维深度审计与三大治理台账 | `已完成` | 即将提交 | `ARCHITECTURE_MAP.md`、`ADR.md`、`PROGRESS_AND_BACKLOG.md`（合并 Swarm + Claude `plan-split` 双轨实测） |
-| **Stage 2** | 权威基础设施归一（`runtime.py` & `guardrails.py`） | `进行中` | — | 消除 28 处 `BJT`、7 处 `_safe_home`、10 处违禁词表、补齐 `guru_sources` SSRF 漏洞 |
-| **Stage 3** | 清零循环依赖与 `backend -> desktop` 反向依赖 | `待开始` | — | 消除 3 个 SCC 与 7 处跨包反向导入，抽出 `signal_text.py`、`article_store.py`、`agy_runtime.py`、`desktop/mcp_extensions.py` |
+| **Stage 2** | 权威基础设施归一（`runtime.py` & `guardrails.py`） | `已完成` | 即将提交 | 消除 28 处 `BJT`、7 处 `_safe_home`、10 处违禁词表，补齐 `guru_sources` SSRF 漏洞与 `resolve_data_dir` 隔离，116/116 通过 |
+| **Stage 3** | 清零循环依赖与 `backend -> desktop` 反向依赖 | `进行中` | — | 消除 2 个剩余 SCC 与 7 处跨包反向导入，抽出 `signal_text.py`、`article_store.py`、`agy_runtime.py`、`desktop/mcp_extensions.py` |
 | **Stage 4** | HTTP 安全归一、跨模块私有耦合收口与死代码删除 | `待开始` | — | 抽出 `http_security.py`、删除 5 处零调用死函数、将生产跨模块 `_foo` 导入清零 |
 | **Stage 5** | UI 设计系统归一、脱敏漏洞修复与前端去重 | `待开始` | — | 修复 `r.qty`/`d.qty` 与 `capitalInput` 静态值漏遮罩、收敛 `@media` 断点、双主题/移动端实测 |
 | **Stage 6** | AST 架构防回归门禁、CI 接入与终局物理验收 | `待开始` | — | `tests/test_architecture_governance.py` + `.github/workflows/intl_collector.yml` + 全量回归 |

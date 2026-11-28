@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Any
 
 try:
@@ -18,10 +16,11 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
-from backend.fred_and_market import DATA_DIR, _infer_us_session, atomic_write_json
+from backend.guardrails import scrub_forbidden
+from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json, safe_float as _finite
+from backend.fred_and_market import _infer_us_session
 from backend.sec_edgar import SEC_CIK_MAP, fetch_sec_filings_map
 
-BJT = timezone(timedelta(hours=8))
 CACHE_PATH = DATA_DIR / "stock_profiles_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600
 ON_DEMAND_TTL_SECONDS = 600
@@ -437,36 +436,8 @@ _RESEARCH_ALIASES: dict[str, tuple[str, str]] = {
 for _sym, _meta in MULTI_MARKET_META_MAP.items():
     _RESEARCH_ALIASES.setdefault(_meta["name_cn"].upper(), (_sym, _meta["market"]))
 
-_FORBIDDEN_SCRUB = (
-    (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
-    (r"\bTier-1\b", "核心"),
-    (r"\bTier-S\b", "高优"),
-    (r"\bTier-A\b", "重点"),
-    (r"\bSleeves?\b", "仓位"),
-    (r"\bRegimes?\b", "市场周期"),
-    (r"\barbitration\b", "风险评估"),
-    (r"\bN/A\b", "—"),
-)
-
-
 def _scrub(text: Any) -> str:
-    s = str(text or "").strip()
-    if not s:
-        return ""
-    for pat, rep in _FORBIDDEN_SCRUB:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    s = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", s)
-    return re.sub(r"\s{2,}", " ", s).strip()
-
-
-def _finite(val: Any) -> float | None:
-    if val is None or isinstance(val, bool):
-        return None
-    try:
-        num = float(val)
-        return num if math.isfinite(num) else None
-    except (TypeError, ValueError):
-        return None
+    return scrub_forbidden(text, collapse_cjk_spaces=True)
 
 
 def _fmt_money_compact(val: Any, *, currency: str = "$") -> str:
@@ -1276,7 +1247,7 @@ def _fetch_yahoo_one(symbol: str, sess: Any, crumb: str, timeout: int = 8) -> di
                 for ts, c in zip(ts_list, raw_closes):
                     cf = _finite(c)
                     if cf is not None and cf > 0:
-                        dates.append(datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d"))
+                        dates.append(datetime.fromtimestamp(int(ts), tz=UTC).strftime("%Y-%m-%d"))
                         closes.append(round(cf, 2))
     except Exception:
         pass
@@ -2270,7 +2241,7 @@ def _fetch_crypto_profile(
                 cl = _finite(row[4])
                 if ts_ms is None or cl is None or cl <= 0:
                     continue
-                dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+                dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).strftime("%Y-%m-%d")
                 hi = _finite(row[2]) or cl
                 lo = _finite(row[3]) or cl
                 qv = _finite(row[7]) or 0.0
@@ -2324,7 +2295,7 @@ def _fetch_crypto_profile(
                         cl = _finite(row[2])
                         if ts_s is None or cl is None or cl <= 0:
                             continue
-                        dt = datetime.fromtimestamp(ts_s, tz=timezone.utc).strftime("%Y-%m-%d")
+                        dt = datetime.fromtimestamp(ts_s, tz=UTC).strftime("%Y-%m-%d")
                         hi = _finite(row[3]) or cl
                         lo = _finite(row[4]) or cl
                         qv = _finite(row[1]) or 0.0

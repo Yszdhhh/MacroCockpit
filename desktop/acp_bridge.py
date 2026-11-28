@@ -10,24 +10,14 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
+from backend.runtime import COCKPIT_ROOT, now_bjt_iso as _now_iso, resolve_user_home
 
 
-AGY_DEFAULT_EXE = Path(os.environ.get("AGY_HOME") or (_safe_home(COCKPIT_ROOT) / "AppData" / "Local" / "agy")) / "bin" / "agy.exe"
-_BJT = timezone(timedelta(hours=8))
 
-
-def _now_iso() -> str:
-    return datetime.now(_BJT).isoformat(timespec="seconds")
+AGY_DEFAULT_EXE = Path(os.environ.get("AGY_HOME") or (resolve_user_home() / "AppData" / "Local" / "agy")) / "bin" / "agy.exe"
 
 
 def resolve_agy_executable() -> Path | None:

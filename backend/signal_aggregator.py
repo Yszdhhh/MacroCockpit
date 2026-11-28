@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,25 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.guardrails import (
+    has_private_article_content,
+    safe_article_filename,
+    sanitize_public_value,
+    scrub_quant_thesis,
+    strip_emojis,
+)
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json,
+    file_lock,
+    read_json_safe as _read_json,
+    resolve_hermes_home,
+    resolve_kol_dir,
+    resolve_user_home,
+)
 try:
     from backend.correlation_engine import compute_cross_asset_correlations, generate_notion_viz_html
 except ImportError:
@@ -28,10 +47,7 @@ except ImportError:
     generate_notion_viz_html = None
 from backend.calendar_events import build_calendar_events, filter_calendar_events
 from backend.fred_and_market import (
-    COCKPIT_ROOT,
-    DATA_DIR,
     QUANT_LATEST_PATH,
-    atomic_write_json,
     build_macro_fred,
     fetch_us_equities,
 )
@@ -41,7 +57,6 @@ try:
 except ImportError:
     update_event_feed = None  # type: ignore[assignment]
 from backend.mobile_push import get_push_channels_status
-from backend.public_snapshot import file_lock, has_private_article_content, safe_article_filename
 import backend.rss_sources as _rss_mod
 from backend.rss_sources import (
     _dedup_summary,
@@ -49,7 +64,6 @@ from backend.rss_sources import (
     collect_curated_articles,
     collect_curated_rss_signals,
     extract_tickers as _rss_extract_tickers,
-    strip_emojis,
 )
 from backend.sec_edgar import collect_recent_sec_signals, fetch_sec_filings_map
 from backend.stock_research import build_quick_thesis, build_stock_profiles
@@ -118,15 +132,8 @@ except ImportError:
 STATE_OUTPUT_PATH = DATA_DIR / "cockpit_state.json"
 AIHOT_CACHE_PATH = DATA_DIR / "aihot_cache.json"
 
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
-
-
-_USER_HOME = _safe_home(COCKPIT_ROOT)
-_HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (_USER_HOME / "AppData" / "Local" / "hermes"))
+_USER_HOME = resolve_user_home()
+_HERMES_HOME = resolve_hermes_home(_USER_HOME)
 DECISION_BRIEF_PATH = Path(
     os.environ.get("MACROCOCKPIT_DECISION_BRIEF_PATH")
     or (_HERMES_HOME / "scripts" / "news" / "outputs" / "decision" / "latest_brief.json")
@@ -135,10 +142,7 @@ EQN_CANDIDATE_PATHS = (
     _HERMES_HOME / "scripts" / "news" / "outputs" / "eqn" / "latest.json",
     _HERMES_HOME / "scripts" / "news" / "outputs" / "eqn" / "latest_events.json",
 )
-KOL_ROOT = Path(
-    os.environ.get("MACROCOCKPIT_KOL_DIR")
-    or (_HERMES_HOME / "scripts" / "news" / "x-kol-notes")
-)
+KOL_ROOT = resolve_kol_dir(_HERMES_HOME)
 KOL_ARTICLES_DIR = KOL_ROOT / "articles"
 OBSIDIAN_INBOX_DIR = Path(
     os.environ.get("MACROCOCKPIT_NOTES_DIR")
@@ -150,8 +154,6 @@ AIHOT_UA = f"aihot-skill/2.0.0 (+https://aihot.news/aihot-skill/) aihot-actor/{A
 AIHOT_LATEST_URL = "https://aihot.news/api/v1/agent/latest?limit=20"
 AIHOT_HOT_URL = "https://aihot.news/api/v1/agent/hot"
 
-BJT = timezone(timedelta(hours=8))
-
 POSITION_SPEC: tuple[tuple[str, str, str], ...] = (
     ("S1", "btc_trend", "核心趋势仓 (BTC)"),
     ("S2", "gold_hedge", "黄金避险仓"),
@@ -160,48 +162,8 @@ POSITION_SPEC: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-
-_CLEAN_BUSINESS_REPLACEMENTS: tuple[tuple[str, str], ...] = (
-    (r"E33\+E32\s*液态孤立慢洗", "高流动性超跌结构"),
-    (r"(?<![A-Za-z0-9])(?:E33|E32)(?![A-Za-z0-9])", "超跌结构"),
-    (r"(?<![A-Za-z0-9])E21(?![A-Za-z0-9])", "清算风暴"),
-    (r"(?<![A-Za-z0-9])Tier-1(?![A-Za-z0-9])", "核心"),
-    (r"(?<![A-Za-z0-9])Tier-S(?![A-Za-z0-9])", "高优"),
-    (r"(?<![A-Za-z0-9])Tier-A(?![A-Za-z0-9])", "重点"),
-    (r"(?<![A-Za-z0-9])Sleeves?(?![A-Za-z0-9])", "仓位"),
-    (r"(?<![A-Za-z0-9])Regimes?(?![A-Za-z0-9])", "市场状态"),
-    (r"(?<![A-Za-z0-9])arbitration(?![A-Za-z0-9])", "风险评估"),
-    (r"(?<![A-Za-z0-9])N/A(?![A-Za-z0-9])", "—"),
-    (r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明", "规则摘要"),
-    (r"待刷新|待补充|待补", "—"),
-    (r"液态山寨", "高流动性山寨"),
-    (r"MA50/MA120", "50/120日均线"),
-    (r"MA100", "100日均线"),
-    (r"（量化未确认，禁止提前抄底）", "（趋势未确认，严禁左侧提前抄底）"),
-    (r"量化禁止左侧趋势做多", "趋势未转强，严禁左侧提前做多"),
-)
-
-_SKIP_SANITIZE_KEYS: frozenset[str] = frozenset({"url", "html_url", "filename", "id", "receipt_id", "sha256"})
-
-
 def _scrub_forbidden_text(text: str, *, preserve_newlines: bool = True) -> str:
-    """Replace internal jargon and forbidden placeholders while optionally preserving line breaks."""
-    if not text:
-        return ""
-    s = strip_emojis(html.unescape(str(text)))
-    for pat, rep in _CLEAN_BUSINESS_REPLACEMENTS:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    if preserve_newlines:
-        return re.sub(r"[ \t]{2,}", " ", s).strip()
-    return re.sub(r"\s{2,}", " ", s).strip()
+    return scrub_quant_thesis(text, preserve_newlines=preserve_newlines)
 
 
 def _clean_business_text(text: str) -> str:
@@ -210,15 +172,7 @@ def _clean_business_text(text: str) -> str:
 
 
 def _sanitize_state_value(val: Any, key_name: str = "") -> Any:
-    if isinstance(val, str):
-        if key_name in _SKIP_SANITIZE_KEYS:
-            return val
-        return _scrub_forbidden_text(val, preserve_newlines=(key_name == "body_md" or "\n" in val))
-    if isinstance(val, list):
-        return [_sanitize_state_value(item, key_name) for item in val]
-    if isinstance(val, dict):
-        return {k: _sanitize_state_value(v, str(k)) for k, v in val.items()}
-    return val
+    return sanitize_public_value(val, key_name=key_name, scrub_text=scrub_quant_thesis)
 
 
 def _parse_iso_to_bjt_str(ts: str | None) -> str:
@@ -230,7 +184,7 @@ def _parse_iso_to_bjt_str(ts: str | None) -> str:
     try:
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return raw[:16]

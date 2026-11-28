@@ -1,11 +1,10 @@
 """Cross-asset 30D/90D correlation analyzer & standalone Notion interactive embed HTML builder."""
 from __future__ import annotations
 
-import html
 import json
 import math
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,16 +19,12 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
+from backend.runtime import BJT, DATA_DIR, DIST_DIR, UTC, atomic_write_json
 from backend.fred_and_market import (
-    COCKPIT_ROOT,
-    DATA_DIR,
     FRED_CACHE_PATH,
     PARQUET_MACRO_DIR,
     _fetch_gold_tail,
-    atomic_write_json,
 )
-
-BJT = timezone(timedelta(hours=8))
 
 _BTC_ENV = (os.environ.get("MACROCOCKPIT_BTC_KLINES_PARQUET") or "").strip()
 BTC_KLINES_CANDIDATES = (
@@ -37,7 +32,6 @@ BTC_KLINES_CANDIDATES = (
     if _BTC_ENV
     else (DATA_DIR / "parquet_btc" / "BTCUSDT.parquet",)
 )
-DIST_DIR = COCKPIT_ROOT / "dist"
 NOTION_VIZ_HTML_PATH = DIST_DIR / "notion_viz_embed.html"
 
 ASSET_ORDER: list[tuple[str, str, str]] = [
@@ -148,7 +142,7 @@ def fetch_btc_binance_daily(limit: int = 120, *, timeout: int = 6) -> list[tuple
                 except (TypeError, ValueError):
                     continue
                 if math.isfinite(close_px) and close_px > 0:
-                    day = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+                    day = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).strftime("%Y-%m-%d")
                     by_day[day] = round(close_px, 2)
         return sorted(by_day.items(), key=lambda x: x[0])
     except Exception:

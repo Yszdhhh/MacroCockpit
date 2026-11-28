@@ -4,11 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
 import sys
 from bisect import bisect_left
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,26 +15,26 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, FRED_CACHE_PATH, atomic_write_json
-from backend.public_snapshot import has_private_article_content, safe_article_filename
-
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
-
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
-
-
-_USER_HOME = _safe_home(COCKPIT_ROOT)
-_HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (_USER_HOME / "AppData" / "Local" / "hermes"))
-
-DEFAULT_KOL_DIR = Path(
-    os.environ.get("MACROCOCKPIT_KOL_DIR")
-    or (_HERMES_HOME / "scripts" / "news" / "x-kol-notes")
+from backend.guardrails import (
+    FORBIDDEN_TERMS as FORBIDDEN_TERMS,
+    has_private_article_content,
+    safe_article_filename,
+    sanitize_public_value,
+    scrub_forbidden,
 )
+from backend.runtime import (
+    BJT,
+    DATA_DIR,
+    UTC,
+    atomic_write_json,
+    read_json_safe as _read_json,
+    resolve_kol_dir,
+)
+from backend.fred_and_market import FRED_CACHE_PATH
+
+
+
+DEFAULT_KOL_DIR = resolve_kol_dir()
 DEFAULT_STOCK_PROFILES_CACHE_PATH = DATA_DIR / "stock_profiles_cache.json"
 DEFAULT_FRED_CACHE_PATH = FRED_CACHE_PATH
 DEFAULT_SCORECARD_CACHE_PATH = DATA_DIR / "kol_scorecard_cache.json"
@@ -44,36 +43,6 @@ MIN_VERIFIED_SAMPLE = 5
 CONSOLIDATION_DAYS = 5
 LOOKAHEAD_DAYS_5 = 5
 LOOKAHEAD_DAYS_20 = 20
-
-FORBIDDEN_TERMS: tuple[str, ...] = (
-    "Sleeve",
-    "E21",
-    "E32",
-    "E33",
-    "Tier-1",
-    "Regime",
-    "arbitration",
-    "测算口径",
-    "公式解释",
-    "公式说明",
-    "逻辑解释",
-    "联动说明",
-    "方法论说明",
-    "待补",
-    "待刷新",
-    "N/A",
-)
-
-_FORBIDDEN_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?<![A-Za-z0-9])E(?:21|32|33)(?![A-Za-z0-9])", re.IGNORECASE), "波动结构"),
-    (re.compile(r"(?<![A-Za-z0-9])Tier-?[1SA](?![A-Za-z0-9])", re.IGNORECASE), "核心"),
-    (re.compile(r"(?<![A-Za-z0-9])Sleeves?(?![A-Za-z0-9])", re.IGNORECASE), "仓位"),
-    (re.compile(r"(?<![A-Za-z0-9])Regimes?(?![A-Za-z0-9])", re.IGNORECASE), "市场阶段"),
-    (re.compile(r"(?<![A-Za-z0-9])arbitration(?![A-Za-z0-9])", re.IGNORECASE), "风险平衡"),
-    (re.compile(r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明"), "参考摘要"),
-    (re.compile(r"待补充|待补|待刷新"), "—"),
-    (re.compile(r"N/A", re.IGNORECASE), "—"),
-)
 
 # Pure news wires / spam accounts to exclude from KOL evaluation & article digests
 MEDIA_WIRE_HANDLES: frozenset[str] = frozenset(
@@ -279,34 +248,8 @@ _TRANSLATION_TOPICS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
-def scrub_forbidden(text: str) -> str:
-    """Replace forbidden terms with plain Chinese business wording."""
-    s = str(text or "")
-    for rx, rep in _FORBIDDEN_REPLACEMENTS:
-        s = rx.sub(rep, s)
-    return re.sub(r"[ \t]{2,}", " ", s).strip()
-
-
 def sanitize_output(obj: Any) -> Any:
-    """Recursively scrub forbidden terms across nested dicts/lists."""
-    if isinstance(obj, str):
-        return scrub_forbidden(obj)
-    if isinstance(obj, list):
-        return [sanitize_output(x) for x in obj]
-    if isinstance(obj, tuple):
-        return [sanitize_output(x) for x in obj]
-    if isinstance(obj, dict):
-        return {scrub_forbidden(str(k)): sanitize_output(v) for k, v in obj.items()}
-    return obj
-
-
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
+    return sanitize_public_value(obj, scrub_keys=True, skip_keys=frozenset())
 
 
 def extract_tickers(text: str) -> list[str]:
@@ -1700,7 +1643,7 @@ def select_quality_kol_articles(
                 "tickers": tickers,
                 "mtime": mtime_str,
                 "excerpt": excerpt,
-                "body_md": scrub_forbidden(raw),
+                "body_md": scrub_forbidden(raw, preserve_newlines=True),
                 "url": url or f"https://x.com/{handle}",
                 "score": rel_score,
             }

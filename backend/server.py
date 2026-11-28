@@ -26,9 +26,18 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
+from backend.guardrails import safe_article_filename
+from backend.runtime import (
+    BJT,
+    COCKPIT_ROOT,
+    DATA_DIR,
+    DIST_DIR,
+    atomic_write_json,
+    file_lock,
+    resolve_data_dir,
+)
 from backend.curation import rank_curated_events, rank_curated_signals
 from backend.event_feed import project_event_card
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
 from backend.import_positions import PreviewExpiredError, PreviewValidationError, commit_import, preview_import
 from backend.journal_store import RevisionConflictError
 from backend.mcp_server import (
@@ -40,16 +49,13 @@ from backend.mcp_server import (
 from backend.mobile_push import build_muse_markdown_digest, dispatch_mobile_push, load_push_env
 from backend.portfolio_store import ConstraintViolationError, IdempotencyConflictError, PortfolioStore
 from backend.public_snapshot import (
-    BJT,
     _PUBLISH_LOCK,
     _current_manifest,
     _generation_timestamp,
-    file_lock,
     load_published_generation,
     lookup_published_article,
     project_public_state,
     publish_generation,
-    safe_article_filename,
 )
 
 try:
@@ -84,7 +90,6 @@ except ImportError:
         }
 
 WEB_DIR = COCKPIT_ROOT / "web"
-DIST_DIR = COCKPIT_ROOT / "dist"
 OFFLINE_HTML_PATH = DIST_DIR / "macro_cockpit_offline.html"
 
 MAX_JSON_BODY_BYTES = 2_000_000
@@ -104,6 +109,8 @@ class _HttpError(Exception):
 
 def _resolve_base_dir(state_path: Path) -> Path:
     sp = Path(state_path)
+    if sp.parent == DATA_DIR:
+        return COCKPIT_ROOT
     if sp.parent.name == "data":
         return sp.parent.parent
     return sp.parent
@@ -116,8 +123,9 @@ def _load_or_build_state(
     base_dir: Path | None = None,
 ) -> dict[str, Any]:
     root_dir = Path(base_dir) if base_dir is not None else _resolve_base_dir(state_path)
+    data_dir = resolve_data_dir(root_dir)
     # 1. Prefer published current_generation manifest when present
-    manifest_path = root_dir / "data" / "current_generation.json"
+    manifest_path = data_dir / "current_generation.json"
     if manifest_path.is_file():
         loaded = load_published_generation(root_dir)
         return dict(loaded.get("state") or {})
@@ -130,7 +138,7 @@ def _load_or_build_state(
         return raw
 
     # 3. Secondary fallback for nested data/cockpit_state.json
-    nested_state = root_dir / "data" / "cockpit_state.json"
+    nested_state = data_dir / "cockpit_state.json"
     if nested_state != state_path and nested_state.is_file():
         raw = json.loads(nested_state.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
@@ -168,12 +176,13 @@ def _read_health_manifest_only(
     auth_enabled: bool,
 ) -> tuple[int, dict[str, Any]]:
     """Read only manifest/file metadata without invoking signal_aggregator."""
-    manifest_path = base_dir / "data" / "current_generation.json"
+    data_dir = resolve_data_dir(base_dir)
+    manifest_path = data_dir / "current_generation.json"
     if manifest_path.is_file():
         try:
             mf = json.loads(manifest_path.read_text(encoding="utf-8"))
             gen = int(mf.get("generation") or 0)
-            gen_state = base_dir / "data" / "generations" / f"gen_{gen}" / "state.json"
+            gen_state = data_dir / "generations" / f"gen_{gen}" / "state.json"
             if gen > 0 and gen_state.is_file():
                 return (
                     200,
@@ -189,7 +198,7 @@ def _read_health_manifest_only(
         except (OSError, ValueError, TypeError):
             pass
 
-    for candidate in (state_path, base_dir / "data" / "cockpit_state.json"):
+    for candidate in (state_path, data_dir / "cockpit_state.json"):
         if candidate.is_file():
             try:
                 raw = json.loads(candidate.read_text(encoding="utf-8"))
@@ -393,7 +402,7 @@ class CockpitHTTPServer(ThreadingHTTPServer):
             out_art = dict(art_summary)
             out_art["source"] = "周月度深研"
 
-        manifest_path = self.base_dir / "data" / "current_generation.json"
+        manifest_path = resolve_data_dir(self.base_dir) / "current_generation.json"
         with _REFRESH_LOCK, _PUBLISH_LOCK, file_lock(manifest_path):
             cur_manifest = _current_manifest(manifest_path, recover_newer=True)
             if cur_manifest is not None:
@@ -403,7 +412,7 @@ class CockpitHTTPServer(ThreadingHTTPServer):
                 pub_manifest = loaded_pub.get("manifest")
             else:
                 cur_state = {}
-                for cand_sp in (self.state_path, self.base_dir / "data" / "cockpit_state.json"):
+                for cand_sp in (self.state_path, resolve_data_dir(self.base_dir) / "cockpit_state.json"):
                     if cand_sp.is_file():
                         try:
                             loaded_obj = json.loads(cand_sp.read_text(encoding="utf-8"))
@@ -451,7 +460,7 @@ class CockpitHTTPServer(ThreadingHTTPServer):
             )
             cur_state["coverage"] = cov
 
-            gen_art_dir = self.base_dir / "data" / "generations" / f"gen_{pub_gen}" / "articles" if pub_gen > 0 else None
+            gen_art_dir = resolve_data_dir(self.base_dir) / "generations" / f"gen_{pub_gen}" / "articles" if pub_gen > 0 else None
             arts_payload: list[dict[str, str]] = []
             seen_payload: set[str] = set()
             new_file = self.articles_dir / fname
@@ -487,7 +496,7 @@ class CockpitHTTPServer(ThreadingHTTPServer):
                 producer_id=producer_id,
             )
             out_gen = int(manifest.get("generation") or 0)
-            compat_state = self.base_dir / "data" / "cockpit_state.json"
+            compat_state = resolve_data_dir(self.base_dir) / "cockpit_state.json"
             if self.state_path != compat_state and compat_state.is_file():
                 with file_lock(self.state_path):
                     atomic_write_json(self.state_path, json.loads(compat_state.read_text(encoding="utf-8")))
@@ -809,7 +818,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
 
         # 2. Consumer mode strictly reads published snapshots/articles only
         if self.server.role == "consumer":
-            if (self.server.base_dir / "data" / "current_generation.json").is_file():
+            if (resolve_data_dir(self.server.base_dir) / "current_generation.json").is_file():
                 return (HTTPStatus.NOT_FOUND, "未找到对应深度文章")
             for folder in (self.server.articles_dir, self.server.base_dir / "articles"):
                 if not folder.exists():
@@ -1509,7 +1518,7 @@ class CockpitRequestHandler(BaseHTTPRequestHandler):
             return
 
         # Keep compatibility copies synchronized when custom state_path / articles_dir paths are used in tests
-        expected_compat_state = self.server.base_dir / "data" / "cockpit_state.json"
+        expected_compat_state = resolve_data_dir(self.server.base_dir) / "cockpit_state.json"
         if self.server.state_path != expected_compat_state and expected_compat_state.is_file():
             self.server.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_s = self.server.state_path.with_suffix(".json.tmp")

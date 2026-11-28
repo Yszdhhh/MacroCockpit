@@ -2,23 +2,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
-BJT = timezone(timedelta(hours=8))
-
-_FORBIDDEN_SCRUB: tuple[tuple[str, str], ...] = (
-    (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
-    (r"\bTier-1\b", "核心"),
-    (r"\bTier-S\b", "高优"),
-    (r"\bTier-A\b", "重点"),
-    (r"\bSleeves?\b", "仓位"),
-    (r"\bRegimes?\b", "市场周期"),
-    (r"\barbitration\b", "风险评估"),
-    (r"\bN/A\b", "—"),
-    (r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明", "规则摘要"),
-    (r"待刷新|待补充|待补", "样本积累"),
-)
+from backend.guardrails import sanitize_public_value, scrub_forbidden as _scrub_text
+from backend.runtime import BJT, safe_float as _safe_float
 
 _THEME_CATALOG: tuple[dict[str, Any], ...] = (
     {
@@ -94,33 +82,6 @@ _THEME_CATALOG: tuple[dict[str, Any], ...] = (
         "default_trigger": "跟踪两市成交额与恒生科技指数相对美股中概的估值修复持续性。",
     },
 )
-
-
-def _scrub_text(text: Any) -> str:
-    s = str(text or "")
-    for pat, rep in _FORBIDDEN_SCRUB:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    return re.sub(r"\s{2,}", " ", s).strip()
-
-
-def _sanitize_obj(obj: Any) -> Any:
-    if isinstance(obj, str):
-        return _scrub_text(obj)
-    if isinstance(obj, list):
-        return [_sanitize_obj(x) for x in obj]
-    if isinstance(obj, dict):
-        return {_scrub_text(k): _sanitize_obj(v) for k, v in obj.items()}
-    return obj
-
-
-def _safe_float(val: Any) -> float | None:
-    if val is None or isinstance(val, bool):
-        return None
-    try:
-        f = float(val)
-        return f if f == f else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _fred_map(macro_fred: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -908,4 +869,4 @@ def build_market_synthesis(
         "cross_source_links": cross_links,
         "divergence_alerts": divergence_alerts,
     }
-    return _sanitize_obj(result)
+    return sanitize_public_value(result, scrub_keys=True, skip_keys=frozenset())

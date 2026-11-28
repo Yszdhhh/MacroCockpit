@@ -6,41 +6,33 @@ import json
 import os
 import re
 import threading
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from backend.guardrails import has_private_debate_text
+from backend.runtime import (
+    COCKPIT_ROOT,
+    DATA_DIR,
+    now_bjt_iso as _now_iso,
+    read_json_safe as _read_json,
+    resolve_data_dir,
+    resolve_user_home,
+)
 
 try:
     import requests
 except ImportError:
     requests = None  # type: ignore[assignment]
 
-from backend.public_snapshot import has_private_debate_text
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-DATA_DIR = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (COCKPIT_ROOT / "data"))
 STATE_PATH = DATA_DIR / "cockpit_state.json"
 DEBATES_PATH = DATA_DIR / "desktop_debates.json"
 
 OPENBB_API_BASE = os.environ.get("OPENBB_API_URL", "http://127.0.0.1:6900/api/v1").rstrip("/")
-OPENBB_SETTINGS_PATH = Path.home() / ".openbb_platform" / "user_settings.json"
+OPENBB_SETTINGS_PATH = resolve_user_home() / ".openbb_platform" / "user_settings.json"
 
-_BJT = timezone(timedelta(hours=8))
 _SDK_LOCK = threading.Lock()
 _OBB_INSTANCE: Any = None
-
-
-def _now_iso() -> str:
-    return datetime.now(_BJT).isoformat(timespec="seconds")
-
-
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
 
 
 def _configured_credential_names() -> list[str]:
@@ -478,7 +470,7 @@ def get_obb_widget_data(
 ) -> Any:
     """Return strictly sanitized widget data for /obb/* routes (never exposes private amounts)."""
     root = Path(base_dir) if base_dir else COCKPIT_ROOT
-    data_dir = root / "data"
+    data_dir = resolve_data_dir(root)
     state = _read_json(data_dir / "cockpit_state.json", {}) or {}
     q = params or {}
 

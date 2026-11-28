@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,50 +12,21 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
+from backend.guardrails import has_private_debate_text, scrub_forbidden as _scrub
+from backend.runtime import (
+    COCKPIT_ROOT,
+    atomic_write_json as _atomic_write_json,
+    atomic_write_text as _atomic_write_text,
+    file_lock,
+    now_bjt as _now_dt,
+    read_json_safe as _read_json,
+    resolve_data_dir,
+)
 from backend.portfolio_store import PortfolioStore
-from backend.public_snapshot import _atomic_write_text, file_lock, has_private_debate_text
 from desktop.acp_bridge import AgyBridge
 from desktop.openbb_bridge import query_openbb
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-_BJT = timezone(timedelta(hours=8))
 _MAX_DEBATES_HISTORY = 50
-_FORBIDDEN_SCRUB = (
-    (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
-    (r"\bTier-1\b", "核心"),
-    (r"\bTier-S\b", "高优"),
-    (r"\bTier-A\b", "重点"),
-    (r"\bSleeves?\b", "仓位"),
-    (r"\bRegimes?\b", "市场周期"),
-    (r"\barbitration\b", "风险评估"),
-    (r"\bN/A\b", "—"),
-)
-
-
-def _now_dt() -> datetime:
-    return datetime.now(_BJT)
-
-
-def _scrub(text: Any) -> str:
-    s = str(text or "").strip()
-    if not s:
-        return ""
-    for pat, rep in _FORBIDDEN_SCRUB:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    return re.sub(r"[ \t]{2,}", " ", s).strip()
-
-
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _normalize_symbol_and_market(symbol: str, market: str = "auto") -> tuple[str, str]:
@@ -139,7 +108,7 @@ def _gather_grounded_facts(
     root: Path,
     include_portfolio: bool,
 ) -> dict[str, Any]:
-    state_path = root / "data" / "cockpit_state.json"
+    state_path = resolve_data_dir(root) / "cockpit_state.json"
     with file_lock(state_path):
         state = _read_json(state_path, {}) or {}
     risk_gate = state.get("risk_gate") or {"light": "YELLOW", "label": "风控观察", "long_risk_cap": 0.5}
@@ -221,7 +190,7 @@ def _gather_grounded_facts(
         "side": None,
     }
     if include_portfolio:
-        db_file = root / "data" / "user_journal.db"
+        db_file = resolve_data_dir(root) / "user_journal.db"
         if db_file.exists():
             try:
                 store = PortfolioStore(db_file)
@@ -586,7 +555,7 @@ def _render_debate_markdown(debate_doc: dict[str, Any]) -> str:
 
 def list_debates(base_dir: Path | str = COCKPIT_ROOT) -> list[dict[str, Any]]:
     root = Path(base_dir)
-    history_path = root / "data" / "desktop_debates.json"
+    history_path = resolve_data_dir(root) / "desktop_debates.json"
     if not history_path.exists():
         return []
     with file_lock(history_path):
@@ -609,7 +578,7 @@ def _sync_debate_to_web(
     report_md: str,
     debate_doc: dict[str, Any],
 ) -> dict[str, Any]:
-    state_path = root / "data" / "cockpit_state.json"
+    state_path = resolve_data_dir(root) / "cockpit_state.json"
     with file_lock(state_path):
         raw_state = _read_json(state_path, {}) or {}
         if isinstance(raw_state, dict) and raw_state:
@@ -762,7 +731,7 @@ def run_multi_agent_debate(
     }
 
     report_md = _render_debate_markdown(debate_doc)
-    history_path = root / "data" / "desktop_debates.json"
+    history_path = resolve_data_dir(root) / "desktop_debates.json"
     with file_lock(history_path):
         _atomic_write_text(root / "articles" / report_filename, report_md)
         rows = _read_json(history_path, [])

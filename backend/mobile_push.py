@@ -13,23 +13,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from backend.runtime import COCKPIT_ROOT, DATA_DIR, resolve_hermes_home
+
 try:
     import requests
 except ImportError:
     requests = None  # type: ignore[assignment]
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or Path(__file__).resolve().parent.parent)
-DATA_DIR = Path(os.environ.get("MACROCOCKPIT_DATA_DIR") or (COCKPIT_ROOT / "data"))
 STATE_PATH = DATA_DIR / "cockpit_state.json"
 
-def _safe_home(fallback: Path) -> Path:
-    try:
-        return Path.home()
-    except RuntimeError:
-        return fallback
-
-
-_HERMES_ROOT = Path(os.environ.get("HERMES_HOME") or (_safe_home(COCKPIT_ROOT) / "AppData" / "Local" / "hermes"))
+_HERMES_ROOT = resolve_hermes_home()
 HERMES_ENV_PATHS = (
     _HERMES_ROOT / ".env",
     _HERMES_ROOT / "scripts" / "news" / ".env",

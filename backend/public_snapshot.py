@@ -8,16 +8,29 @@ import os
 import re
 import shutil
 import threading
-import uuid
-from contextlib import contextmanager
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from backend.guardrails import (
+    PRIVATE_TOP_LEVEL_KEYS as _PRIVATE_TOP_LEVEL_KEYS,
+    _iter_strings,
+    has_private_article_content,
+    has_private_article_text,
+    has_private_debate_text as has_private_debate_text,
+    private_article_filenames,
+    safe_article_filename,
+)
+from backend.runtime import (
+    BJT,
+    atomic_write_text as _atomic_write_text,
+    file_lock,
+    now_bjt_iso as _now_bjt_iso,
+    resolve_data_dir,
+)
 from backend.discussion_temperature import SNAPSHOT_TAGS, load_valid_trends_from_cache, project_discussion_trends
 
-BJT = timezone(timedelta(hours=8))
 MAX_ARTICLE_BYTES = 512 * 1024
 KEEP_GENERATIONS = 3
 DEFAULT_SAMPLE_CAPITAL_USD = 100000
@@ -55,148 +68,7 @@ PUBLIC_STATE_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_PRIVATE_TOP_LEVEL_KEYS = frozenset({"journal", "portfolio", "preferences", "workspace", "credentials"})
 _PUBLISH_LOCK = threading.RLock()
-_FILE_LOCK_LOCAL = threading.local()
-_FILE_LOCK_GUARD = threading.Lock()
-_FILE_LOCK_RLOCKS: dict[str, threading.RLock] = {}
-_PRIVATE_ARTICLE_TEXT = re.compile(
-    r"占\s*(?:总\s*)?净值|净值\s*占比|portfolio_exposure"
-    r"|(?:现货|合约|实际|私人)持仓明细"
-    r"|(?:当前|目前|个人|账户|实盘)\s*(?:持仓|仓位|权益|现金)\s*[：:=]"
-    r"|(?:我的|本人|个人|实际|我在[\u4e00-\u9fffA-Za-z0-9]{0,16}的)\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)"
-    r"|(?:我|本人|个人|咱们)\s*(?:目前|当前|现在|手里|手头|账户里?)?\s*(?:持有|买了|买入|建仓|加仓|重仓|满仓|做多|做空|套牢)\s*[^\n。；;]{0,28}?(?:\d[\d,.]*\s*(?:万|千|亿)?\s*(?:美元|美金|人民币|港元|港币|元|股|手|张|枚|份|USDT|USD|CNY|RMB|HKD)|股票|仓位|多单|空单)"
-    r"|\bI\s+(?:currently\s+)?(?:hold|own|bought|shorted)\s+\$?\d[\d,.]*\b"
-    r"|(?:账户\s*(?:持仓|仓位|余额|净值|盈亏|成本|本金)|持仓金额|持仓市值|仓位金额|账户金额|保证金金额)\s*(?:为|是|有|约|达|[:：=])?\s*\d"
-    r"|(?:手头现金|可用现金|现金余额|保证金余额)\s*[：:=]?\s*[+-]?\s*(?:HK\$|US\$|CN¥|RMB|HKD|USD|CNY|USDT|USDC|[$¥￥€£])?\s*[+-]?\s*\d"
-    r"|\b(?:my\s+(?:actual\s+)?(?:portfolio|holdings?|positions?|trades?|account(?:\s+balance)?)|account\s+balance\s*(?:is|:|=)?\s*[+-]?\s*\$?\d[\d,.]*)\b"
-    r"|\b(?:current|personal|private|actual|live|account)\s+(?:portfolio|holdings?|positions?)\s*[:=]"
-    r"|\b(?:cash\s+on\s+hand|available\s+cash|cash\s+balance|margin\s+balance|net\s+liquidation|account\s+equity)(?:\s+is|\s*[:=])?\s*[+-]?\s*(?:HK\$|US\$|CN¥|RMB|HKD|USD|CNY|USDT|USDC|[$¥￥€£])?\s*[+-]?\s*\d"
-    r"|\b[A-Z]{2,10}\s+\d[\d,.]*\s+(?:shares?|contracts?|lots?)\b"
-    r"|\b(?:bought|sold|holding)\s+\d[\d,.]*\s+(?:shares?|contracts?|lots?|btc|eth|sol|bnb|paxg)\b[^.\n]{0,40}\b(?:at|@)\s*\$?\d"
-    r"|\b(?:unrealized\s+p(?:&|n)l|liquidation\s+price)\s*(?:is|:|=)?\s*[+-]?\$?\d"
-    r"|(?<![A-Z0-9_-])(?:sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{16,}|Bearer\s+|gh[pousr]_[A-Z0-9]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"
-    r"|(?<![A-Z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
-    r"|(?<![A-Z0-9])(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|secret)\s*[\x22\x27]?\s*[:=]",
-    re.IGNORECASE,
-)
-
-
-_PRIVATE_DEBATE_TEXT = re.compile(
-    r"[$＄¥￥€£]|\b(?:token|secret|api[_ -]?key|authorization)\b"
-    r"|(?:USD|CNY|RMB)\s*[-+]?\d|\d\s*(?:美元|人民币|元(?!素)|USD|CNY|RMB|USDT)"
-    r"|净值\s*[-+]?\d+(?:\.\d+)?\s*[%％]"
-    r"|(?:总净值|账户净值|持仓金额|持仓数量|合约名义|现货多头|合约空头|实际持仓)",
-    re.IGNORECASE,
-)
-
-
-def has_private_article_text(text: str) -> bool:
-    return bool(_PRIVATE_ARTICLE_TEXT.search(text))
-
-
-def has_private_debate_text(text: str) -> bool:
-    return has_private_article_text(text) or bool(_PRIVATE_DEBATE_TEXT.search(text))
-
-
-def _iter_strings(value: Any):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _iter_strings(v)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _iter_strings(item)
-
-
-def has_private_article_content(article: Any) -> bool:
-    if not isinstance(article, dict):
-        return False
-    filename = article.get("filename")
-    is_debate = isinstance(filename, str) and filename.lower().startswith("ta_")
-    check = has_private_debate_text if is_debate else has_private_article_text
-    return any(check(text) for text in _iter_strings(article))
-
-
-def _get_thread_rlock(key: str) -> threading.RLock:
-    with _FILE_LOCK_GUARD:
-        lk = _FILE_LOCK_RLOCKS.get(key)
-        if lk is None:
-            lk = threading.RLock()
-            _FILE_LOCK_RLOCKS[key] = lk
-        return lk
-
-
-@contextmanager
-def file_lock(path: Path):
-    """Serialize readers and writers across threads and processes via a stable sidecar (thread-reentrant)."""
-    lock_path = path.with_name(f".{path.name}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    key = os.path.normcase(str(lock_path.resolve()))
-    held = getattr(_FILE_LOCK_LOCAL, "held", None)
-    if held is None:
-        held = {}
-        _FILE_LOCK_LOCAL.held = held
-
-    if held.get(key, 0) > 0:
-        held[key] += 1
-        try:
-            yield
-        finally:
-            held[key] -= 1
-            if held[key] <= 0:
-                held.pop(key, None)
-        return
-
-    t_lock = _get_thread_rlock(key)
-    with t_lock:
-        with lock_path.open("a+b") as lock:
-            if os.name == "nt":
-                import msvcrt
-
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            held[key] = 1
-            try:
-                yield
-            finally:
-                held.pop(key, None)
-                try:
-                    if os.name == "nt":
-                        lock.seek(0)
-                        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-
-
-def _now_bjt_iso() -> str:
-    return datetime.now(BJT).isoformat(timespec="seconds")
-
-
-def safe_article_filename(value: Any) -> str | None:
-    """Validate strict basename-only markdown article filename."""
-    if not isinstance(value, str):
-        return None
-    if (
-        not value
-        or len(value) > 180
-        or "\x00" in value
-        or "/" in value
-        or "\\" in value
-        or ".." in value
-        or Path(value).name != value
-        or not value.lower().endswith(".md")
-        or "异常告警" in value
-    ):
-        return None
-    return value
 
 
 def _bear_basket_legs(rec_pct: float, sample_capital: int) -> list[dict[str, Any]]:
@@ -328,13 +200,6 @@ def _build_default_coverage(projected: dict[str, Any]) -> dict[str, Any]:
 
 def _json_clone(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False))
-
-
-def private_article_filenames(articles: list[dict[str, Any]]) -> set[str]:
-    return {
-        name for article in articles
-        if has_private_article_content(article) and (name := safe_article_filename(article.get("filename")))
-    }
 
 
 _MARKET_PULSE_FLOAT_KEYS: frozenset[str] = frozenset(
@@ -710,16 +575,6 @@ def _normalize_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
-def _atomic_write_text(dest: Path, text: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8", newline="")
-        os.replace(tmp, dest)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
 def _prune_old_generations(gens_dir: Path, active_gen: int, keep: int = KEEP_GENERATIONS) -> list[str]:
     if not gens_dir.exists():
         return []
@@ -853,7 +708,7 @@ def publish_generation(
 ) -> dict[str, Any]:
     """Validate public projection + articles, enforce monotonic generations, and publish atomically."""
     base = Path(base_dir)
-    data_dir = base / "data"
+    data_dir = resolve_data_dir(base)
     gens_dir = data_dir / "generations"
     articles_dir = base / "articles"
     manifest_path = data_dir / "current_generation.json"
@@ -1063,7 +918,7 @@ def publish_generation(
 def load_published_generation(base_dir: Path | str) -> dict[str, Any]:
     """Load the active published state strictly via current_generation.json without aggregation."""
     base = Path(base_dir)
-    data_dir = base / "data"
+    data_dir = resolve_data_dir(base)
     manifest_path = data_dir / "current_generation.json"
     manifest = _current_manifest(manifest_path)
     if manifest is not None:
@@ -1088,7 +943,7 @@ def lookup_published_article(base_dir: Path | str, filename: str) -> dict[str, A
         raise ValueError(f"invalid_article_filename: {filename!r}")
 
     base = Path(base_dir)
-    data_dir = base / "data"
+    data_dir = resolve_data_dir(base)
     manifest_path = data_dir / "current_generation.json"
     manifest = _current_manifest(manifest_path)
     if manifest is not None:

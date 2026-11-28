@@ -22,6 +22,7 @@ _REPO_ROOT = _DESKTOP_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from backend.runtime import COCKPIT_ROOT, resolve_data_dir
 from backend.portfolio_store import PortfolioStore
 from desktop.acp_bridge import ask_agy, probe_agy
 from desktop.multi_agent_debate import get_debate, list_debates, run_multi_agent_debate
@@ -33,7 +34,6 @@ from desktop.openbb_bridge import (
     query_openbb,
 )
 
-COCKPIT_ROOT = Path(os.environ.get("MACROCOCKPIT_ROOT") or _REPO_ROOT)
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_JSON_BYTES = 2_000_000
 
@@ -507,8 +507,9 @@ def create_desktop_server(
     if not tok:
         tok = secrets.token_urlsafe(32)
 
-    resolved_state = Path(state_path) if state_path else (root / "data" / "cockpit_state.json")
-    resolved_db = Path(db_path) if db_path else (root / "data" / "user_journal.db")
+    data_dir = resolve_data_dir(root)
+    resolved_state = Path(state_path) if state_path else (data_dir / "cockpit_state.json")
+    resolved_db = Path(db_path) if db_path else (data_dir / "user_journal.db")
     resolved_ui = Path(ui_dir) if ui_dir else (root / "desktop" / "ui")
 
     server_cls = _IPv6ThreadingHTTPServer if host == "::1" else ThreadingHTTPServer

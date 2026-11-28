@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
+import socket
 import sys
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -22,23 +22,21 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import DATA_DIR, atomic_write_json
-from backend.kazike_engine import cluster_and_dedup, score_five_axes
-from backend.public_snapshot import (
-    file_lock,
+from backend.guardrails import (
     has_private_article_content,
+    is_safe_public_url,
+    neutralize_private_triggers,
     safe_article_filename,
+    safe_fetch_public_url,
 )
+from backend.runtime import BJT, DATA_DIR, UTC, atomic_write_json, file_lock
+from backend.kazike_engine import cluster_and_dedup, score_five_axes
 from backend.rss_sources import (
     ARTICLES_DIR,
-    BJT,
-    UTC,
     _HEADERS,
     _clean_text,
     _infer_direction,
-    _is_safe_public_url,
     _parse_rss_datetime,
-    _scrub_forbidden,
     _yaml_quote,
     extract_subtopics,
     extract_tickers,
@@ -198,37 +196,8 @@ GURU_ARTICLE_FEEDS: tuple[dict[str, str], ...] = (
 
 _ALLOWED_SIGNAL_CATEGORIES: frozenset[str] = frozenset({"macro", "equities", "ashare", "crypto", "ai"})
 
-_EXTRA_FORBIDDEN_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\bE33\b|\bE32\b|\bE21\b", "波动结构"),
-    (r"\bTier-1\b", "核心"),
-    (r"\bTier-S\b", "高优"),
-    (r"\bTier-A\b", "重点"),
-    (r"\bSleeves?\b", "仓位"),
-    (r"\bRegimes?\b", "市场周期"),
-    (r"\barbitration\b", "风险评估"),
-    (r"\bN/A\b", "—"),
-    (r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明", "规则摘要"),
-    (r"待刷新|待补充|待补", "—"),
-)
-
-_PRIVATE_TRIGGER_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"占\s*(?:总\s*)?净值|净值\s*占比|portfolio_exposure|(?:现货|合约|实际|私人)持仓明细", "市场参考"),
-    (r"(?<![A-Z0-9_-])(?:sk-[A-Za-z0-9_-]*|Bearer\s+[A-Za-z0-9._-]+|gh[pousr]_[A-Za-z0-9]+)", "[凭证脱敏]"),
-    (
-        r"(?<![A-Z0-9])(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|secret)\s*([\"\']?)\s*[:=]",
-        r"\1\2（字段）",
-    ),
-)
-
-
 def _sanitize_guru_text(text: str) -> str:
-    """Scrub forbidden jargon and neutralize any accidental private-content regex triggers."""
-    s = _scrub_forbidden(str(text or ""))
-    for pat, rep in _EXTRA_FORBIDDEN_PATTERNS:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    for pat, rep in _PRIVATE_TRIGGER_PATTERNS:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    return s
+    return neutralize_private_triggers(text)
 
 
 def _strip_ns(tag: str) -> str:
@@ -332,7 +301,7 @@ def _parse_guru_xml_entries(
             ),
             key=len,
         )
-        safe_link = link if _is_safe_public_url(link) else ""
+        safe_link = link if is_safe_public_url(link, socket_mod=socket) else ""
         entries_out.append(
             {
                 "title": title,
@@ -473,7 +442,7 @@ def parse_guru_feed_xml(
             full_md = summary_clean
 
         url = str(ent.get("link") or spec.get("html_url") or "").strip()
-        if url and not _is_safe_public_url(url):
+        if url and not is_safe_public_url(url, socket_mod=socket):
             url = ""
         dt_utc = ent.get("dt_utc") or (now_utc or datetime.now(UTC))
         time_bjt = dt_utc.astimezone(BJT).strftime("%Y-%m-%d %H:%M")
@@ -572,7 +541,7 @@ def _fetch_one_guru_feed(
     feed_url = str(spec.get("url") or "").strip()
     if requests is None:
         return (fid, [], "requests_unavailable")
-    if not _is_safe_public_url(feed_url):
+    if not is_safe_public_url(feed_url, socket_mod=socket):
         return (fid, [], "blocked_url")
 
     headers = {
@@ -580,9 +549,13 @@ def _fetch_one_guru_feed(
         "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5",
     }
     try:
-        resp = requests.get(feed_url, headers=headers, timeout=timeout)
+        resp = safe_fetch_public_url(
+            feed_url, headers=headers, timeout=timeout, requests_mod=requests, socket_mod=socket,
+        )
+        if resp is None:
+            return (fid, [], "blocked_redirect")
         final_url = str(getattr(resp, "url", "") or feed_url)
-        if final_url and not _is_safe_public_url(final_url):
+        if final_url and not is_safe_public_url(final_url, socket_mod=socket):
             return (fid, [], "blocked_redirect")
         if int(getattr(resp, "status_code", 0) or 0) != 200 or not getattr(resp, "content", b""):
             return (fid, [], f"http_{getattr(resp, 'status_code', 0)}")
@@ -824,7 +797,7 @@ def collect_guru_signals(
         score = int(art.get("score") or 60)
         importance = "高" if (score >= 68 or (len(tickers) >= 1 and score >= 58)) else "中"
         url = str(art.get("url") or "").strip()
-        if url and not _is_safe_public_url(url):
+        if url and not is_safe_public_url(url, socket_mod=socket):
             url = ""
 
         sig_id = str(art.get("id") or "")

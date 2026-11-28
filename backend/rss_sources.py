@@ -4,8 +4,6 @@ from __future__ import annotations
 import email.utils
 import hashlib
 import html
-import inspect
-import ipaddress
 import json
 import os
 import re
@@ -17,7 +15,7 @@ import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +28,15 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR.parent))
 
-from backend.fred_and_market import COCKPIT_ROOT, DATA_DIR, atomic_write_json
-from backend.public_snapshot import file_lock
+from backend.guardrails import (
+    http_get_no_redirect,
+    is_safe_public_url,
+    resolve_safe_public_ips,
+    scrub_forbidden,
+    strip_emojis as strip_emojis,
+)
+from backend.runtime import BJT, COCKPIT_ROOT, DATA_DIR, UTC, atomic_write_json, file_lock
 
-BJT = timezone(timedelta(hours=8))
-UTC = timezone.utc
 RSS_CACHE_PATH = DATA_DIR / "rss_cache.json"
 RSS_CACHE_TTL = 900  # 15 minutes
 ARTICLE_CACHE_PATH = DATA_DIR / "curated_articles_cache.json"
@@ -363,19 +365,6 @@ CURATED_ARTICLE_FEEDS: tuple[dict[str, str], ...] = (
     },
 )
 
-_FORBIDDEN_SCRUB = (
-    (r"(?<![A-Za-z0-9])(?:E33|E32|E21)(?![A-Za-z0-9])", "波动结构"),
-    (r"(?<![A-Za-z0-9])Tier-1(?![A-Za-z0-9])", "核心"),
-    (r"(?<![A-Za-z0-9])Tier-S(?![A-Za-z0-9])", "高优"),
-    (r"(?<![A-Za-z0-9])Tier-A(?![A-Za-z0-9])", "重点"),
-    (r"(?<![A-Za-z0-9])Sleeves?(?![A-Za-z0-9])", "仓位"),
-    (r"(?<![A-Za-z0-9])Regimes?(?![A-Za-z0-9])", "市场周期"),
-    (r"(?<![A-Za-z0-9])arbitration(?![A-Za-z0-9])", "风险评估"),
-    (r"(?<![A-Za-z0-9])N/A(?![A-Za-z0-9])", "—"),
-    (r"测算口径|公式解释|公式说明|逻辑解释|联动说明|方法论说明", "规则摘要"),
-    (r"待刷新|待补", "—"),
-)
-
 _TICKER_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bAAPL\b|Apple|苹果|iPhone|iPad|MacBook", "AAPL"),
     (r"\bNVDA\b|Nvidia|英伟达|黄仁勋|Blackwell|Rubin|CUDA", "NVDA"),
@@ -421,17 +410,6 @@ _BEAR_WORDS = re.compile(
 )
 
 
-def _scrub_forbidden(text: str) -> str:
-    s = str(text or "")
-    for pat, rep in _FORBIDDEN_SCRUB:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    return s
-
-
-_EMOJI_RE = re.compile(
-    r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u26FF\u2702-\u2712\u2716-\u27BF"
-    r"\u231A-\u231B\u23E9-\u23FA\u25FD-\u25FE\u2B50\u2B55\uFE0E\uFE0F\u200D\u20E3]+"
-)
 _WIRE_DATELINE_RE = re.compile(
     r"^(?:财联社|华尔街见闻|科创板日报|证券时报|新京报)\s*\d{1,2}月\d{1,2}日(?:电|讯)[，,：:\s]*"
 )
@@ -441,10 +419,7 @@ _EQN_ROUTINE_LISTING_RE = re.compile(
 )
 
 
-def strip_emojis(text: str) -> str:
-    """Remove pictographic/color/flag/dingbat/keycap emojis while preserving checkmarks, arrows, and CJK punctuation."""
-    s = _EMOJI_RE.sub("", str(text or ""))
-    return re.sub(r"[ \t]{2,}", " ", s).strip()
+_scrub_forbidden = scrub_forbidden
 
 
 def _norm_dup_key(text: str) -> str:
@@ -549,7 +524,7 @@ def html_to_clean_markdown(raw_html: str, *, max_chars: int = 16000) -> str:
     s = re.sub(r"</(?:p|div|section|article|ul|ol|tr|table)>", "\n\n", s, flags=re.IGNORECASE)
     s = re.sub(r"<[^>]+>", " ", s)
     s = html.unescape(s)
-    s = _scrub_forbidden(s)
+    s = scrub_forbidden(s, preserve_newlines=True)
     s = strip_emojis(s)
 
     lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in s.splitlines()]
@@ -1580,183 +1555,6 @@ def _save_cached_fulltext(
             pass
 
 
-_CLASH_FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
-
-
-def _is_forbidden_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_clash_fake_ip: bool = False) -> bool:
-    if allow_clash_fake_ip and ip_obj in _CLASH_FAKE_IP_NET:
-        return False
-    return bool(
-        ip_obj.is_private
-        or ip_obj.is_loopback
-        or ip_obj.is_link_local
-        or ip_obj.is_reserved
-        or ip_obj.is_multicast
-        or ip_obj.is_unspecified
-    )
-
-
-def _resolve_safe_public_ips(url: str) -> tuple[bool, list[str]]:
-    """Validate URL safety once via DNS and return (ok, pinned_public_ips)."""
-    raw = str(url or "").strip()
-    if not raw:
-        return (False, [])
-    try:
-        parsed = urllib.parse.urlsplit(raw)
-    except Exception:
-        return (False, [])
-    scheme = parsed.scheme.lower()
-    if scheme not in ("http", "https"):
-        return (False, [])
-    host = (parsed.hostname or "").strip().lower().rstrip(".")
-    if not host:
-        return (False, [])
-    if host in ("localhost", "ip6-localhost") or host.endswith((".local", ".internal", ".localhost")):
-        return (False, [])
-    host_unbracketed = host.strip("[]")
-    try:
-        ip = ipaddress.ip_address(host_unbracketed)
-        if _is_forbidden_ip(ip, allow_clash_fake_ip=False):
-            return (False, [])
-        return (True, [str(ip)])
-    except ValueError:
-        resolved: list[str] = []
-        try:
-            port = parsed.port or (443 if scheme == "https" else 80)
-            addrs = socket.getaddrinfo(host_unbracketed, port, type=socket.SOCK_STREAM)
-            for _fam, _type, _proto, _canon, sockaddr in addrs:
-                if not sockaddr:
-                    continue
-                ip_str = str(sockaddr[0]).split("%", 1)[0]
-                resolved_ip = ipaddress.ip_address(ip_str)
-                if _is_forbidden_ip(resolved_ip, allow_clash_fake_ip=True):
-                    return (False, [])
-                if ip_str not in resolved:
-                    resolved.append(ip_str)
-        except OSError:
-            pass
-        return (True, resolved)
-
-
-def _is_safe_public_url(url: str) -> bool:
-    """Block non-HTTP(S), localhost, .local/.internal, and private/loopback/reserved IP literals."""
-    ok, _ips = _resolve_safe_public_ips(url)
-    return ok
-
-
-def _supports_allow_redirects(getter: Any) -> bool:
-    try:
-        target = getattr(getter, "side_effect", None)
-        if callable(target):
-            getter = target
-        sig = inspect.signature(getter)
-        return any(
-            p.name == "allow_redirects" or p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in sig.parameters.values()
-        )
-    except (TypeError, ValueError):
-        return False
-
-
-def _make_pinned_adapter(expected_host: str, pinned_ip: str):
-    """Build an HTTPAdapter whose underlying socket connects strictly to pinned_ip while preserving TLS SNI."""
-    from requests.adapters import HTTPAdapter
-    from urllib3 import PoolManager
-    from urllib3.connection import HTTPConnection, HTTPSConnection
-    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
-    from urllib3.util import connection as urllib3_util_conn
-
-    target_host = expected_host.strip().lower().rstrip(".")
-
-    class _PinnedHTTPConn(HTTPConnection):
-        def _new_conn(self):
-            cur_host = str(getattr(self, "host", "") or "").strip().lower().rstrip(".")
-            if cur_host == target_host:
-                if hasattr(self, "_dns_host"):
-                    orig = self._dns_host
-                    self._dns_host = pinned_ip
-                    try:
-                        return super()._new_conn()
-                    finally:
-                        self._dns_host = orig
-                return urllib3_util_conn.create_connection(
-                    (pinned_ip, self.port),
-                    self.timeout,
-                    source_address=self.source_address,
-                    socket_options=self.socket_options,
-                )
-            return super()._new_conn()
-
-    class _PinnedHTTPSConn(HTTPSConnection):
-        def _new_conn(self):
-            cur_host = str(getattr(self, "host", "") or "").strip().lower().rstrip(".")
-            if cur_host == target_host:
-                if hasattr(self, "_dns_host"):
-                    orig = self._dns_host
-                    self._dns_host = pinned_ip
-                    try:
-                        return super()._new_conn()
-                    finally:
-                        self._dns_host = orig
-                return urllib3_util_conn.create_connection(
-                    (pinned_ip, self.port),
-                    self.timeout,
-                    source_address=self.source_address,
-                    socket_options=self.socket_options,
-                )
-            return super()._new_conn()
-
-    class _PinnedHTTPPool(HTTPConnectionPool):
-        ConnectionCls = _PinnedHTTPConn
-
-    class _PinnedHTTPSPool(HTTPSConnectionPool):
-        ConnectionCls = _PinnedHTTPSConn
-
-    class _PinnedPoolManager(PoolManager):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.pool_classes_by_scheme = {"http": _PinnedHTTPPool, "https": _PinnedHTTPSPool}
-
-    class _PinnedHTTPAdapter(HTTPAdapter):
-        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-            self._pool_connections = connections
-            self._pool_maxsize = maxsize
-            self._pool_block = block
-            self.poolmanager = _PinnedPoolManager(
-                num_pools=connections,
-                maxsize=maxsize,
-                block=block,
-                **pool_kwargs,
-            )
-
-    return _PinnedHTTPAdapter()
-
-
-def _http_get_no_redirect(url: str, *, headers: dict[str, str], timeout: int, pinned_ip: str | None = None) -> Any:
-    getter = getattr(requests, "get", None)
-    is_real_requests = (
-        callable(getter)
-        and getattr(getter, "__module__", "").startswith("requests.")
-        and type(getter).__name__ == "function"
-    )
-    if pinned_ip and is_real_requests and hasattr(requests, "Session"):
-        host = (urllib.parse.urlsplit(url).hostname or "").strip().lower().rstrip(".")
-        with requests.Session() as sess:
-            adapter = _make_pinned_adapter(host, pinned_ip)
-            sess.mount("https://", adapter)
-            sess.mount("http://", adapter)
-            return sess.get(url, headers=headers, timeout=timeout, allow_redirects=False)
-
-    kw: dict[str, Any] = {"headers": headers, "timeout": timeout}
-    if _supports_allow_redirects(requests.get):
-        kw["allow_redirects"] = False
-    try:
-        return requests.get(url, **kw)
-    except TypeError:
-        kw.pop("allow_redirects", None)
-        return requests.get(url, **kw)
-
-
 def _is_skipped_paywall_domain(url: str) -> bool:
     try:
         host = (urllib.parse.urlsplit(str(url or "")).hostname or "").strip().lower()
@@ -1867,7 +1665,7 @@ def fetch_url_fulltext_markdown(
 ) -> tuple[str, str]:
     """Safely fetch and extract clean Markdown fulltext from X or public web articles."""
     target_url = str(url or "").strip()
-    safe_ok, initial_ips = _resolve_safe_public_ips(target_url)
+    safe_ok, initial_ips = resolve_safe_public_ips(target_url, socket_mod=socket)
     if not safe_ok:
         return ("", "blocked_ssrf")
     if _is_skipped_paywall_domain(target_url):
@@ -1886,15 +1684,16 @@ def fetch_url_fulltext_markdown(
     if m_x:
         author, tid = m_x.group(1), m_x.group(2)
         fx_url = f"https://api.fxtwitter.com/{urllib.parse.quote(author)}/status/{tid}"
-        fx_ok, fx_ips = _resolve_safe_public_ips(fx_url)
+        fx_ok, fx_ips = resolve_safe_public_ips(fx_url, socket_mod=socket)
         if not fx_ok:
             return ("", "blocked_ssrf")
         try:
-            resp = _http_get_no_redirect(
+            resp = http_get_no_redirect(
                 fx_url,
                 headers={**_HEADERS, "Accept": "application/json"},
                 timeout=timeout,
                 pinned_ip=fx_ips[0] if fx_ips else None,
+                requests_mod=requests,
             )
             if resp.status_code in (301, 302, 303, 307, 308):
                 return ("", "failed")
@@ -1917,7 +1716,7 @@ def fetch_url_fulltext_markdown(
                 body_txt = "\n\n".join(parts) if parts else str(tw.get("text") or "").strip()
                 if art_title and body_txt and not body_txt.startswith(art_title):
                     body_txt = f"# {art_title}\n\n{body_txt}"
-                body_clean = _scrub_forbidden(re.sub(r"\n{3,}", "\n\n", body_txt).strip())
+                body_clean = scrub_forbidden(re.sub(r"\n{3,}", "\n\n", body_txt).strip(), preserve_newlines=True)
                 if len(body_clean) >= 200 and not _looks_like_bot_challenge(body_clean):
                     body_out = body_clean[:max_chars]
                     if use_cache:
@@ -1937,18 +1736,19 @@ def fetch_url_fulltext_markdown(
             if _hop == 0:
                 safe_ok, resolved_ips = True, initial_ips
             else:
-                safe_ok, resolved_ips = _resolve_safe_public_ips(cur_url)
+                safe_ok, resolved_ips = resolve_safe_public_ips(cur_url, socket_mod=socket)
             if not safe_ok:
                 return ("", "blocked_ssrf")
             if _is_skipped_paywall_domain(cur_url):
                 if use_cache:
                     _save_cached_fulltext(cache_key, text="", status="skipped_paywall", cache_path=cache_path)
                 return ("", "skipped_paywall")
-            resp = _http_get_no_redirect(
+            resp = http_get_no_redirect(
                 cur_url,
                 headers=req_headers,
                 timeout=timeout,
                 pinned_ip=resolved_ips[0] if resolved_ips else None,
+                requests_mod=requests,
             )
             if resp.status_code in (301, 302, 303, 307, 308):
                 loc = str((getattr(resp, "headers", None) or {}).get("Location") or (getattr(resp, "headers", None) or {}).get("location") or "").strip()
@@ -1960,7 +1760,7 @@ def fetch_url_fulltext_markdown(
         if resp is None:
             return ("", "failed")
         final_url = str(getattr(resp, "url", "") or cur_url)
-        if final_url and final_url != cur_url and not _is_safe_public_url(final_url):
+        if final_url and final_url != cur_url and not is_safe_public_url(final_url, socket_mod=socket):
             return ("", "blocked_ssrf")
         if final_url and _is_skipped_paywall_domain(final_url):
             if use_cache:
@@ -1990,14 +1790,15 @@ def fetch_url_fulltext_markdown(
     # Route 3: Jina Reader fallback for JS-rendered pages (never bypasses bot challenges, no auto-redirects)
     if allow_jina_fallback:
         jina_url = f"https://r.jina.ai/{target_url}"
-        j_ok, j_ips = _resolve_safe_public_ips(jina_url)
+        j_ok, j_ips = resolve_safe_public_ips(jina_url, socket_mod=socket)
         if j_ok:
             try:
-                resp_j = _http_get_no_redirect(
+                resp_j = http_get_no_redirect(
                     jina_url,
                     headers={**_HEADERS, "Accept": "text/markdown, text/plain"},
                     timeout=timeout,
                     pinned_ip=j_ips[0] if j_ips else None,
+                    requests_mod=requests,
                 )
                 if resp_j.status_code in (301, 302, 303, 307, 308):
                     return ("", "failed")
@@ -2006,7 +1807,7 @@ def fetch_url_fulltext_markdown(
                     marker = "Markdown Content:"
                     if marker in jina_raw[:1500]:
                         jina_raw = jina_raw.split(marker, 1)[1].strip()
-                    jina_clean = _scrub_forbidden(re.sub(r"\n{3,}", "\n\n", jina_raw).strip())
+                    jina_clean = scrub_forbidden(re.sub(r"\n{3,}", "\n\n", jina_raw).strip(), preserve_newlines=True)
                     if not _looks_like_bot_challenge(jina_clean) and len(jina_clean) >= 400:
                         jina_out = jina_clean[:max_chars]
                         if use_cache:
@@ -2394,7 +2195,7 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
             continue
         aid = str(raw.get("id") or "").strip()
         orig = str(((raw.get("links") or {}).get("original")) or "").strip()
-        if not orig or not _is_safe_public_url(orig) or _is_skipped_paywall_domain(orig):
+        if not orig or not is_safe_public_url(orig, socket_mod=socket) or _is_skipped_paywall_domain(orig):
             continue
         host = (urllib.parse.urlsplit(orig).hostname or "").lower()
         if host in ("aihot.news", "www.aihot.news"):
@@ -2462,7 +2263,7 @@ def _fetch_aihot_hot_articles(timeout: int = 10) -> list[dict[str, Any]]:
         ]
         if sp["aihot_summary"]:
             meta_lines.append(f"\n> **AIHOT 摘要**：{sp['aihot_summary']}")
-        body_md = _scrub_forbidden("\n".join(meta_lines) + f"\n\n---\n\n{full_md}\n")
+        body_md = scrub_forbidden("\n".join(meta_lines) + f"\n\n---\n\n{full_md}\n", preserve_newlines=True) + "\n"
 
         first_line = next((ln for ln in full_md.splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
         summary = sp["aihot_summary"] or _clean_text(first_line, max_len=200) or sp["title"]
@@ -2626,7 +2427,7 @@ def collect_curated_articles(
                 "url": str(it.get("url") or ""),
                 "score": int(it.get("attention_score") or 0),
                 "time_bjt": str(it.get("time_bjt") or ""),
-                "body_md": _scrub_forbidden(str(it.get("body_md") or "")),
+                "body_md": scrub_forbidden(it.get("body_md"), preserve_newlines=True),
             }
             for it in balanced
         ]
