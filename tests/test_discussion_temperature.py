@@ -7,6 +7,7 @@ from backend.discussion_temperature import (
     ASSETS,
     BJT,
     PLATFORMS,
+    TREND_METHOD,
     daily_observations,
     discussion_trends,
     project_discussion_trends,
@@ -34,6 +35,7 @@ def _history(steps, *, platforms=PLATFORMS[:2], asset="GOLD"):
         day.isoformat(): {
             platform: {
                 "sample_size": 20,
+                "board_hits": {symbol: count if symbol == asset else 0 for symbol in ASSETS},
                 "hits": {symbol: count if symbol == asset else 0 for symbol in ASSETS},
             } for platform in platforms
         } for day, count in zip(days, steps) if count is not None
@@ -78,8 +80,10 @@ def test_snapshot_deduplicates_and_never_assumes_missing_is_zero():
     observations = daily_observations(feeds, NOW)
     assert set(observations) == {"weibo", "baidu", "toutiao"}
     assert observations["weibo"]["sample_size"] == 19  # punctuation copy collapsed
+    assert observations["weibo"]["board_hits"]["GOLD"] == 2  # locally deduped first
     assert observations["weibo"]["hits"]["GOLD"] == 1  # copied cross-feed headline excluded
-    assert observations["baidu"]["hits"]["GOLD"] == 0  # actual observed board, not an outage
+    assert observations["baidu"]["board_hits"]["GOLD"] == 1
+    assert observations["baidu"]["hits"]["GOLD"] == 0  # copy absent from independent count, not an outage
     assert observations["baidu"]["hits"]["02513.HK"] == 1
     assert observations["baidu"]["hits"]["00100.HK"] == 1  # not the algorithm
     assert observations["baidu"]["hits"]["QQQ"] == 0
@@ -106,6 +110,72 @@ def test_persistence_high_flat_cooling_asset_isolation_and_stale():
         assert _window(rising, period, today=TODAY + timedelta(days=2))["state"] == "insufficient"
     assert _window(_history([None, None, 0, 4, 4, 4, 4]))["state"] == "insufficient"
     assert _window(_history([0, 0, 0, 4, 4, 4, 0]))["state"] == "stable"
+
+
+def test_mirror_board_disappearing_or_returning_does_not_change_attention():
+    weibo_titles = ("黄金市场甲方观察", "金价亚洲早盘简报")
+    baidu_titles = ("黄金投资乙方访谈", "金条门店行情交流")
+
+    def simulate(mirror_present):
+        history = {}
+        for day, copies_present in enumerate(mirror_present):
+            ts = NOW - timedelta(days=6 - day)
+            feeds = {
+                "weibo": _feed("weibo", *weibo_titles, now=ts),
+                "baidu": _feed("baidu", *baidu_titles, now=ts),
+            }
+            if copies_present:
+                feeds["zhihu"] = _feed("zhihu", *weibo_titles, *baidu_titles, now=ts)
+            history[ts.date().isoformat()] = daily_observations(feeds, ts)
+        return _window(history)
+
+    disappears = simulate([True] * 3 + [False] * 4)
+    returns = simulate([False] * 3 + [True] * 4)
+    for observed in (disappears, returns):
+        assert observed["state"] == "stable"
+        assert observed["platforms"] == 2
+        assert all(row["state"] == "stable" for row in observed["sources"])
+
+
+def test_direction_requires_joint_confirmation_on_the_same_days():
+    # Each series separately clears 60% of the recent days, but their supporting
+    # days disagree. Computing the two persistence counts separately would warn.
+    local = [4] * 15 + [8, 8, 4, 4, 8] * 3
+    independent = [0] * 15 + [0, 0, 4, 4, 4] * 3
+    history = _history(independent)
+    for day, board_h in zip(history.values(), local):
+        for row in day.values():
+            row["board_hits"]["GOLD"] = board_h
+    mixed = _window(history, 30)
+    assert mixed["state"] == "stable"
+    assert all(source["state"] == "stable" for source in mixed["sources"])
+
+    same_day = _history([0] * 15 + [4] * 15)
+    assert _window(same_day, 30)["state"] == "warming"
+
+
+def test_cache_v1_and_incomplete_or_inconsistent_v2_rows_cannot_confirm(tmp_path):
+    history = _history([0] * 3 + [4] * 4)
+    for obs in history.values():
+        for row in obs.values():
+            row.pop("board_hits")
+    cache = tmp_path / "discussion_temperature_cache.json"
+    cache.write_text(json.dumps({"version": 1, "history": history}), encoding="utf-8")
+    assert refresh_discussion_history(tmp_path, lambda *_: {}, now=NOW + timedelta(hours=4)) == {}
+    assert _window(history)["state"] == "insufficient"
+
+    fresh = refresh_discussion_history(tmp_path, lambda platform: _feed(platform, "现货金", now=NOW), now=NOW)
+    stored = json.loads(cache.read_text(encoding="utf-8"))
+    assert stored["version"] == 2
+    assert list(fresh) == [TODAY.isoformat()]
+    assert "board_hits" in fresh[TODAY.isoformat()]["weibo"]
+    assert "现货金" not in cache.read_text(encoding="utf-8")
+
+    malformed = _history([0] * 3 + [4] * 4)
+    for obs in malformed.values():
+        obs["weibo"]["board_hits"]["GOLD"] = 21  # within-board exceeds its denominator
+        obs["baidu"]["board_hits"]["GOLD"] = 0  # filtered > within on all later days
+    assert _window(malformed)["state"] == "insufficient"
 
 
 def test_daily_cache_is_idempotent_bounded_and_does_not_store_raw_posts(tmp_path):
@@ -143,6 +213,7 @@ def test_whitelisted_public_and_offline_projection_preserves_no_raw_data():
     }
     trend = discussion_trends(history, today=today)
     trend["raw_posts"] = ["not a public aggregate"]
+    trend["assets"][0]["windows"][0]["board_hits"] = {"GOLD": 7}
     trend["assets"][0]["windows"][0]["sources"][0]["hidden_text"] = "not a public aggregate"
     full = {
         "portfolio": {"secret": "nope"},
@@ -159,10 +230,17 @@ def test_whitelisted_public_and_offline_projection_preserves_no_raw_data():
     assert "portfolio" not in projected and "journal" not in projected
     forum = projected["forum_sentiment"]
     assert "hidden_history" not in forum
+    assert forum["discussion_trends"]["method"] == TREND_METHOD
     assert forum["discussion_trends"]["assets"][0]["windows"][0]["state"] == "warming"
     serialized = json.dumps(forum, ensure_ascii=False)
-    for token in ("raw_posts", "hidden_text", "见底", "过热", "立即减仓", "立即买入"):
+    for token in ("raw_posts", "board_hits", "hidden_text", "见底", "过热", "立即减仓", "立即买入"):
         assert token not in serialized
     assert serialized.count("当期") == 4
     assert project_discussion_trends(trend, today=today + timedelta(days=2)) == {}
     assert not project_discussion_trends(trend, today=today - timedelta(days=1))
+
+    # Legacy published ready flags cannot survive a producer/consumer handoff.
+    legacy_trend = {key: value for key, value in trend.items() if key != "method"}
+    assert "discussion_trends" not in project_public_state({
+        "forum_sentiment": {"discussion_trends": legacy_trend}
+    })["forum_sentiment"]

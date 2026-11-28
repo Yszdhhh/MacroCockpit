@@ -16,6 +16,7 @@ from typing import Any, Callable
 BJT = timezone(timedelta(hours=8))
 LOOKBACK_DAYS = 120
 PERIODS = (7, 30, 90)
+TREND_METHOD = "paired-coverage-v2"
 PLATFORMS = ("weibo", "baidu", "toutiao", "douyin", "zhihu", "bilibili-hot-search")
 ASSETS = {
     "GOLD": ("黄金", r"黄金(?!周|时间|档|地段|比例|年龄|搭档|时代|海岸)|金价|金条|现货金|伦敦金|(?<![a-z0-9])(?:xauusd|paxg)(?![a-z0-9])"),
@@ -26,6 +27,7 @@ ASSETS = {
 }
 ASSET_PATTERNS = {key: re.compile(pattern, re.I) for key, (_, pattern) in ASSETS.items()}
 _CACHE_NAME = "discussion_temperature_cache.json"
+_CACHE_VERSION = 2
 _MIN_LIST_SIZE = 12
 SNAPSHOT_TAGS = {
     "热度偏高": "当期关注较高", "散户过热": "当期看多分歧", "出圈见顶": "当期关注较高",
@@ -35,7 +37,7 @@ _LIST_SIZE = 20
 
 
 def _feed_date(payload: dict[str, Any], now: datetime) -> date | None:
-    """Require a current board timestamp, with tighter tolerance for cache hits."""
+    """Require a current board timestamp, including recent provider cache hits."""
     raw = payload.get("updatedTime")
     status = payload.get("status")
     if status not in ("success", "cache") or type(raw) not in (int, float):
@@ -81,6 +83,7 @@ def daily_observations(feeds: dict[str, Any], now: datetime) -> dict[str, dict[s
     return {
         platform: {
             "sample_size": len(titles),
+            "board_hits": {asset: sum(asset in refs for refs in titles.values()) for asset in ASSETS},
             "hits": {
                 asset: sum(asset in refs and appearances[title] == 1 for title, refs in titles.items())
                 for asset in ASSETS
@@ -95,7 +98,7 @@ def _load_cache(path: Path) -> dict[str, Any]:
         if path.stat().st_size > 512_000:
             return {}
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) and raw.get("version") == 1 else {}
+        return raw if isinstance(raw, dict) and raw.get("version") == _CACHE_VERSION else {}
     except (OSError, ValueError):
         return {}
 
@@ -163,7 +166,7 @@ def refresh_discussion_history(
     if len(samples) > len(history.get(key, {})):
         history[key] = samples
     atomic_write_json(path, {
-        "version": 1,
+        "version": _CACHE_VERSION,
         "history": history,
         "attempt": {"date": key, "epoch": now.timestamp(), "count": tries + 1},
     })
@@ -174,7 +177,7 @@ def discussion_trends(history: dict[str, Any], *, today: date | None = None) -> 
     """Summarize persistent warming; no price or one-day score enters this path."""
     today = today or datetime.now(BJT).date()
     days = _retained_days(history, today)
-    result: dict[str, Any] = {"as_of": today.isoformat(), "assets": []}
+    result: dict[str, Any] = {"method": TREND_METHOD, "as_of": today.isoformat(), "assets": []}
     for asset in ASSETS:
         windows = []
         for period in PERIODS:
@@ -191,19 +194,23 @@ def discussion_trends(history: dict[str, Any], *, today: date | None = None) -> 
             deltas = []
             sources = []
             for platform in PLATFORMS:
-                groups: tuple[list[float], list[float]] = ([], [])
+                groups: tuple[list[tuple[float, float]], list[tuple[float, float]]] = ([], [])
                 most_recent = -1
-                last_level = 0.0
+                last_level = (0.0, 0.0)
                 for day_key, entries in days.items():
                     offset = (date.fromisoformat(day_key) - start).days
                     row = entries.get(platform)
                     if offset < 0 or not isinstance(row, dict):
                         continue
-                    n, hits = row.get("sample_size"), row.get("hits")
+                    n, hits, board_hits = row.get("sample_size"), row.get("hits"), row.get("board_hits")
                     h = hits.get(asset) if isinstance(hits, dict) else None
-                    if type(n) is not int or not _MIN_LIST_SIZE <= n <= _LIST_SIZE or type(h) is not int or not 0 <= h <= n:
+                    board_h = board_hits.get(asset) if isinstance(board_hits, dict) else None
+                    if (
+                        type(n) is not int or not _MIN_LIST_SIZE <= n <= _LIST_SIZE
+                        or type(h) is not int or type(board_h) is not int or not 0 <= h <= board_h <= n
+                    ):
                         continue
-                    level = h / n
+                    level = (board_h / n, h / n)
                     if offset > most_recent:
                         most_recent, last_level = offset, level
                     groups[int(offset >= early_len)].append(level)
@@ -212,29 +219,38 @@ def discussion_trends(history: dict[str, Any], *, today: date | None = None) -> 
                     continue
                 comparable += 1
                 counts.append(len(early) + len(late))
-                base, current = median(early), median(late)
-                change = current - base
-                deltas.append(change)
-                up_bar = max(0.08, base + 0.02)
-                up_days = sum(v >= up_bar for v in late)
-                down_days = sum(v <= base - 0.02 for v in late)
+                base = tuple(median(series) for series in zip(*early))
+                current = tuple(median(series) for series in zip(*late))
+                changes = tuple(new - old for new, old in zip(current, base))
+                deltas.append(changes)
+                up_bar = tuple(max(0.08, old + 0.02) for old in base)
+                down_bar = tuple(old - 0.02 for old in base)
+                # Both series must corroborate on the SAME days. The
+                # appearance/disappearance of a mirroring third board can
+                # move the filtered series without changing local attention.
+                up_days = sum(all(v >= bar for v, bar in zip(pair, up_bar)) for pair in late)
+                down_days = sum(all(v <= bar for v, bar in zip(pair, down_bar)) for pair in late)
                 source_state = "stable"
-                if change >= 0.02 and up_days * 5 >= len(late) * 3 and last_level >= up_bar:
+                if min(changes) >= 0.02 and up_days * 5 >= len(late) * 3 and all(
+                    v >= bar for v, bar in zip(last_level, up_bar)
+                ):
                     warming += 1
                     source_state = "warming"
-                elif change <= -0.02 and down_days * 5 >= len(late) * 3 and last_level <= base - 0.02:
+                elif max(changes) <= -0.02 and down_days * 5 >= len(late) * 3 and all(
+                    v <= bar for v, bar in zip(last_level, down_bar)
+                ):
                     cooling += 1
                     source_state = "cooling"
-                elif abs(change) < 0.02 and min(base, current, last_level) >= 0.08:
+                elif max(map(abs, changes)) < 0.02 and min(*base, *current, *last_level) >= 0.08:
                     high += 1
                     source_state = "high"
                 sources.append({"platform": platform, "state": source_state, "sample_days": counts[-1]})
             state = "insufficient"
             if comparable >= 2:
-                weighted = median(deltas)
-                if warming >= 2 and cooling == 0 and weighted >= 0.02:
+                median_changes = tuple(median(series) for series in zip(*deltas))
+                if warming >= 2 and cooling == 0 and min(median_changes) >= 0.02:
                     state = "warming"
-                elif cooling >= 2 and warming == 0 and weighted <= -0.02:
+                elif cooling >= 2 and warming == 0 and max(median_changes) <= -0.02:
                     state = "cooling"
                 elif high >= 2 and warming == 0 and cooling == 0:
                     state = "high"
@@ -250,7 +266,7 @@ def discussion_trends(history: dict[str, Any], *, today: date | None = None) -> 
 
 def project_discussion_trends(value: Any, *, today: date | None = None) -> dict[str, Any]:
     """Whitelist the compact public projection; never expose the history cache."""
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or value.get("method") != TREND_METHOD:
         return {}
     today = today or datetime.now(BJT).date()
     day = _parse_date(value.get("as_of"))
@@ -300,13 +316,15 @@ def project_discussion_trends(value: Any, *, today: date | None = None) -> dict[
             # Derive the published breadth from validated independent platform rows.
             count = len(sources)
             days = min((source["sample_days"] for source in sources), default=0)
+            source_states = [source["state"] for source in sources]
+            conflicts = {"warming": {"cooling"}, "cooling": {"warming"}, "high": {"warming", "cooling"}}
             if count < 2:
                 state = "insufficient"
-            elif state in ("warming", "cooling", "high") and sum(source["state"] == state for source in sources) < 2:
+            elif state in conflicts and (source_states.count(state) < 2 or conflicts[state].intersection(source_states)):
                 state = "stable"
             used.add(period)
             windows.append({"days": period, "state": state, "platforms": count, "sample_days": days, "sources": sources})
         if windows:
             seen.add(asset)
             assets.append({"asset": asset, "windows": sorted(windows, key=lambda w: w["days"])})
-    return {"as_of": day.isoformat(), "assets": assets} if assets else {}
+    return {"method": TREND_METHOD, "as_of": day.isoformat(), "assets": assets} if assets else {}

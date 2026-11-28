@@ -3396,7 +3396,8 @@
 
   function currentDiscussionTrends(fs) {
     const trends = fs && fs.discussion_trends;
-    if (!trends || !/^\d{4}-\d{2}-\d{2}$/.test(String(trends.as_of || ""))) return [];
+    if (!trends || trends.method !== "paired-coverage-v2" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(trends.as_of || ""))) return [];
     const todayBjt = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
     const age = Date.parse(todayBjt) - Date.parse(trends.as_of);
     if (!Number.isFinite(age) || age < 0 || age > 86400000) return [];
